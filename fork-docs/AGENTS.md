@@ -69,3 +69,15 @@ Out of scope for current phase (unless explicitly requested):
 - multi-replica shared-write architecture,
 - advanced dedup identity redesign,
 - large UI redesign for retrospective views.
+
+## 8. Fork docker publish workflow policy
+
+For branch-level auto-publish on `karma-history`:
+
+- publish linux/amd64 image only,
+- do not enable arm64 build in this workflow,
+- keep tag format as `<base-version>-ck-<short-sha>`.
+
+Reason:
+
+- arm64 cross-build through QEMU can stall in Go build stage and make branch CI unstable.
