@@ -103,6 +103,7 @@ const Alert: FC<{
         alert={alert}
         alertStore={alertStore}
         silenceFormStore={silenceFormStore}
+        afterUpdate={afterUpdate}
         setIsMenuOpen={setIsMenuOpen}
       />
       {inhibitedBy.length > 0 ? (

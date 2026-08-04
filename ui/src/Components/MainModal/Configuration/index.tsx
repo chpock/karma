@@ -1,6 +1,7 @@
 import type { FC } from "react";
 
 import type { Settings } from "Stores/Settings";
+import type { AlertStore } from "Stores/AlertStore";
 import { Accordion, AccordionItem } from "Components/Accordion";
 import { FetchConfiguration } from "./FetchConfiguration";
 import { FilterBarConfiguration } from "./FilterBarConfiguration";
@@ -12,11 +13,13 @@ import { AlertGroupTitleBarColor } from "./AlertGroupTitleBarColor";
 import { ThemeConfiguration } from "./ThemeConfiguration";
 import { MultiGridConfiguration } from "./MultiGridConfiguration";
 import { AnimationsConfiguration } from "./AnimationsConfiguration";
+import { ForkStorageStats } from "./ForkStorageStats";
 
 const Configuration: FC<{
+  alertStore: AlertStore;
   settingsStore: Settings;
   defaultIsOpen: boolean;
-}> = ({ settingsStore, defaultIsOpen }) => (
+}> = ({ alertStore, settingsStore, defaultIsOpen }) => (
   <Accordion>
     <AccordionItem
       text="Refresh interval"
@@ -64,6 +67,11 @@ const Configuration: FC<{
     <AccordionItem
       text="Multi-grid source label"
       content={<MultiGridConfiguration settingsStore={settingsStore} />}
+      defaultIsOpen={defaultIsOpen}
+    />
+    <AccordionItem
+      text="Fork storage stats"
+      content={<ForkStorageStats alertStore={alertStore} />}
       defaultIsOpen={defaultIsOpen}
     />
   </Accordion>

@@ -4,6 +4,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 
 import { AlertStore, NewUnappliedFilter } from "Stores/AlertStore";
 import { Settings } from "Stores/Settings";
+import { FormatQuery, QueryOperators, StaticLabels } from "Common/Query";
 import { History, HistoryMenu, ReduceFilter } from "./History";
 
 let alertStore: AlertStore;
@@ -282,6 +283,25 @@ describe("<HistoryMenu />", () => {
       container.querySelector("div.dropdown-menu"),
     ).not.toBeInTheDocument();
 
+    await act(() => promise);
+  });
+
+  it("clicking on 'Show resolved' adds @state=resolved filter", async () => {
+    const promise = Promise.resolve();
+    const { container } = renderHistory();
+    const toggle = container.querySelector("button.cursor-pointer");
+    fireEvent.click(toggle!);
+
+    const button = screen.getByText("Show resolved");
+    fireEvent.click(button);
+    act(() => {
+      jest.runOnlyPendingTimers();
+    });
+
+    expect(alertStore.filters.values).toHaveLength(1);
+    expect(alertStore.filters.values[0].raw).toBe(
+      FormatQuery(StaticLabels.State, QueryOperators.Equal, "resolved"),
+    );
     await act(() => promise);
   });
 

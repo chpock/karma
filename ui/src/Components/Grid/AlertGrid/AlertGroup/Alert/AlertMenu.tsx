@@ -12,6 +12,9 @@ import { faBellSlash } from "@fortawesome/free-solid-svg-icons/faBellSlash";
 import { faExternalLinkAlt } from "@fortawesome/free-solid-svg-icons/faExternalLinkAlt";
 import { faWrench } from "@fortawesome/free-solid-svg-icons/faWrench";
 import { faCopy } from "@fortawesome/free-solid-svg-icons/faCopy";
+import { faCheckCircle } from "@fortawesome/free-solid-svg-icons/faCheckCircle";
+import { faCircleNotch } from "@fortawesome/free-solid-svg-icons/faCircleNotch";
+import { faExclamationCircle } from "@fortawesome/free-solid-svg-icons/faExclamationCircle";
 
 import type {
   APIAlertT,
@@ -66,6 +69,7 @@ interface MenuContentProps {
   afterClick: () => void;
   alertStore: AlertStore;
   silenceFormStore: SilenceFormStore;
+  afterUpdate: () => void;
   ref?: Ref<HTMLDivElement>;
 }
 
@@ -80,8 +84,12 @@ const MenuContent = observer(
     afterClick,
     alertStore,
     silenceFormStore,
+    afterUpdate,
     ref,
   }: MenuContentProps) => {
+    const [isResolving, setIsResolving] = useState<boolean>(false);
+    const [resolveError, setResolveError] = useState<string | null>(null);
+
     const actions: APIAnnotationT[] = [
       ...alert.annotations
         .filter((a) => a.isLink === true)
@@ -90,6 +98,8 @@ const MenuContent = observer(
         .filter((a) => a.isLink === true)
         .filter((a) => a.isAction === true),
     ];
+
+    const canResolve = alert.state === "inactive";
 
     return (
       <FetchPauser alertStore={alertStore}>
@@ -166,6 +176,48 @@ const MenuContent = observer(
             <FontAwesomeIcon className="me-1" icon={faBellSlash} />
             Silence this alert
           </div>
+          <div
+            className={`dropdown-item ${
+              canResolve && !isResolving ? "cursor-pointer" : "disabled"
+            }`}
+            onClick={() => {
+              if (!canResolve || isResolving) {
+                return;
+              }
+              setResolveError(null);
+              setIsResolving(true);
+              void alertStore
+                .resolveAlert(alert.id)
+                .then((result) => {
+                  if (result.ok) {
+                    afterClick();
+                    afterUpdate();
+                  } else {
+                    setResolveError(result.error || "Failed to resolve alert");
+                  }
+                })
+                .finally(() => {
+                  setIsResolving(false);
+                });
+            }}
+          >
+            <FontAwesomeIcon
+              className="me-1"
+              icon={
+                isResolving
+                  ? faCircleNotch
+                  : resolveError
+                    ? faExclamationCircle
+                    : faCheckCircle
+              }
+              spin={isResolving}
+            />
+            {isResolving
+              ? "Resolving..."
+              : resolveError
+                ? "Resolve failed"
+                : "Resolve this alert"}
+          </div>
         </div>
       </FetchPauser>
     );
@@ -177,6 +229,7 @@ interface AlertMenuProps {
   alert: APIAlertT;
   alertStore: AlertStore;
   silenceFormStore: SilenceFormStore;
+  afterUpdate: () => void;
   setIsMenuOpen: (isOpen: boolean) => void;
 }
 
@@ -185,6 +238,7 @@ const AlertMenu: FC<AlertMenuProps> = ({
   alert,
   alertStore,
   silenceFormStore,
+  afterUpdate,
   setIsMenuOpen,
 }) => {
   const [isHidden, setIsHidden] = useState<boolean>(true);
@@ -228,6 +282,7 @@ const AlertMenu: FC<AlertMenuProps> = ({
           alert={alert}
           alertStore={alertStore}
           silenceFormStore={silenceFormStore}
+          afterUpdate={afterUpdate}
           afterClick={hide}
           x={x}
           y={y}

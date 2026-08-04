@@ -3,6 +3,7 @@ import { render } from "@testing-library/react";
 import fetchMock from "@fetch-mock/jest";
 
 import { MockThemeContext } from "__fixtures__/Theme";
+import { AlertStore } from "Stores/AlertStore";
 import { Settings } from "Stores/Settings";
 import { ThemeContext } from "Components/Theme";
 import { Configuration } from ".";
@@ -22,10 +23,15 @@ afterEach(() => {
 
 describe("<Configuration />", () => {
   it("matches snapshot", () => {
+    const alertStore = new AlertStore([]);
     const settingsStore = new Settings(null);
     const { asFragment } = render(
       <ThemeContext value={MockThemeContext}>
-        <Configuration settingsStore={settingsStore} defaultIsOpen={true} />
+        <Configuration
+          alertStore={alertStore}
+          settingsStore={settingsStore}
+          defaultIsOpen={true}
+        />
       </ThemeContext>,
     );
     expect(asFragment()).toMatchSnapshot();

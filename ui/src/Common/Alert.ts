@@ -20,6 +20,31 @@ export const alertToJSON = (
 ): VanillaAlertT[] => {
   const alerts: VanillaAlertT[] = [];
 
+  if (alert.alertmanager.length === 0) {
+    return [
+      {
+        labels: Object.fromEntries([
+          ...group.labels.map((l) => [l.name, l.value]),
+          ...group.shared.labels.map((l) => [l.name, l.value]),
+          ...alert.labels.map((l) => [l.name, l.value]),
+        ]),
+        annotations: Object.fromEntries([
+          ...group.shared.annotations.map((l) => [l.name, l.value]),
+          ...alert.annotations.map((l) => [l.name, l.value]),
+        ]),
+        fingerprint: alert.id,
+        receivers: [alert.receiver],
+        startsAt: alert.startsAt,
+        generatorURL: "",
+        status: {
+          inhibitedBy: [],
+          silencedBy: [],
+          state: alert.state,
+        },
+      },
+    ];
+  }
+
   alert.alertmanager
     .map((am) => ({
       labels: Object.fromEntries([

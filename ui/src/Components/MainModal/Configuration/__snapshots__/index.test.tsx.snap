@@ -661,6 +661,33 @@ exports[`<Configuration /> matches snapshot 1`] = `
         </div>
       </div>
     </div>
+    <div
+      class="accordion-item"
+    >
+      <h2
+        class="accordion-header"
+      >
+        <button
+          class="accordion-button "
+          type="button"
+        >
+          Fork storage stats
+        </button>
+      </h2>
+      <div
+        class="accordion-collapse show"
+      >
+        <div
+          class="accordion-body"
+        >
+          <div
+            class="text-muted"
+          >
+            Loading storage stats...
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </DocumentFragment>
 `;

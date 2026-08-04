@@ -2,7 +2,7 @@ import { observable, action, computed, toJS } from "mobx";
 
 import { throttle } from "es-toolkit";
 
-import { FetchGet } from "Common/Fetch";
+import { CommonOptions, FetchGet } from "Common/Fetch";
 import type {
   APIAlertmanagerUpstreamT,
   APILabelColorT,
@@ -197,6 +197,7 @@ interface AlertStoreStatusT {
   togglePause: () => void;
   stop: () => void;
   setError: (e: null | string) => void;
+  forceNextFetch: () => void;
 }
 
 interface AlertStoreUIT {
@@ -542,6 +543,9 @@ class AlertStore {
         setError(e: null | string) {
           this.error = e;
         },
+        forceNextFetch() {
+          this.lastUpdateAt = 0;
+        },
       },
       {
         setIdle: action,
@@ -553,6 +557,7 @@ class AlertStore {
         togglePause: action.bound,
         stop: action.bound,
         setError: action.bound,
+        forceNextFetch: action.bound,
       },
       { name: "Store status" },
     );
@@ -742,6 +747,50 @@ class AlertStore {
 
     return { error: err };
   });
+
+  resolveAlert = async (
+    alertID: string,
+    comment?: string,
+  ): Promise<{ ok: boolean; error: string | null }> => {
+    const uri = FormatBackendURI(`alerts/${encodeURIComponent(alertID)}/resolve`);
+    const body = comment && comment.trim() !== "" ? { comment } : undefined;
+
+    try {
+      const res = await fetch(uri, {
+        ...CommonOptions,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      if (!res.ok) {
+        let message = `${res.status} ${res.statusText}`;
+        const contentType = res.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const payload = await res.json();
+          if (payload && typeof payload.error === "string") {
+            message = payload.error;
+          }
+        } else {
+          const text = await res.text();
+          if (text) {
+            message = text;
+          }
+        }
+        return { ok: false, error: message };
+      }
+
+      this.status.forceNextFetch();
+      return { ok: true, error: null };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : `unknown error: ${err}`,
+      };
+    }
+  };
 }
 
 export {

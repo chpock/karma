@@ -9,12 +9,16 @@ const BorderClassMap = Object.freeze({
   active: "border-danger",
   suppressed: "border-success",
   unprocessed: "border-secondary",
+  inactive: "border-warning",
+  resolved: "border-secondary",
 });
 
 const BackgroundClassMap = Object.freeze({
   active: "bg-danger",
   suppressed: "bg-success",
   unprocessed: "bg-secondary",
+  inactive: "bg-warning",
+  resolved: "bg-secondary",
 });
 
 const StaticColorLabelClassMap = Object.freeze({
@@ -31,6 +35,8 @@ const StateLabelClassMap = Object.freeze({
   active: "danger",
   suppressed: "success",
   unprocessed: "secondary",
+  inactive: "warning",
+  resolved: "secondary",
 });
 
 export {

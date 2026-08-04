@@ -50,6 +50,7 @@ const MainModalContent: FC<{
         {tab === "help" ? <Help defaultIsOpen={expandAllOptions} /> : null}
         {tab === "configuration" ? (
           <Configuration
+            alertStore={alertStore}
             settingsStore={settingsStore}
             defaultIsOpen={expandAllOptions}
           />

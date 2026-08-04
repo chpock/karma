@@ -62,6 +62,8 @@ const MockAlertGroup = (
     active: {},
     suppressed: {},
     unprocessed: {},
+    inactive: {},
+    resolved: {},
   },
   id: "839708582c92ce59088d0af392601eec2d0fc02b",
   alertmanagerCount: {
@@ -71,6 +73,8 @@ const MockAlertGroup = (
     active: 1,
     suppressed: 0,
     unprocessed: 0,
+    inactive: 0,
+    resolved: 0,
   },
   shared: {
     annotations: sharedAnnotations,

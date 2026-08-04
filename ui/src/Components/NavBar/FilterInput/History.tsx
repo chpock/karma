@@ -21,9 +21,11 @@ import { faCaretDown } from "@fortawesome/free-solid-svg-icons/faCaretDown";
 import { faSave } from "@fortawesome/free-regular-svg-icons/faSave";
 import { faUndoAlt } from "@fortawesome/free-solid-svg-icons/faUndoAlt";
 import { faTrash } from "@fortawesome/free-solid-svg-icons/faTrash";
+import { faCheckCircle } from "@fortawesome/free-solid-svg-icons/faCheckCircle";
 
 import type { AlertStore, FilterT } from "Stores/AlertStore";
 import type { Settings } from "Stores/Settings";
+import { FormatQuery, QueryOperators, StaticLabels } from "Common/Query";
 import { IsMobile } from "Common/Device";
 import { localStored } from "Common/LocalStore";
 import { DropdownSlide } from "Components/Animations/DropdownSlide";
@@ -151,6 +153,20 @@ const HistoryMenu: FC<{
           icon={faUndoAlt}
           title="Reset filters"
           action={settingsStore.savedFilters.clear}
+          afterClick={afterClick}
+        />
+        <ActionButton
+          colorClass="btn-warning"
+          icon={faCheckCircle}
+          title="Show resolved"
+          action={() => {
+            const filter = FormatQuery(
+              StaticLabels.State,
+              QueryOperators.Equal,
+              "resolved",
+            );
+            alertStore.filters.addFilter(filter);
+          }}
           afterClick={afterClick}
         />
         <ActionButton

@@ -94,6 +94,7 @@ const renderAlertMenu = (group: APIAlertGroupT) => {
       alert={alert}
       alertStore={alertStore}
       silenceFormStore={silenceFormStore}
+      afterUpdate={MockAfterClick}
       setIsMenuOpen={MockSetIsMenuOpen}
     />,
   );
@@ -169,6 +170,7 @@ const renderMenuContent = (group: APIAlertGroupT) => {
       afterClick={MockAfterClick}
       alertStore={alertStore}
       silenceFormStore={silenceFormStore}
+      afterUpdate={MockAfterClick}
     />,
   );
 };

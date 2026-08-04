@@ -1,4 +1,9 @@
-export type AlertStateT = "unprocessed" | "active" | "suppressed";
+export type AlertStateT =
+  | "unprocessed"
+  | "active"
+  | "suppressed"
+  | "inactive"
+  | "resolved";
 
 interface LabelT {
   name: string;
@@ -56,6 +61,8 @@ interface StateCountT {
   active: number;
   suppressed: number;
   unprocessed: number;
+  inactive: number;
+  resolved: number;
 }
 
 export interface APIAlertGroupT {
@@ -68,6 +75,8 @@ export interface APIAlertGroupT {
     active: { [key: string]: string[] };
     suppressed: { [key: string]: string[] };
     unprocessed: { [key: string]: string[] };
+    inactive: { [key: string]: string[] };
+    resolved: { [key: string]: string[] };
   };
   alertmanagerCount: { [key: string]: number };
   stateCount: StateCountT;
@@ -247,6 +256,22 @@ export interface AlertListResponseT {
 export interface CountersResponseT {
   total: number;
   counters: APILabelCounterT[];
+}
+
+export interface APIAlertLifecycleStatsResponseT {
+  status: string;
+  storageEnabled: boolean;
+  sqlitePath: string;
+  retentionTTLHours: number;
+  maxAlerts: number;
+  currentRows?: number;
+  historyRows?: number;
+  fileSizeBytes?: number;
+  pageCount?: number;
+  pageSizeBytes?: number;
+  freelistCount?: number;
+  lastHousekeepingAt?: string | null;
+  lastIncrementalVacuumAt?: string | null;
 }
 
 export interface AlertsRequestT {
