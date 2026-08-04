@@ -61,8 +61,8 @@ interface StateCountT {
   active: number;
   suppressed: number;
   unprocessed: number;
-  inactive: number;
-  resolved: number;
+  inactive?: number;
+  resolved?: number;
 }
 
 export interface APIAlertGroupT {

@@ -313,6 +313,7 @@ describe("<MenuContent />", () => {
         afterClick={MockAfterClick}
         alertStore={alertStore}
         silenceFormStore={silenceFormStore}
+        afterUpdate={MockAfterClick}
       />,
     );
 
@@ -336,6 +337,7 @@ describe("<MenuContent />", () => {
         afterClick={MockAfterClick}
         alertStore={alertStore}
         silenceFormStore={silenceFormStore}
+        afterUpdate={MockAfterClick}
       />,
     );
 
@@ -359,6 +361,7 @@ describe("<MenuContent />", () => {
         afterClick={MockAfterClick}
         alertStore={alertStore}
         silenceFormStore={silenceFormStore}
+        afterUpdate={MockAfterClick}
       />,
     );
 
