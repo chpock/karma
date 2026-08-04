@@ -11,6 +11,14 @@ type stateFilter struct {
 }
 
 func (filter *stateFilter) Match(alert *models.Alert, _ int) bool {
+	if len(alert.Alertmanager) == 0 {
+		if filter.matcher.Compare(alert.State.String(), filter.value) {
+			filter.hits++
+			return true
+		}
+		return false
+	}
+
 	var isMatch bool
 	for _, am := range alert.Alertmanager {
 		if filter.matcher.Compare(am.State.String(), filter.value) {

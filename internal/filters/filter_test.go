@@ -82,6 +82,24 @@ var tests = []filterTest{
 		IsAlertmanagerMatch: true,
 	},
 	{
+		Expression: "@state=inactive",
+		IsValid:    true,
+		Alert: models.Alert{
+			State: models.AlertStateInactive,
+		},
+		IsMatch:             true,
+		IsAlertmanagerMatch: true,
+	},
+	{
+		Expression: "@state=resolved",
+		IsValid:    true,
+		Alert: models.Alert{
+			State: models.AlertStateResolved,
+		},
+		IsMatch:             true,
+		IsAlertmanagerMatch: true,
+	},
+	{
 		Expression: "@state!=suppressed",
 		IsValid:    true,
 		Alert: models.Alert{

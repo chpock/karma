@@ -199,9 +199,9 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 	silences := map[string]map[string]models.Silence{}
 	allReceivers := map[string]struct{}{}
 
-	dedupedAlerts := alertmanager.DedupAlerts()
-	dedupedColors := alertmanager.DedupColors()
 	matchFilters := getFiltersFromQuery(request.Filters)
+	dedupedAlerts := dedupedAlertsWithLifecycle(matchFilters)
+	dedupedColors := alertmanager.DedupColors()
 	filtered := filterAlerts(dedupedAlerts, matchFilters)
 
 	gridLabel := request.GridLabel
@@ -293,7 +293,7 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 
-				alert.State = stateFromStateCount(stateCount)
+				alert.State = stateFromStateCount(stateCount, alert.State)
 
 				agCopy.Alerts = append(agCopy.Alerts, alert)
 
@@ -641,7 +641,7 @@ func silences(w http.ResponseWriter, r *http.Request) {
 	for _, silence := range dedupedSilences {
 		silenceCounters[silence.Silence.ID] = 0
 	}
-	for _, alertGroup := range alertmanager.DedupAlerts() {
+	for _, alertGroup := range dedupedAlertsWithLifecycle(nil) {
 		for _, alert := range alertGroup.Alerts {
 			sidDone := map[string]struct{}{}
 			for _, am := range alert.Alertmanager {
@@ -690,7 +690,7 @@ func alertList(w http.ResponseWriter, r *http.Request) {
 
 	q, _ := lookupQueryStringSlice(r, "q")
 	matchFilters := getFiltersFromQuery(q)
-	dedupedAlerts := alertmanager.DedupAlerts()
+	dedupedAlerts := dedupedAlertsWithLifecycle(matchFilters)
 	filtered := filterAlerts(dedupedAlerts, matchFilters)
 
 	labelMap := map[string]map[string]string{}
@@ -767,7 +767,7 @@ func counters(w http.ResponseWriter, r *http.Request) {
 
 	q, _ := lookupQueryStringSlice(r, "q")
 	matchFilters := getFiltersFromQuery(q)
-	dedupedAlerts := alertmanager.DedupAlerts()
+	dedupedAlerts := dedupedAlertsWithLifecycle(matchFilters)
 	filtered := filterAlerts(dedupedAlerts, matchFilters)
 	upstreams := getUpstreams()
 	counters := map[string]map[string]int{}
@@ -787,7 +787,7 @@ func counters(w http.ResponseWriter, r *http.Request) {
 			for _, am := range alert.Alertmanager {
 				stateCount[am.State.String()]++
 			}
-			alert.State = stateFromStateCount(stateCount)
+			alert.State = stateFromStateCount(stateCount, alert.State)
 
 			if len(upstreams.Clusters) > 1 {
 				clusters := map[string]struct{}{}

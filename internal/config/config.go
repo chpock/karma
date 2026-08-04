@@ -65,6 +65,12 @@ func SetupFlags(f *pflag.FlagSet) {
 	f.String("alertAcknowledgement.author", "karma", "Default silence author when acknowledging alerts with short lived silences")
 	f.String("alertAcknowledgement.comment", "ACK! This alert was acknowledged using karma on %NOW%", "Comment used when acknowledging alerts with short lived silences")
 
+	f.Bool("alertLifecycle.enabled", true, "Enable persistent alert lifecycle storage")
+	f.String("alertLifecycle.sqlite.path", "./var/karma-alert-history.sqlite", "SQLite path used for persistent alert lifecycle storage")
+	f.Duration("alertLifecycle.retention.ttl", time.Hour*24*30, "TTL for stored alert lifecycle records")
+	f.Int("alertLifecycle.retention.maxAlerts", 100000, "Maximum number of alert records to keep in persistent lifecycle storage")
+	f.Duration("alertLifecycle.housekeeping.incrementalVacuumInterval", time.Hour*24, "Interval between incremental SQLite vacuum operations")
+
 	f.String("authorization.acl.silences", "", "Path to silence ACL config file")
 
 	f.Bool(
@@ -463,6 +469,22 @@ func (config *configSchema) Read(flags *pflag.FlagSet) (string, error) {
 
 	if config.History.Workers < 1 {
 		return "", errors.New("history.workers must be >= 1")
+	}
+
+	if config.AlertLifecycle.Retention.TTL <= 0 {
+		return "", errors.New("alertLifecycle.retention.ttl must be > 0")
+	}
+
+	if config.AlertLifecycle.Retention.MaxAlerts < 1 {
+		return "", errors.New("alertLifecycle.retention.maxAlerts must be >= 1")
+	}
+
+	if config.AlertLifecycle.Housekeeping.IncrementalVacuumInterval <= 0 {
+		return "", errors.New("alertLifecycle.housekeeping.incrementalVacuumInterval must be > 0")
+	}
+
+	if strings.TrimSpace(config.AlertLifecycle.SQLite.Path) == "" {
+		return "", errors.New("alertLifecycle.sqlite.path cannot be empty")
 	}
 	for i := 0; i < len(config.History.Rewrite); i++ {
 		config.History.Rewrite[i].SourceRegex, err = regex.CompileAnchored(config.History.Rewrite[i].Source)

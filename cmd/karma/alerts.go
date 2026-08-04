@@ -409,12 +409,15 @@ func newStateCount() map[string]int {
 	return stateCount
 }
 
-func stateFromStateCount(stateCount map[string]int) models.AlertState {
+func stateFromStateCount(stateCount map[string]int, fallback models.AlertState) models.AlertState {
 	if stateCount[models.AlertStateActive.String()] > 0 {
 		return models.AlertStateActive
 	}
 	if stateCount[models.AlertStateSuppressed.String()] > 0 {
 		return models.AlertStateSuppressed
+	}
+	if fallback == models.AlertStateInactive || fallback == models.AlertStateResolved {
+		return fallback
 	}
 	return models.AlertStateUnprocessed
 }

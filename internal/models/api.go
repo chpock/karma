@@ -594,7 +594,12 @@ func (ag *AlertGroup) populateAllLabels() map[string]map[string][]string {
 	}
 
 	for i, pairs := range alertLabelPairs {
-		stateLabels := allLabels[ag.Alerts[i].State.String()]
+		stateName := ag.Alerts[i].State.String()
+		stateLabels, found := allLabels[stateName]
+		if !found {
+			stateLabels = map[string][]string{}
+			allLabels[stateName] = stateLabels
+		}
 		for _, l := range pairs {
 			if labelNameCounts[l.Name] != totalAlerts {
 				continue

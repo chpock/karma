@@ -152,6 +152,8 @@ func setupRouter(router *chi.Mux, historyPoller *historyPoller) {
 		h.ServeHTTP(w, r)
 	}))
 	router.Post(getViewURL("/alerts.json"), alerts)
+	router.Post(getViewURL("/alerts/{id}/resolve"), resolveAlert)
+	router.Get(getViewURL("/alerts-history/stats"), alertLifecycleStats)
 	router.Get(getViewURL("/alertList.json"), alertList)
 	router.Get(getViewURL("/autocomplete.json"), autocomplete)
 	router.Get(getViewURL("/labelNames.json"), knownLabelNames)
@@ -378,6 +380,11 @@ func serve(errorHandling pflag.ErrorHandling) error {
 		return nil
 	}
 
+	err = setupAlertLifecycleStorage()
+	if err != nil {
+		return err
+	}
+
 	err = writePidFile()
 	if err != nil {
 		return err
@@ -436,6 +443,7 @@ func serve(errorHandling pflag.ErrorHandling) error {
 	slog.Info("Shutting down HTTP server", slog.Any("signal", s))
 
 	historyPoller.stop()
+	closeAlertLifecycleStorage()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

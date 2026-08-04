@@ -112,6 +112,19 @@ type configSchema struct {
 		Author   string
 		Comment  string
 	} `yaml:"alertAcknowledgement" koanf:"alertAcknowledgement"`
+	AlertLifecycle struct {
+		Enabled bool
+		SQLite  struct {
+			Path string
+		}
+		Retention struct {
+			TTL      time.Duration
+			MaxAlerts int `yaml:"maxAlerts" koanf:"maxAlerts"`
+		}
+		Housekeeping struct {
+			IncrementalVacuumInterval time.Duration `yaml:"incrementalVacuumInterval" koanf:"incrementalVacuumInterval"`
+		}
+	} `yaml:"alertLifecycle" koanf:"alertLifecycle"`
 	// nolint: maligned
 	Annotations struct {
 		Default struct {

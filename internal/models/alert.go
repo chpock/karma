@@ -25,6 +25,10 @@ const (
 	AlertStateActive
 	// AlertStateSuppressed means that we know that alert is silenced or inhibited
 	AlertStateSuppressed
+	// AlertStateInactive means that the alert is not present in the latest live snapshot
+	AlertStateInactive
+	// AlertStateResolved means that the alert was manually resolved by a user
+	AlertStateResolved
 )
 
 // AlertStateList exports all alert states so other packages can get this list
@@ -32,14 +36,18 @@ var AlertStateList = []AlertState{
 	AlertStateUnprocessed,
 	AlertStateActive,
 	AlertStateSuppressed,
+	AlertStateInactive,
+	AlertStateResolved,
 }
 
-var alertStateToString = [3]string{"unprocessed", "active", "suppressed"}
+var alertStateToString = [5]string{"unprocessed", "active", "suppressed", "inactive", "resolved"}
 
 var alertStateFromString = map[string]AlertState{
 	"unprocessed": AlertStateUnprocessed,
 	"active":      AlertStateActive,
 	"suppressed":  AlertStateSuppressed,
+	"inactive":    AlertStateInactive,
+	"resolved":    AlertStateResolved,
 }
 
 func (s AlertState) String() string {

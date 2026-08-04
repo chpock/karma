@@ -58,6 +58,15 @@ alertAcknowledgement:
   duration: 15m0s
   author: karma
   comment: ACK! This alert was acknowledged using karma on %NOW%
+alertLifecycle:
+  enabled: true
+  sqlite:
+    path: ./var/karma-alert-history.sqlite
+  retention:
+    ttl: 720h0m0s
+    maxAlerts: 100000
+  housekeeping:
+    incrementalVacuumInterval: 24h0m0s
 annotations:
   default:
     hidden: true
