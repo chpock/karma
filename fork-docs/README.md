@@ -30,6 +30,7 @@ This fork adds:
 ## Document map
 
 - `ARCHITECTURE.md` - high-level architecture and integration boundaries.
+- `CONFIGURATION.md` - fork-specific config keys and defaults.
 - `IMPLEMENTATION_PLAN.md` - phased implementation and verification plan.
 - `FUTURE_FEATURES.md` - intentionally deferred scope.
 - `SPEC/` - technical contracts by area.
