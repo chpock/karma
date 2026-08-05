@@ -66,7 +66,7 @@ func SetupFlags(f *pflag.FlagSet) {
 	f.String("alertAcknowledgement.comment", "ACK! This alert was acknowledged using karma on %NOW%", "Comment used when acknowledging alerts with short lived silences")
 
 	f.Bool("alertLifecycle.enabled", true, "Enable persistent alert lifecycle storage")
-	f.String("alertLifecycle.sqlite.path", "./var/karma-alert-history.sqlite", "SQLite path used for persistent alert lifecycle storage")
+	f.String("alertLifecycle.sqlite.path", "/var/lib/karma/alert-lifecycle.sqlite", "SQLite path used for persistent alert lifecycle storage")
 	f.Duration("alertLifecycle.retention.ttl", time.Hour*24*30, "TTL for stored alert lifecycle records")
 	f.Int("alertLifecycle.retention.maxAlerts", 100000, "Maximum number of alert records to keep in persistent lifecycle storage")
 	f.Duration("alertLifecycle.housekeeping.incrementalVacuumInterval", time.Hour*24, "Interval between incremental SQLite vacuum operations")

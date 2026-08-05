@@ -29,13 +29,18 @@ Operational note:
 ### `alertLifecycle.sqlite.path`
 
 - Type: `string`
-- Default: `./var/karma-alert-history.sqlite`
+- Default: `/var/lib/karma/alert-lifecycle.sqlite`
 - CLI flag: `--alertLifecycle.sqlite.path`
 - Environment variable: `ALERTLIFECYCLE_SQLITE_PATH`
 
 Meaning:
 
 - filesystem path to lifecycle SQLite database.
+
+Container/Kubernetes note:
+
+- default path is under `/var/lib/karma/` so you can mount a PVC directly to `/var/lib/karma`.
+- directory is created automatically on startup.
 
 Validation:
 
@@ -101,7 +106,7 @@ Only new fork keys were added under `alertLifecycle`.
 alertLifecycle:
   enabled: true
   sqlite:
-    path: ./var/karma-alert-history.sqlite
+    path: /var/lib/karma/alert-lifecycle.sqlite
   retention:
     ttl: 720h
     maxAlerts: 100000

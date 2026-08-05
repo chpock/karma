@@ -80,7 +80,7 @@ Success (200):
 {
   "status": "ok",
   "storageEnabled": true,
-  "sqlitePath": "./var/karma-alert-history.sqlite",
+  "sqlitePath": "/var/lib/karma/alert-lifecycle.sqlite",
   "retentionTTLHours": 720,
   "maxAlerts": 100000,
   "currentRows": 1234,

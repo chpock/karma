@@ -61,7 +61,7 @@ alertAcknowledgement:
 alertLifecycle:
   enabled: true
   sqlite:
-    path: ./var/karma-alert-history.sqlite
+    path: /var/lib/karma/alert-lifecycle.sqlite
   retention:
     ttl: 720h0m0s
     maxAlerts: 100000
