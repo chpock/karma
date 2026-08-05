@@ -565,7 +565,7 @@ GROUP BY state
 		}
 		state := strings.TrimSpace(raw)
 		if state == "" {
-			continue
+			state = "unknown"
 		}
 		out[state] = count
 	}
