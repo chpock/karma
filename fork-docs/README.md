@@ -34,6 +34,8 @@ This fork adds:
 - `IMPLEMENTATION_PLAN.md` - phased implementation and verification plan.
 - `FUTURE_FEATURES.md` - intentionally deferred scope.
 - `SPEC/` - technical contracts by area.
+- `SPEC/db-migrations.md` - migration policy and workflow for schema changes.
+- `SPEC/db-migrations/` - one document per schema version change.
 - `ADR/` - architecture decision records.
 
 ## Source of truth policy

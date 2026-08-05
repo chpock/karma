@@ -31,6 +31,7 @@ Suggested fields:
 - `state TEXT NOT NULL` - one of `active|suppressed|unprocessed|inactive|resolved`.
 - `receiver TEXT NOT NULL`
 - `group_id TEXT NOT NULL`
+- `group_labels_json TEXT NOT NULL` - JSON snapshot of group-level labels used for stable UI group headers when group is reconstructed from lifecycle storage.
 - `labels_json TEXT NOT NULL`
 - `annotations_json TEXT NOT NULL`
 - `starts_at TEXT NOT NULL` - RFC3339 UTC.
@@ -96,6 +97,14 @@ Suggested keys:
 - `last_limit_cleanup_at`
 - `last_incremental_vacuum_at`
 - `schema_version`
+
+Current schema version in code:
+
+- `v2`
+
+Migration history:
+
+- `fork-docs/SPEC/db-migrations/v1-to-v2.md`
 
 ## 6. Record accounting used by retention
 

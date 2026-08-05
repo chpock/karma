@@ -93,3 +93,9 @@ Log key lifecycle operations at info/debug levels with structured context:
 - transition counts by type,
 - skipped inactive transitions due to incomplete upstream coverage,
 - cleanup and vacuum results.
+
+## 9. Database evolution contract
+
+- Any SQLite schema change must follow `fork-docs/SPEC/db-migrations.md`.
+- Every schema version bump requires an append-only migration note in
+  `fork-docs/SPEC/db-migrations/`.
