@@ -73,6 +73,12 @@ Operator visibility rule:
 
 - settings modal includes a fork storage stats section backed by `GET /alerts-history/stats`.
 
+Expected-state warning rule:
+
+- UI shows persistent warning banner when lifecycle DB is not in expected state.
+- warning source endpoint: `GET /alerts-history/warning`.
+- warning is removed only when endpoint reports `dbExpectedState=true`.
+
 ## 8. Non-goals in this phase
 
 - Dedicated retrospective page for resolved alerts.

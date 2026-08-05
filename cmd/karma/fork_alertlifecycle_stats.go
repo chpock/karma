@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/prymitive/karma/internal/config"
+	"github.com/prymitive/karma/internal/fork/alertlifecycle"
 )
 
 type alertLifecycleStatsResponse struct {
@@ -14,15 +15,25 @@ type alertLifecycleStatsResponse struct {
 	RetentionTTLHours float64 `json:"retentionTTLHours"`
 	MaxAlerts         int     `json:"maxAlerts"`
 
-	CurrentRows             int     `json:"currentRows"`
-	StateCounts             map[string]int `json:"stateCounts"`
-	HistoryRows             int     `json:"historyRows"`
-	FileSizeBytes           int64   `json:"fileSizeBytes"`
-	PageCount               int     `json:"pageCount"`
-	PageSizeBytes           int     `json:"pageSizeBytes"`
-	FreelistCount           int     `json:"freelistCount"`
-	LastHousekeepingAt      *string `json:"lastHousekeepingAt"`
-	LastIncrementalVacuumAt *string `json:"lastIncrementalVacuumAt"`
+	CurrentRows              int            `json:"currentRows"`
+	StateCounts              map[string]int `json:"stateCounts"`
+	HistoryRows              int            `json:"historyRows"`
+	GroupingFingerprint      string         `json:"groupingFingerprint"`
+	RegroupTargetFingerprint string         `json:"regroupTargetFingerprint"`
+	RegroupStatus            string         `json:"regroupStatus"`
+	RegroupError             string         `json:"regroupError"`
+	RegroupProcessed         int            `json:"regroupProcessed"`
+	RegroupTotal             int            `json:"regroupTotal"`
+	DBExpectedState          bool           `json:"dbExpectedState"`
+	DBExpectedStateReason    string         `json:"dbExpectedStateReason"`
+	LastRegroupStartedAt     *string        `json:"lastRegroupStartedAt"`
+	LastRegroupFinishedAt    *string        `json:"lastRegroupFinishedAt"`
+	FileSizeBytes            int64          `json:"fileSizeBytes"`
+	PageCount                int            `json:"pageCount"`
+	PageSizeBytes            int            `json:"pageSizeBytes"`
+	FreelistCount            int            `json:"freelistCount"`
+	LastHousekeepingAt       *string        `json:"lastHousekeepingAt"`
+	LastIncrementalVacuumAt  *string        `json:"lastIncrementalVacuumAt"`
 }
 
 func alertLifecycleStats(w http.ResponseWriter, _ *http.Request) {
@@ -38,6 +49,7 @@ func alertLifecycleStats(w http.ResponseWriter, _ *http.Request) {
 			RetentionTTLHours: config.Config.AlertLifecycle.Retention.TTL.Hours(),
 			MaxAlerts:         config.Config.AlertLifecycle.Retention.MaxAlerts,
 			StateCounts:       map[string]int{},
+			DBExpectedState:   true,
 		})
 		_, _ = w.Write(out)
 		return
@@ -51,22 +63,71 @@ func alertLifecycleStats(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
+	groupingCfg := alertlifecycle.GroupingConfig{
+		LabelsKeep:       append([]string{}, config.Config.Labels.Keep...),
+		LabelsKeepRegex:  append([]string{}, config.Config.Labels.KeepRegex...),
+		LabelsStrip:      append([]string{}, config.Config.Labels.Strip...),
+		LabelsStripRegex: append([]string{}, config.Config.Labels.StripRegex...),
+	}
+	expectedFingerprint := alertlifecycle.BuildGroupingFingerprint(groupingCfg)
+
 	response := alertLifecycleStatsResponse{
-		Status:            "ok",
-		StorageEnabled:    true,
-		SQLitePath:        config.Config.AlertLifecycle.SQLite.Path,
-		RetentionTTLHours: config.Config.AlertLifecycle.Retention.TTL.Hours(),
-		MaxAlerts:         config.Config.AlertLifecycle.Retention.MaxAlerts,
-		CurrentRows:       stats.CurrentRows,
-		StateCounts:       map[string]int{},
-		HistoryRows:       stats.HistoryRows,
-		FileSizeBytes:     stats.FileSizeBytes,
-		PageCount:         stats.PageCount,
-		PageSizeBytes:     stats.PageSizeBytes,
-		FreelistCount:     stats.FreelistCount,
+		Status:                   "ok",
+		StorageEnabled:           true,
+		SQLitePath:               config.Config.AlertLifecycle.SQLite.Path,
+		RetentionTTLHours:        config.Config.AlertLifecycle.Retention.TTL.Hours(),
+		MaxAlerts:                config.Config.AlertLifecycle.Retention.MaxAlerts,
+		CurrentRows:              stats.CurrentRows,
+		StateCounts:              map[string]int{},
+		HistoryRows:              stats.HistoryRows,
+		GroupingFingerprint:      stats.GroupingFingerprint,
+		RegroupTargetFingerprint: stats.RegroupTargetFingerprint,
+		RegroupStatus:            stats.RegroupStatus,
+		RegroupError:             stats.RegroupError,
+		RegroupProcessed:         stats.RegroupProcessed,
+		RegroupTotal:             stats.RegroupTotal,
+		DBExpectedState:          true,
+		FileSizeBytes:            stats.FileSizeBytes,
+		PageCount:                stats.PageCount,
+		PageSizeBytes:            stats.PageSizeBytes,
+		FreelistCount:            stats.FreelistCount,
 	}
 	for state, count := range stats.StateCounts {
 		response.StateCounts[string(state)] = count
+	}
+
+	if stats.RegroupStartedAt != nil {
+		value := stats.RegroupStartedAt.UTC().Format(time.RFC3339Nano)
+		response.LastRegroupStartedAt = &value
+	}
+	if stats.RegroupFinishedAt != nil {
+		value := stats.RegroupFinishedAt.UTC().Format(time.RFC3339Nano)
+		response.LastRegroupFinishedAt = &value
+	}
+
+	status := stats.RegroupStatus
+	if status == "" {
+		status = "ready"
+		response.RegroupStatus = status
+	}
+	if status != "ready" {
+		response.DBExpectedState = false
+		response.DBExpectedStateReason = "Background regroup is in progress or failed"
+	}
+	if stats.GroupingFingerprint != expectedFingerprint {
+		response.DBExpectedState = false
+		if response.DBExpectedStateReason == "" {
+			response.DBExpectedStateReason = "Stored grouping fingerprint does not match current config"
+		}
+	}
+	if status == "error" {
+		response.DBExpectedState = false
+		if stats.RegroupError != "" {
+			response.DBExpectedStateReason = stats.RegroupError
+		}
+	}
+	if response.RegroupTargetFingerprint == "" {
+		response.RegroupTargetFingerprint = expectedFingerprint
 	}
 	if stats.LastHousekeepingAt != nil {
 		value := stats.LastHousekeepingAt.UTC().Format(time.RFC3339Nano)

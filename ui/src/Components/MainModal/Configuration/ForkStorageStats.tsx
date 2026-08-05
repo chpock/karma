@@ -64,9 +64,40 @@ const ForkStorageStats: FC<{
 
   return (
     <div className="small">
+      {response.dbExpectedState === false ? (
+        <div className="alert alert-warning py-2 mb-3">
+          <strong>Warning:</strong> lifecycle DB is not in expected grouping state.
+          {response.dbExpectedStateReason ? (
+            <span> {response.dbExpectedStateReason}</span>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mb-2">
         <span className="text-muted">Storage enabled:</span>{" "}
         <strong>{response.storageEnabled ? "yes" : "no"}</strong>
+      </div>
+      <div className="mb-2">
+        <span className="text-muted">DB expected state:</span>{" "}
+        <strong>{response.dbExpectedState === false ? "no" : "yes"}</strong>
+      </div>
+      <div className="mb-2">
+        <span className="text-muted">Regroup status:</span>{" "}
+        <strong>{response.regroupStatus || "-"}</strong>
+        {typeof response.regroupProcessed === "number" &&
+        typeof response.regroupTotal === "number" ? (
+          <span className="text-muted">
+            {" "}
+            ({response.regroupProcessed}/{response.regroupTotal})
+          </span>
+        ) : null}
+      </div>
+      <div className="mb-2">
+        <span className="text-muted">Regroup started:</span>{" "}
+        <strong>{timeOrDash(response.lastRegroupStartedAt)}</strong>
+      </div>
+      <div className="mb-2">
+        <span className="text-muted">Regroup finished:</span>{" "}
+        <strong>{timeOrDash(response.lastRegroupFinishedAt)}</strong>
       </div>
       <div className="mb-2">
         <span className="text-muted">SQLite path:</span>{" "}

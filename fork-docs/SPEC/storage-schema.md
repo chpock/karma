@@ -100,11 +100,12 @@ Suggested keys:
 
 Current schema version in code:
 
-- `v2`
+- `v3`
 
 Migration history:
 
 - `fork-docs/SPEC/db-migrations/v1-to-v2.md`
+- `fork-docs/SPEC/db-migrations/v2-to-v3.md`
 
 ## 6. Record accounting used by retention
 

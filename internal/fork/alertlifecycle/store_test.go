@@ -1,6 +1,7 @@
 package alertlifecycle
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -705,7 +706,7 @@ func TestApplyPollCycleKeepsExistingRelevantUpstreamsOnPartialCoverage(t *testin
 	}
 
 	res, err := store.ApplyPollCycle(PollCycleInput{
-		LiveAlerts: nil,
+		LiveAlerts:          nil,
 		SuccessfulUpstreams: map[string]bool{"am-a": true, "am-b": false},
 		Timestamp:           now.Add(2 * time.Minute),
 	})
@@ -728,7 +729,7 @@ func TestApplyPollCycleKeepsExistingRelevantUpstreamsOnPartialCoverage(t *testin
 	}
 
 	res, err = store.ApplyPollCycle(PollCycleInput{
-		LiveAlerts: nil,
+		LiveAlerts:          nil,
 		SuccessfulUpstreams: map[string]bool{"am-a": true, "am-b": true},
 		Timestamp:           now.Add(3 * time.Minute),
 	})
@@ -738,4 +739,86 @@ func TestApplyPollCycleKeepsExistingRelevantUpstreamsOnPartialCoverage(t *testin
 	if res.SetInactive != 1 {
 		t.Fatalf("expected SetInactive=1 after coverage restored, got=%d", res.SetInactive)
 	}
+}
+
+func TestRunRegroupToConfigUpdatesGroupFromCurrentRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err = store.UpsertCurrentAlert(AlertCurrent{
+		AlertID:           "id-regroup",
+		State:             StateInactive,
+		Receiver:          "team-a",
+		GroupID:           "legacy-group-id",
+		GroupLabelsJSON:   `{"alertname":"CPUHigh","instance":"host-1"}`,
+		LabelsJSON:        `{"alertname":"CPUHigh","instance":"host-1"}`,
+		AnnotationsJSON:   `{"summary":"CPU high"}`,
+		StartsAt:          now.Add(-time.Hour),
+		LastSeenAt:        &now,
+		RelevantUpstreams: `["am-a"]`,
+	}); err != nil {
+		t.Fatalf("UpsertCurrentAlert() setup failed: %v", err)
+	}
+
+	cfg := GroupingConfig{
+		LabelsStrip: []string{"instance"},
+	}
+
+	result, err := store.RunRegroupToConfig(context.Background(), cfg, 1000)
+	if err != nil {
+		t.Fatalf("RunRegroupToConfig() returned error: %v", err)
+	}
+	if result.Total != 1 {
+		t.Fatalf("expected regroup total=1 got=%d", result.Total)
+	}
+	if result.Processed != 1 {
+		t.Fatalf("expected regroup processed=1 got=%d", result.Processed)
+	}
+
+	current, err := store.GetCurrentAlert("id-regroup")
+	if err != nil {
+		t.Fatalf("GetCurrentAlert() returned error: %v", err)
+	}
+	if current == nil {
+		t.Fatal("expected alert after regroup")
+	}
+
+	expectedGroupID, expectedGroupLabelsJSON, err := computeGroupFromAlertLabels("team-a", `{"alertname":"CPUHigh","instance":"host-1"}`, compileMustGroupingConfig(t, cfg))
+	if err != nil {
+		t.Fatalf("computeGroupFromAlertLabels() returned error: %v", err)
+	}
+	if current.GroupID != expectedGroupID {
+		t.Fatalf("group id mismatch after regroup: got=%q want=%q", current.GroupID, expectedGroupID)
+	}
+	if current.GroupLabelsJSON != expectedGroupLabelsJSON {
+		t.Fatalf("group labels mismatch after regroup: got=%q want=%q", current.GroupLabelsJSON, expectedGroupLabelsJSON)
+	}
+
+	stats, err := store.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats() returned error: %v", err)
+	}
+	if stats.RegroupStatus != regroupStatusReady {
+		t.Fatalf("expected regroup status ready got=%q", stats.RegroupStatus)
+	}
+	expectedFP := BuildGroupingFingerprint(cfg)
+	if stats.GroupingFingerprint != expectedFP {
+		t.Fatalf("grouping fingerprint mismatch: got=%q want=%q", stats.GroupingFingerprint, expectedFP)
+	}
+}
+
+func compileMustGroupingConfig(t *testing.T, cfg GroupingConfig) compiledGroupingConfig {
+	t.Helper()
+	compiled, err := compileGroupingConfig(cfg)
+	if err != nil {
+		t.Fatalf("compileGroupingConfig() returned error: %v", err)
+	}
+	return compiled
 }

@@ -91,13 +91,27 @@ type HousekeepingResult struct {
 }
 
 type Stats struct {
-	CurrentRows             int
-	HistoryRows             int
-	StateCounts             map[string]int
-	FileSizeBytes           int64
-	PageCount               int
-	PageSizeBytes           int
-	FreelistCount           int
-	LastHousekeepingAt      *time.Time
-	LastIncrementalVacuumAt *time.Time
+	CurrentRows              int
+	HistoryRows              int
+	StateCounts              map[string]int
+	GroupingFingerprint      string
+	RegroupTargetFingerprint string
+	RegroupStatus            string
+	RegroupError             string
+	RegroupProcessed         int
+	RegroupTotal             int
+	RegroupStartedAt         *time.Time
+	RegroupFinishedAt        *time.Time
+	FileSizeBytes            int64
+	PageCount                int
+	PageSizeBytes            int
+	FreelistCount            int
+	LastHousekeepingAt       *time.Time
+	LastIncrementalVacuumAt  *time.Time
+}
+
+type RegroupResult struct {
+	Processed int
+	Updated   int
+	Total     int
 }

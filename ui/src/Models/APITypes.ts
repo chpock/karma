@@ -267,6 +267,16 @@ export interface APIAlertLifecycleStatsResponseT {
   currentRows?: number;
   stateCounts?: Record<string, number>;
   historyRows?: number;
+  groupingFingerprint?: string;
+  regroupTargetFingerprint?: string;
+  regroupStatus?: string;
+  regroupError?: string;
+  regroupProcessed?: number;
+  regroupTotal?: number;
+  dbExpectedState?: boolean;
+  dbExpectedStateReason?: string;
+  lastRegroupStartedAt?: string | null;
+  lastRegroupFinishedAt?: string | null;
   fileSizeBytes?: number;
   pageCount?: number;
   pageSizeBytes?: number;

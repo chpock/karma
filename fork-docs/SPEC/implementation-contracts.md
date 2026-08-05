@@ -24,6 +24,7 @@ Implemented touchpoints in upstream-owned files:
   - route hooks:
     - `POST /alerts/{id}/resolve`
     - `GET /alerts-history/stats`
+    - `GET /alerts-history/warning`
   - startup/shutdown hooks:
     - `setupAlertLifecycleStorage()`
     - `closeAlertLifecycleStorage()`

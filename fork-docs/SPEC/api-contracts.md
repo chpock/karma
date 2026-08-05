@@ -84,7 +84,24 @@ Success (200):
   "retentionTTLHours": 720,
   "maxAlerts": 100000,
   "currentRows": 1234,
+  "stateCounts": {
+    "active": 1000,
+    "suppressed": 120,
+    "unprocessed": 40,
+    "inactive": 60,
+    "resolved": 14
+  },
   "historyRows": 9876,
+  "groupingFingerprint": "sha256:...",
+  "regroupTargetFingerprint": "sha256:...",
+  "regroupStatus": "ready",
+  "regroupError": "",
+  "regroupProcessed": 1234,
+  "regroupTotal": 1234,
+  "dbExpectedState": true,
+  "dbExpectedStateReason": "",
+  "lastRegroupStartedAt": "2026-08-04T08:58:00Z",
+  "lastRegroupFinishedAt": "2026-08-04T08:58:01Z",
   "fileSizeBytes": 12345678,
   "pageCount": 3020,
   "pageSizeBytes": 4096,
@@ -98,6 +115,31 @@ Notes:
 
 - when lifecycle storage is disabled, `storageEnabled=false` and counters are omitted/zero-valued.
 - `last*At` fields are nullable and can be `null` before first housekeeping run.
+- `dbExpectedState=false` means grouping data is currently not in expected state and UI must show persistent warning.
+
+## 3.3 Warning endpoint
+
+- `GET /alerts-history/warning`
+
+Success (200):
+
+```json
+{
+  "status": "ok",
+  "storageEnabled": true,
+  "dbExpectedState": false,
+  "reason": "Background regroup is in progress or failed",
+  "regroupStatus": "running",
+  "regroupError": "",
+  "regroupProcessed": 500,
+  "regroupTotal": 1234
+}
+```
+
+UI contract:
+
+- warning is persistent while `dbExpectedState=false`.
+- warning disappears only when DB returns to expected state.
 
 ## 4. Alerts response behavior changes
 

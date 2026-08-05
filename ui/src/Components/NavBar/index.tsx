@@ -17,6 +17,7 @@ import { OverviewModal } from "Components/OverviewModal";
 import { MainModal } from "Components/MainModal";
 import SilenceModal from "Components/SilenceModal";
 import AppToasts from "Components/Toast/AppToasts";
+import { ForkLifecycleWarning } from "Components/ForkLifecycleWarning";
 import { ThemeContext } from "Components/Theme";
 import { Fetcher } from "Components/Fetcher";
 import { FilterInput } from "./FilterInput";
@@ -100,8 +101,12 @@ const NavBar: FC<{
   const navRef = useRef<HTMLElement>(null);
 
   return (
-    <div className={`container p-0 m-0 mw-100 ${containerClass}`}>
-      <CSSTransition
+    <>
+      <div className="container p-0 m-0 mw-100">
+        <ForkLifecycleWarning alertStore={alertStore} />
+      </div>
+      <div className={`container p-0 m-0 mw-100 ${containerClass}`}>
+        <CSSTransition
         classNames="components-animation-navbar"
         in={!alertStore.ui.isIdle}
         timeout={context.animations.duration}
@@ -153,8 +158,9 @@ const NavBar: FC<{
             </ul>
           )}
         </nav>
-      </CSSTransition>
-    </div>
+        </CSSTransition>
+      </div>
+    </>
   );
 };
 

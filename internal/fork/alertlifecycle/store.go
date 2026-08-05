@@ -2,6 +2,7 @@ package alertlifecycle
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,19 +10,40 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/prymitive/karma/internal/models"
+	"github.com/prymitive/karma/internal/regex"
+	"github.com/prymitive/karma/internal/transform"
 
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = "2"
+const schemaVersion = "3"
 
 const (
-	metaSchemaVersion           = "schema_version"
-	metaLastHousekeepingAt      = "last_housekeeping_at"
-	metaLastIncrementalVacuumAt = "last_incremental_vacuum_at"
+	metaSchemaVersion            = "schema_version"
+	metaLastHousekeepingAt       = "last_housekeeping_at"
+	metaLastIncrementalVacuumAt  = "last_incremental_vacuum_at"
+	metaGroupingFingerprint      = "grouping_fingerprint"
+	metaRegroupStatus            = "regroup_status"
+	metaRegroupError             = "regroup_error"
+	metaRegroupProcessed         = "regroup_processed"
+	metaRegroupTotal             = "regroup_total"
+	metaRegroupStartedAt         = "regroup_started_at"
+	metaRegroupFinishedAt        = "regroup_finished_at"
+	metaRegroupTargetFingerprint = "regroup_target_fingerprint"
+	metaRegroupCursorRowID       = "regroup_cursor_rowid"
+)
+
+const (
+	regroupStatusReady   = "ready"
+	regroupStatusRunning = "running"
+	regroupStatusError   = "error"
 )
 
 type Store struct {
@@ -31,6 +53,17 @@ type Store struct {
 
 type StoreOptions struct {
 	Path string
+}
+
+type GroupingConfig struct {
+	LabelsKeep          []string
+	LabelsKeepRegex     []string
+	LabelsStrip         []string
+	LabelsStripRegex    []string
+	ReceiversKeep       []string
+	ReceiversKeepRegex  []string
+	ReceiversStrip      []string
+	ReceiversStripRegex []string
 }
 
 func OpenStore(opts StoreOptions) (*Store, error) {
@@ -144,6 +177,24 @@ CREATE TABLE IF NOT EXISTS metadata (
 	if _, err = tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metaSchemaVersion, schemaVersion); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to set schema version: %w", err)
+	}
+
+	defaults := map[string]string{
+		metaRegroupStatus:            regroupStatusReady,
+		metaGroupingFingerprint:      "",
+		metaRegroupTargetFingerprint: "",
+		metaRegroupError:             "",
+		metaRegroupProcessed:         "0",
+		metaRegroupTotal:             "0",
+		metaRegroupCursorRowID:       "0",
+		metaRegroupStartedAt:         "",
+		metaRegroupFinishedAt:        "",
+	}
+	for key, value := range defaults {
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)`, key, value); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to seed metadata %q: %w", key, err)
+		}
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -533,6 +584,38 @@ func (s *Store) GetStats() (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
+	groupingFingerprint, err := s.getMetadataString(metaGroupingFingerprint)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupTargetFingerprint, err := s.getMetadataString(metaRegroupTargetFingerprint)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupStatus, err := s.getMetadataString(metaRegroupStatus)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupError, err := s.getMetadataString(metaRegroupError)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupProcessed, err := s.getMetadataInt(metaRegroupProcessed)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupTotal, err := s.getMetadataInt(metaRegroupTotal)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupStartedAt, err := s.getOptionalMetadataTime(metaRegroupStartedAt)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupFinishedAt, err := s.getOptionalMetadataTime(metaRegroupFinishedAt)
+	if err != nil {
+		return Stats{}, err
+	}
 
 	stat, err := os.Stat(s.sqlitePath())
 	fileSize := int64(0)
@@ -550,15 +633,23 @@ func (s *Store) GetStats() (Stats, error) {
 	}
 
 	return Stats{
-		CurrentRows:             currentRows,
-		HistoryRows:             historyRows,
-		StateCounts:             stateCounts,
-		FileSizeBytes:           fileSize,
-		PageCount:               pageCount,
-		PageSizeBytes:           pageSize,
-		FreelistCount:           freelistCount,
-		LastHousekeepingAt:      lastHousekeepingAt,
-		LastIncrementalVacuumAt: lastVacuumAt,
+		CurrentRows:              currentRows,
+		HistoryRows:              historyRows,
+		StateCounts:              stateCounts,
+		GroupingFingerprint:      strings.TrimSpace(groupingFingerprint),
+		RegroupTargetFingerprint: strings.TrimSpace(regroupTargetFingerprint),
+		RegroupStatus:            strings.TrimSpace(regroupStatus),
+		RegroupError:             strings.TrimSpace(regroupError),
+		RegroupProcessed:         regroupProcessed,
+		RegroupTotal:             regroupTotal,
+		RegroupStartedAt:         regroupStartedAt,
+		RegroupFinishedAt:        regroupFinishedAt,
+		FileSizeBytes:            fileSize,
+		PageCount:                pageCount,
+		PageSizeBytes:            pageSize,
+		FreelistCount:            freelistCount,
+		LastHousekeepingAt:       lastHousekeepingAt,
+		LastIncrementalVacuumAt:  lastVacuumAt,
 	}, nil
 }
 
@@ -804,6 +895,428 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	}
 
 	return result, nil
+}
+
+func BuildGroupingFingerprint(cfg GroupingConfig) string {
+	type fpPayload struct {
+		LabelsKeep       []string `json:"labelsKeep"`
+		LabelsKeepRegex  []string `json:"labelsKeepRegex"`
+		LabelsStrip      []string `json:"labelsStrip"`
+		LabelsStripRegex []string `json:"labelsStripRegex"`
+	}
+
+	p := fpPayload{
+		LabelsKeep:       normalizeStringList(cfg.LabelsKeep),
+		LabelsKeepRegex:  normalizeStringList(cfg.LabelsKeepRegex),
+		LabelsStrip:      normalizeStringList(cfg.LabelsStrip),
+		LabelsStripRegex: normalizeStringList(cfg.LabelsStripRegex),
+	}
+
+	raw, _ := json.Marshal(p)
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%x", sum)
+}
+
+func (s *Store) RunRegroupToConfig(ctx context.Context, cfg GroupingConfig, batchSize int) (RegroupResult, error) {
+	if s == nil || s.db == nil {
+		return RegroupResult{}, ErrStoreNotInitialized
+	}
+	if batchSize < 1 {
+		batchSize = 1000
+	}
+
+	targetFingerprint := BuildGroupingFingerprint(cfg)
+	started, total, err := s.beginOrResumeRegroup(targetFingerprint)
+	if err != nil {
+		return RegroupResult{}, err
+	}
+	if !started {
+		return RegroupResult{Total: total}, nil
+	}
+
+	compiled, err := compileGroupingConfig(cfg)
+	if err != nil {
+		_ = s.failRegroup(targetFingerprint, fmt.Sprintf("invalid grouping config: %v", err))
+		return RegroupResult{}, err
+	}
+
+	result := RegroupResult{Total: total}
+
+	for {
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return result, ctx.Err()
+			default:
+			}
+		}
+
+		done, processedInBatch, updatedInBatch, totalRows, batchErr := s.runRegroupBatch(targetFingerprint, compiled, batchSize)
+		if batchErr != nil {
+			_ = s.failRegroup(targetFingerprint, batchErr.Error())
+			return result, batchErr
+		}
+		result.Processed += processedInBatch
+		result.Updated += updatedInBatch
+		result.Total = totalRows
+
+		if done {
+			return result, nil
+		}
+	}
+}
+
+func (s *Store) beginOrResumeRegroup(targetFingerprint string) (bool, int, error) {
+	now := time.Now().UTC()
+
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return false, 0, fmt.Errorf("failed to begin regroup transaction: %w", err)
+	}
+
+	currentFingerprint, err := readMetadataStringTx(tx, metaGroupingFingerprint)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+	status, err := readMetadataStringTx(tx, metaRegroupStatus)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = regroupStatusReady
+	}
+	activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+
+	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alerts_current`)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, fmt.Errorf("failed to count rows for regroup: %w", err)
+	}
+
+	if strings.TrimSpace(currentFingerprint) == targetFingerprint && status == regroupStatusReady {
+		if err = tx.Commit(); err != nil {
+			return false, 0, fmt.Errorf("failed to commit regroup readiness check: %w", err)
+		}
+		return false, totalRows, nil
+	}
+
+	resume := status == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint
+	if !resume {
+		if err = setMetadataIntTx(tx, metaRegroupProcessed, 0); err != nil {
+			_ = tx.Rollback()
+			return false, 0, err
+		}
+		if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
+			_ = tx.Rollback()
+			return false, 0, err
+		}
+		if err = setMetadataTimeTx(tx, metaRegroupStartedAt, &now); err != nil {
+			_ = tx.Rollback()
+			return false, 0, err
+		}
+	}
+
+	if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusRunning); err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+	if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+	if err = setMetadataTx(tx, metaRegroupTargetFingerprint, targetFingerprint); err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+	if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+	if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, nil); err != nil {
+		_ = tx.Rollback()
+		return false, 0, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, 0, fmt.Errorf("failed to commit regroup metadata transaction: %w", err)
+	}
+
+	return true, totalRows, nil
+}
+
+type regroupRow struct {
+	RowID      int64
+	AlertID    string
+	Receiver   string
+	LabelsJSON string
+}
+
+type compiledGroupingConfig struct {
+	labelsKeep       []string
+	labelsStrip      []string
+	labelsKeepRegex  []*regexp.Regexp
+	labelsStripRegex []*regexp.Regexp
+}
+
+func compileGroupingConfig(cfg GroupingConfig) (compiledGroupingConfig, error) {
+	out := compiledGroupingConfig{
+		labelsKeep:  append([]string{}, cfg.LabelsKeep...),
+		labelsStrip: append([]string{}, cfg.LabelsStrip...),
+	}
+
+	for _, raw := range cfg.LabelsKeepRegex {
+		re, err := regex.CompileAnchored(raw)
+		if err != nil {
+			return compiledGroupingConfig{}, fmt.Errorf("invalid labels keep regex %q: %w", raw, err)
+		}
+		out.labelsKeepRegex = append(out.labelsKeepRegex, re)
+	}
+	for _, raw := range cfg.LabelsStripRegex {
+		re, err := regex.CompileAnchored(raw)
+		if err != nil {
+			return compiledGroupingConfig{}, fmt.Errorf("invalid labels strip regex %q: %w", raw, err)
+		}
+		out.labelsStripRegex = append(out.labelsStripRegex, re)
+	}
+
+	return out, nil
+}
+
+func (s *Store) runRegroupBatch(targetFingerprint string, cfg compiledGroupingConfig, batchSize int) (bool, int, int, int, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return false, 0, 0, 0, fmt.Errorf("failed to begin regroup batch transaction: %w", err)
+	}
+
+	status, err := readMetadataStringTx(tx, metaRegroupStatus)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, 0, err
+	}
+	if strings.TrimSpace(status) != regroupStatusRunning {
+		_ = tx.Rollback()
+		return true, 0, 0, 0, nil
+	}
+	activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, 0, err
+	}
+	if strings.TrimSpace(activeTarget) != targetFingerprint {
+		_ = tx.Rollback()
+		return true, 0, 0, 0, nil
+	}
+
+	cursor, err := readMetadataInt64Tx(tx, metaRegroupCursorRowID)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, 0, err
+	}
+	processed, err := readMetadataIntTx(tx, metaRegroupProcessed)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, 0, err
+	}
+	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alerts_current`)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, 0, fmt.Errorf("failed to count rows in regroup batch: %w", err)
+	}
+
+	rows, err := tx.Query(`
+SELECT rowid, alert_id, receiver, labels_json
+FROM alerts_current
+WHERE rowid > ?
+ORDER BY rowid ASC
+LIMIT ?
+`, cursor, batchSize)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, 0, fmt.Errorf("failed to select regroup batch rows: %w", err)
+	}
+
+	batch := make([]regroupRow, 0, batchSize)
+	for rows.Next() {
+		var row regroupRow
+		if scanErr := rows.Scan(&row.RowID, &row.AlertID, &row.Receiver, &row.LabelsJSON); scanErr != nil {
+			rows.Close()
+			_ = tx.Rollback()
+			return false, 0, 0, 0, fmt.Errorf("failed to scan regroup row: %w", scanErr)
+		}
+		batch = append(batch, row)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		_ = tx.Rollback()
+		return false, 0, 0, 0, fmt.Errorf("failed to iterate regroup rows: %w", err)
+	}
+	rows.Close()
+
+	if len(batch) == 0 {
+		now := time.Now().UTC()
+		if err = setMetadataTx(tx, metaGroupingFingerprint, targetFingerprint); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusReady); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if err = setMetadataIntTx(tx, metaRegroupProcessed, totalRows); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if err = tx.Commit(); err != nil {
+			return false, 0, 0, 0, fmt.Errorf("failed to commit regroup finalize: %w", err)
+		}
+		return true, 0, 0, totalRows, nil
+	}
+
+	updated := 0
+	lastRowID := cursor
+	for _, row := range batch {
+		groupID, groupLabelsJSON, computeErr := computeGroupFromAlertLabels(row.Receiver, row.LabelsJSON, cfg)
+		if computeErr != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, totalRows, fmt.Errorf("failed to regroup alert %s: %w", row.AlertID, computeErr)
+		}
+
+		updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		res, updateErr := tx.Exec(`
+UPDATE alerts_current
+SET group_id = ?, group_labels_json = ?, updated_at = ?
+WHERE rowid = ?
+`, groupID, groupLabelsJSON, updatedAt, row.RowID)
+		if updateErr != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, totalRows, fmt.Errorf("failed to update regrouped row: %w", updateErr)
+		}
+		affected, _ := res.RowsAffected()
+		if affected > 0 {
+			updated++
+		}
+		lastRowID = row.RowID
+	}
+
+	processed += len(batch)
+	if processed > totalRows {
+		totalRows = processed
+	}
+
+	if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, lastRowID); err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, totalRows, err
+	}
+	if err = setMetadataIntTx(tx, metaRegroupProcessed, processed); err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, totalRows, err
+	}
+	if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
+		_ = tx.Rollback()
+		return false, 0, 0, totalRows, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, 0, 0, totalRows, fmt.Errorf("failed to commit regroup batch: %w", err)
+	}
+
+	return false, len(batch), updated, totalRows, nil
+}
+
+func (s *Store) failRegroup(targetFingerprint, reason string) error {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+
+	status, readErr := readMetadataStringTx(tx, metaRegroupStatus)
+	if readErr != nil {
+		_ = tx.Rollback()
+		return readErr
+	}
+	activeTarget, readErr := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
+	if readErr != nil {
+		_ = tx.Rollback()
+		return readErr
+	}
+	if strings.TrimSpace(status) == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint {
+		now := time.Now().UTC()
+		if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusError); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err = setMetadataTx(tx, metaRegroupError, strings.TrimSpace(reason)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func computeGroupFromAlertLabels(receiver, labelsJSON string, cfg compiledGroupingConfig) (string, string, error) {
+	labelsMap := map[string]string{}
+	if err := json.Unmarshal([]byte(labelsJSON), &labelsMap); err != nil {
+		return "", "", fmt.Errorf("failed to unmarshal labels json: %w", err)
+	}
+
+	labels := models.LabelsFromMap(labelsMap)
+	groupLabels := transform.StripLabels(cfg.labelsKeep, cfg.labelsStrip, cfg.labelsKeepRegex, cfg.labelsStripRegex, labels)
+	groupLabelsJSONRaw, err := json.Marshal(groupLabels.Map())
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal group labels json: %w", err)
+	}
+
+	groupID := models.AlertGroup{Receiver: receiver, Labels: groupLabels}.LabelsFingerprint()
+	return groupID, string(groupLabelsJSONRaw), nil
+}
+
+func normalizeStringList(values []string) []string {
+	uniq := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		vv := strings.TrimSpace(v)
+		if vv == "" {
+			continue
+		}
+		if _, found := uniq[vv]; found {
+			continue
+		}
+		uniq[vv] = struct{}{}
+		out = append(out, vv)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func validateCurrentAlert(alert AlertCurrent) error {
@@ -1374,6 +1887,125 @@ func queryInt(q interface {
 		return 0, err
 	}
 	return out, nil
+}
+
+func queryInt64(q interface {
+	QueryRow(query string, args ...any) *sql.Row
+}, query string, args ...any) (int64, error) {
+	var out int64
+	if err := q.QueryRow(query, args...).Scan(&out); err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+func readMetadataStringTx(tx *sql.Tx, key string) (string, error) {
+	var value sql.NullString
+	err := tx.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read metadata key %q: %w", key, err)
+	}
+	if !value.Valid {
+		return "", nil
+	}
+	return value.String, nil
+}
+
+func readMetadataIntTx(tx *sql.Tx, key string) (int, error) {
+	raw, err := readMetadataStringTx(tx, key)
+	if err != nil {
+		return 0, err
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse metadata int key %q value %q: %w", key, raw, err)
+	}
+	if v < 0 {
+		return 0, nil
+	}
+	return v, nil
+}
+
+func readMetadataInt64Tx(tx *sql.Tx, key string) (int64, error) {
+	raw, err := readMetadataStringTx(tx, key)
+	if err != nil {
+		return 0, err
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse metadata int64 key %q value %q: %w", key, raw, err)
+	}
+	if v < 0 {
+		return 0, nil
+	}
+	return v, nil
+}
+
+func setMetadataIntTx(tx *sql.Tx, key string, value int) error {
+	if value < 0 {
+		value = 0
+	}
+	return setMetadataTx(tx, key, strconv.Itoa(value))
+}
+
+func setMetadataInt64Tx(tx *sql.Tx, key string, value int64) error {
+	if value < 0 {
+		value = 0
+	}
+	return setMetadataTx(tx, key, strconv.FormatInt(value, 10))
+}
+
+func setMetadataTimeTx(tx *sql.Tx, key string, ts *time.Time) error {
+	if ts == nil {
+		return setMetadataTx(tx, key, "")
+	}
+	v := ts.UTC().Format(time.RFC3339Nano)
+	return setMetadataTx(tx, key, v)
+}
+
+func (s *Store) getMetadataString(key string) (string, error) {
+	var value sql.NullString
+	err := s.db.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read metadata key %q: %w", key, err)
+	}
+	if !value.Valid {
+		return "", nil
+	}
+	return value.String, nil
+}
+
+func (s *Store) getMetadataInt(key string) (int, error) {
+	raw, err := s.getMetadataString(key)
+	if err != nil {
+		return 0, err
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse metadata int key %q value %q: %w", key, raw, err)
+	}
+	if v < 0 {
+		return 0, nil
+	}
+	return v, nil
 }
 
 func clampInt64ToInt(v int64) int64 {
