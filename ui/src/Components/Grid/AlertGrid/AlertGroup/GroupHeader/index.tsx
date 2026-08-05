@@ -94,6 +94,13 @@ const GroupHeader: FC<{
         />
         <FilteringCounterBadge
           name="@state"
+          value="inactive"
+          counter={group.stateCount.inactive || 0}
+          themed={themedCounters}
+          alertStore={alertStore}
+        />
+        <FilteringCounterBadge
+          name="@state"
           value="active"
           counter={group.stateCount.active}
           themed={themedCounters}

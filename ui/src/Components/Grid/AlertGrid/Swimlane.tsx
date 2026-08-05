@@ -84,6 +84,13 @@ const Swimlane = ({
         />
         <FilteringCounterBadge
           name="@state"
+          value="inactive"
+          counter={grid.stateCount.inactive || 0}
+          themed={true}
+          alertStore={alertStore}
+        />
+        <FilteringCounterBadge
+          name="@state"
           value="active"
           counter={grid.stateCount.active}
           themed={true}
