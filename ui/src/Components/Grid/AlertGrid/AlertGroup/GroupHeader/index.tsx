@@ -29,8 +29,6 @@ const GroupHeader: FC<{
   setIsMenuOpen,
   gridLabelValue,
 }) => {
-  const headerLabels = group.labels.length > 0 ? group.labels : group.shared.labels;
-
   const onCollapseClick = (event: MouseEvent) => {
     // left click       => toggle current group
     // left click + alt => toggle all groups
@@ -63,7 +61,7 @@ const GroupHeader: FC<{
         />
       </span>
       <span className="flex-shrink-1 flex-grow-1" style={{ minWidth: 0 }}>
-        {headerLabels.map((label) => (
+        {group.labels.map((label) => (
           <FilteringLabel
             key={label.name}
             name={label.name}

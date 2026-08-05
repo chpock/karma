@@ -16,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = "1"
+const schemaVersion = "2"
 
 const (
 	metaSchemaVersion           = "schema_version"
@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS alerts_current (
   state TEXT NOT NULL,
   receiver TEXT NOT NULL,
   group_id TEXT NOT NULL,
+  group_labels_json TEXT NOT NULL DEFAULT '{}',
   labels_json TEXT NOT NULL,
   annotations_json TEXT NOT NULL,
   starts_at TEXT NOT NULL,
@@ -132,7 +133,15 @@ CREATE TABLE IF NOT EXISTS metadata (
 		return fmt.Errorf("failed to apply schema: %w", err)
 	}
 
-	if _, err = tx.Exec(`INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)`, metaSchemaVersion, schemaVersion); err != nil {
+	if _, err = tx.Exec(`ALTER TABLE alerts_current ADD COLUMN group_labels_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "duplicate column") {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to migrate schema (group_labels_json): %w", err)
+		}
+	}
+
+	if _, err = tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metaSchemaVersion, schemaVersion); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to set schema version: %w", err)
 	}
@@ -147,6 +156,9 @@ CREATE TABLE IF NOT EXISTS metadata (
 func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 	if s == nil || s.db == nil {
 		return ErrStoreNotInitialized
+	}
+	if strings.TrimSpace(alert.GroupLabelsJSON) == "" {
+		alert.GroupLabelsJSON = "{}"
 	}
 
 	if err := validateCurrentAlert(alert); err != nil {
@@ -164,17 +176,19 @@ INSERT INTO alerts_current(
   state,
   receiver,
   group_id,
+  group_labels_json,
   labels_json,
   annotations_json,
   starts_at,
   last_seen_at,
   relevant_upstreams_json,
   updated_at
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(alert_id) DO UPDATE SET
   state=excluded.state,
   receiver=excluded.receiver,
   group_id=excluded.group_id,
+  group_labels_json=excluded.group_labels_json,
   labels_json=excluded.labels_json,
   annotations_json=excluded.annotations_json,
   starts_at=excluded.starts_at,
@@ -186,6 +200,7 @@ ON CONFLICT(alert_id) DO UPDATE SET
 		string(alert.State),
 		alert.Receiver,
 		alert.GroupID,
+		alert.GroupLabelsJSON,
 		alert.LabelsJSON,
 		alert.AnnotationsJSON,
 		alert.StartsAt.UTC().Format(time.RFC3339Nano),
@@ -255,6 +270,7 @@ SELECT
   state,
   receiver,
   group_id,
+  group_labels_json,
   labels_json,
   annotations_json,
   starts_at,
@@ -278,6 +294,7 @@ WHERE alert_id = ?
 		&stateRaw,
 		&current.Receiver,
 		&current.GroupID,
+		&current.GroupLabelsJSON,
 		&current.LabelsJSON,
 		&current.AnnotationsJSON,
 		&startsAtRaw,
@@ -379,6 +396,7 @@ SELECT
   state,
   receiver,
   group_id,
+  group_labels_json,
   labels_json,
   annotations_json,
   starts_at,
@@ -659,6 +677,9 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	liveByID := make(map[string]LiveAlertSnapshot, len(input.LiveAlerts))
 	allSuccessful := areAllUpstreamsSuccessful(input.SuccessfulUpstreams)
 	for _, live := range input.LiveAlerts {
+		if strings.TrimSpace(live.GroupLabelsJSON) == "" {
+			live.GroupLabelsJSON = "{}"
+		}
 		if err := validateLiveSnapshot(live); err != nil {
 			return PollCycleResult{}, err
 		}
@@ -798,6 +819,9 @@ func validateCurrentAlert(alert AlertCurrent) error {
 	if strings.TrimSpace(alert.GroupID) == "" {
 		return errors.New("groupID cannot be empty")
 	}
+	if strings.TrimSpace(alert.GroupLabelsJSON) == "" {
+		return errors.New("groupLabelsJSON cannot be empty")
+	}
 	if strings.TrimSpace(alert.LabelsJSON) == "" {
 		return errors.New("labelsJSON cannot be empty")
 	}
@@ -879,6 +903,9 @@ func validateLiveSnapshot(alert LiveAlertSnapshot) error {
 	if strings.TrimSpace(alert.GroupID) == "" {
 		return errors.New("live snapshot groupID cannot be empty")
 	}
+	if strings.TrimSpace(alert.GroupLabelsJSON) == "" {
+		return errors.New("live snapshot groupLabelsJSON cannot be empty")
+	}
 	if strings.TrimSpace(alert.LabelsJSON) == "" {
 		return errors.New("live snapshot labelsJSON cannot be empty")
 	}
@@ -910,6 +937,7 @@ SELECT
   state,
   receiver,
   group_id,
+  group_labels_json,
   labels_json,
   annotations_json,
   starts_at,
@@ -952,6 +980,7 @@ func scanCurrentAlert(scanner interface{ Scan(dest ...any) error }) (AlertCurren
 		&stateRaw,
 		&current.Receiver,
 		&current.GroupID,
+		&current.GroupLabelsJSON,
 		&current.LabelsJSON,
 		&current.AnnotationsJSON,
 		&startsAtRaw,
@@ -1004,18 +1033,20 @@ INSERT INTO alerts_current(
   state,
   receiver,
   group_id,
+  group_labels_json,
   labels_json,
   annotations_json,
   starts_at,
   last_seen_at,
   relevant_upstreams_json,
   updated_at
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		live.AlertID,
 		string(live.State),
 		live.Receiver,
 		live.GroupID,
+		live.GroupLabelsJSON,
 		live.LabelsJSON,
 		live.AnnotationsJSON,
 		live.StartsAt.UTC().Format(time.RFC3339Nano),
@@ -1036,6 +1067,7 @@ UPDATE alerts_current SET
   state = ?,
   receiver = ?,
   group_id = ?,
+  group_labels_json = ?,
   labels_json = ?,
   annotations_json = ?,
   starts_at = ?,
@@ -1047,6 +1079,7 @@ WHERE alert_id = ?
 		string(newState),
 		live.Receiver,
 		live.GroupID,
+		live.GroupLabelsJSON,
 		live.LabelsJSON,
 		live.AnnotationsJSON,
 		live.StartsAt.UTC().Format(time.RFC3339Nano),

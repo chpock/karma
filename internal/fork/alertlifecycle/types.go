@@ -24,6 +24,7 @@ type AlertCurrent struct {
 	State             State
 	Receiver          string
 	GroupID           string
+	GroupLabelsJSON   string
 	LabelsJSON        string
 	AnnotationsJSON   string
 	StartsAt          time.Time
@@ -48,6 +49,7 @@ type LiveAlertSnapshot struct {
 	State             State
 	Receiver          string
 	GroupID           string
+	GroupLabelsJSON   string
 	LabelsJSON        string
 	AnnotationsJSON   string
 	StartsAt          time.Time

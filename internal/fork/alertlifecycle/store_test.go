@@ -76,6 +76,9 @@ func TestUpsertAndReadCurrentAlert(t *testing.T) {
 	if got.LastSeenAt == nil {
 		t.Fatal("expected last_seen_at to be set")
 	}
+	if got.GroupLabelsJSON != "{}" {
+		t.Fatalf("group_labels_json mismatch: got=%q want=%q", got.GroupLabelsJSON, "{}")
+	}
 }
 
 func TestInsertStateTransition(t *testing.T) {

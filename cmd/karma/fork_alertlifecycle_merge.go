@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	promlabels "github.com/prometheus/prometheus/model/labels"
+
 	"github.com/prymitive/karma/internal/alertmanager"
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
 	"github.com/prymitive/karma/internal/filters"
@@ -48,13 +50,17 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 		if !ok {
 			continue
 		}
+		groupLabels, ok := lifecycleCurrentGroupLabels(current)
+		if !ok {
+			continue
+		}
 
 		group, found := byGroup[current.GroupID]
 		if !found {
 			newGroup := models.AlertGroup{
 				ID:                current.GroupID,
 				Receiver:          current.Receiver,
-				Labels:            models.LabelsFromMap(nil),
+				Labels:            groupLabels,
 				Alerts:            models.AlertList{},
 				AlertmanagerCount: map[string]int{},
 				StateCount:        newStateCount(),
@@ -62,6 +68,8 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 			live = append(live, newGroup)
 			group = &live[len(live)-1]
 			byGroup[current.GroupID] = group
+		} else if group.Labels.Len() == 0 && groupLabels.Len() > 0 {
+			group.Labels = groupLabels
 		}
 
 		if current.LastSeenAt != nil {
@@ -124,6 +132,16 @@ func lifecycleCurrentToModelAlert(current alertlifecycle.AlertCurrent) (models.A
 	alert.UpdateFingerprints()
 
 	return alert, true
+}
+
+func lifecycleCurrentGroupLabels(current alertlifecycle.AlertCurrent) (promlabels.Labels, bool) {
+	labelsMap := map[string]string{}
+	if err := json.Unmarshal([]byte(current.GroupLabelsJSON), &labelsMap); err != nil {
+		slog.Error("Failed to unmarshal lifecycle group labels", slog.String("alertID", current.AlertID), slog.Any("error", err))
+		return promlabels.Labels{}, false
+	}
+
+	return models.LabelsFromMap(labelsMap), true
 }
 
 func hasAlertByID(alerts []models.Alert, alertID string) bool {

@@ -28,6 +28,7 @@ func TestMergeLifecycleStoredAlertsResolvedVisibilityByFilter(t *testing.T) {
 		State:             alertlifecycle.StateResolved,
 		Receiver:          "team-a",
 		GroupID:           "group-r",
+		GroupLabelsJSON:   `{"alertname":"DiskFull"}`,
 		LabelsJSON:        `{"alertname":"DiskFull","instance":"srv-2"}`,
 		AnnotationsJSON:   `{"summary":"Disk full"}`,
 		StartsAt:          mustParseTS(t, "2026-08-01T10:00:00Z"),
@@ -42,6 +43,7 @@ func TestMergeLifecycleStoredAlertsResolvedVisibilityByFilter(t *testing.T) {
 		State:             alertlifecycle.StateInactive,
 		Receiver:          "team-a",
 		GroupID:           "group-i",
+		GroupLabelsJSON:   `{"alertname":"CpuHigh"}`,
 		LabelsJSON:        `{"alertname":"CpuHigh","instance":"srv-3"}`,
 		AnnotationsJSON:   `{"summary":"CPU high"}`,
 		StartsAt:          mustParseTS(t, "2026-08-01T11:00:00Z"),
@@ -95,6 +97,7 @@ func TestMergeLifecycleStoredAlertsUsesLastSeenForRecency(t *testing.T) {
 		State:             alertlifecycle.StateInactive,
 		Receiver:          "team-a",
 		GroupID:           "group-inactive-old",
+		GroupLabelsJSON:   `{"alertname":"CpuHigh"}`,
 		LabelsJSON:        `{"alertname":"CpuHigh","instance":"srv-old"}`,
 		AnnotationsJSON:   `{"summary":"CPU high"}`,
 		StartsAt:          mustParseTS(t, "2026-07-01T10:00:00Z"),
@@ -110,6 +113,7 @@ func TestMergeLifecycleStoredAlertsUsesLastSeenForRecency(t *testing.T) {
 		State:             alertlifecycle.StateInactive,
 		Receiver:          "team-a",
 		GroupID:           "group-inactive-new",
+		GroupLabelsJSON:   `{"alertname":"DiskHigh"}`,
 		LabelsJSON:        `{"alertname":"DiskHigh","instance":"srv-new"}`,
 		AnnotationsJSON:   `{"summary":"Disk high"}`,
 		StartsAt:          mustParseTS(t, "2026-07-01T10:00:00Z"),
@@ -142,6 +146,49 @@ func TestMergeLifecycleStoredAlertsUsesLastSeenForRecency(t *testing.T) {
 	}
 	if !newGroup.LatestStartsAt.After(oldGroup.LatestStartsAt) {
 		t.Fatalf("expected new group recency (%s) to be after old group (%s)", newGroup.LatestStartsAt.UTC().Format(time.RFC3339), oldGroup.LatestStartsAt.UTC().Format(time.RFC3339))
+	}
+}
+
+func TestMergeLifecycleStoredAlertsRestoresGroupLabels(t *testing.T) {
+	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/lifecycle.sqlite"})
+	if err != nil {
+		t.Fatalf("OpenStore() returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	prev := lifecycleStore
+	lifecycleStore = store
+	t.Cleanup(func() {
+		lifecycleStore = prev
+	})
+
+	now := mustParseTS(t, "2026-08-01T12:00:00Z")
+	if err = store.UpsertCurrentAlert(alertlifecycle.AlertCurrent{
+		AlertID:           "id-group-labels",
+		State:             alertlifecycle.StateInactive,
+		Receiver:          "team-a",
+		GroupID:           "group-with-labels",
+		GroupLabelsJSON:   `{"alertname":"NodeDown","severity":"critical"}`,
+		LabelsJSON:        `{"alertname":"NodeDown","severity":"critical","instance":"srv-42"}`,
+		AnnotationsJSON:   `{"summary":"Node is down"}`,
+		StartsAt:          mustParseTS(t, "2026-07-01T12:00:00Z"),
+		LastSeenAt:        &now,
+		RelevantUpstreams: `["am-a"]`,
+	}); err != nil {
+		t.Fatalf("UpsertCurrentAlert() failed: %v", err)
+	}
+
+	merged := mergeLifecycleStoredAlerts([]models.AlertGroup{}, false)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged group, got %d", len(merged))
+	}
+	if merged[0].Labels.Get("alertname") != "NodeDown" {
+		t.Fatalf("expected group alertname label to be restored, got=%q", merged[0].Labels.Get("alertname"))
+	}
+	if merged[0].Labels.Get("severity") != "critical" {
+		t.Fatalf("expected group severity label to be restored, got=%q", merged[0].Labels.Get("severity"))
 	}
 }
 

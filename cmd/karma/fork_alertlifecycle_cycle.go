@@ -66,6 +66,12 @@ func buildLiveLifecycleSnapshot(groups []models.AlertGroup) []alertlifecycle.Liv
 				continue
 			}
 
+			groupLabelsJSON, err := json.Marshal(group.Labels.Map())
+			if err != nil {
+				slog.Error("Failed to marshal group labels for lifecycle snapshot", slog.String("alertID", alertID), slog.Any("error", err))
+				continue
+			}
+
 			upstreams := make([]string, 0, len(alert.Alertmanager))
 			for _, am := range alert.Alertmanager {
 				upstreams = append(upstreams, am.Name)
@@ -76,6 +82,7 @@ func buildLiveLifecycleSnapshot(groups []models.AlertGroup) []alertlifecycle.Liv
 				State:             modelStateToLifecycleState(alert.State),
 				Receiver:          alert.Receiver,
 				GroupID:           group.ID,
+				GroupLabelsJSON:   string(groupLabelsJSON),
 				LabelsJSON:        string(labelsJSON),
 				AnnotationsJSON:   string(annotationsJSON),
 				StartsAt:          alert.StartsAt,
