@@ -30,6 +30,9 @@ const stateValueOrZero = (v: number | undefined): string =>
 const titleCase = (v: string): string =>
   v.length > 0 ? v[0].toUpperCase() + v.slice(1) : v;
 
+const isUnknownState = (state: string): boolean =>
+  state.trim().toLowerCase() === "unknown";
+
 const timeOrDash = (ts: string | null | undefined): string => {
   if (!ts) return "-";
   const date = new Date(ts);
@@ -89,9 +92,15 @@ const ForkStorageStats: FC<{
           stateEntries.map(([state, count], idx) => (
             <span key={state}>
               {idx > 0 ? <span className="text-muted">, </span> : null}
-              <strong>
-                {titleCase(state)} {stateValueOrZero(count)}
-              </strong>
+              {isUnknownState(state) ? (
+                <span className="badge bg-warning text-dark">
+                  {titleCase(state)} {stateValueOrZero(count)}
+                </span>
+              ) : (
+                <strong>
+                  {titleCase(state)} {stateValueOrZero(count)}
+                </strong>
+              )}
             </span>
           ))
         )}
