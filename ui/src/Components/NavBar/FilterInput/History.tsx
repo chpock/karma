@@ -156,7 +156,7 @@ const HistoryMenu: FC<{
           afterClick={afterClick}
         />
         <ActionButton
-          colorClass="btn-warning"
+          colorClass="btn-resolved"
           icon={faCheckCircle}
           title="Show resolved"
           action={() => {

@@ -544,11 +544,8 @@ func (s *Store) GetStats() (Stats, error) {
 	}, nil
 }
 
-func (s *Store) queryStateCounts() (map[State]int, error) {
-	out := map[State]int{}
-	for _, state := range []State{StateActive, StateSuppressed, StateUnprocessed, StateInactive, StateResolved} {
-		out[state] = 0
-	}
+func (s *Store) queryStateCounts() (map[string]int, error) {
+	out := map[string]int{}
 
 	rows, err := s.db.Query(`
 SELECT state, COUNT(*)
@@ -566,8 +563,8 @@ GROUP BY state
 		if scanErr := rows.Scan(&raw, &count); scanErr != nil {
 			return nil, fmt.Errorf("failed to scan per-state counts row: %w", scanErr)
 		}
-		state := State(raw)
-		if !state.IsValid() {
+		state := strings.TrimSpace(raw)
+		if state == "" {
 			continue
 		}
 		out[state] = count

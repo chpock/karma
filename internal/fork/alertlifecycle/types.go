@@ -91,7 +91,7 @@ type HousekeepingResult struct {
 type Stats struct {
 	CurrentRows             int
 	HistoryRows             int
-	StateCounts             map[State]int
+	StateCounts             map[string]int
 	FileSizeBytes           int64
 	PageCount               int
 	PageSizeBytes           int

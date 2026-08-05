@@ -32,6 +32,15 @@
   background-color: var(--karma-color-default);
 }
 
+.btn-resolved,
+.bg-resolved {
+  background-color: #33425f;
+}
+
+.border-resolved {
+  border: 1px solid #273247;
+}
+
 .border-default {
   border: 1px solid var(--karma-color-default);
 }
@@ -76,6 +85,12 @@
   &.bg-dark,
   &.btn-dark {
     border: 1px solid var(--karma-label-dark-border);
+  }
+
+  &.bg-resolved,
+  &.btn-resolved {
+    border: 1px solid #273247;
+    background-color: #33425f !important;
   }
 }
 

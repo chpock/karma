@@ -37,6 +37,28 @@
 button.btn.component-history-button {
   margin-right: 0.5rem;
   margin-bottom: 0.5rem;
+
+  &.btn-resolved {
+    background-color: #33425f;
+    border-color: #273247;
+    color: #fff;
+
+    &:hover,
+    &:focus,
+    &:active {
+      background-color: #273247;
+      border-color: #1f2838;
+      color: #fff;
+    }
+  }
+}
+
+button.components-label.btn.btn-resolved {
+  color: #fff;
+
+  &:hover {
+    color: #fff;
+  }
 }
 
 button.btn.component-history-button:last-child {

@@ -24,10 +24,11 @@ const valueOrDash = (v: number | undefined): string => {
   return `${v}`;
 };
 
-const stateValueOrZero = (v: number | undefined): string => {
-  if (typeof v !== "number") return "0";
-  return `${v}`;
-};
+const stateValueOrZero = (v: number | undefined): string =>
+  typeof v !== "number" ? "0" : `${v}`;
+
+const titleCase = (v: string): string =>
+  v.length > 0 ? v[0].toUpperCase() + v.slice(1) : v;
 
 const timeOrDash = (ts: string | null | undefined): string => {
   if (!ts) return "-";
@@ -54,6 +55,10 @@ const ForkStorageStats: FC<{
     return <div className="text-muted">Loading storage stats...</div>;
   }
 
+  const stateEntries = Object.entries(response.stateCounts || {}).sort(
+    ([a], [b]) => a.localeCompare(b),
+  );
+
   return (
     <div className="small">
       <div className="mb-2">
@@ -78,19 +83,18 @@ const ForkStorageStats: FC<{
       </div>
       <div className="mb-2">
         <span className="text-muted">By state:</span>{" "}
-        <strong>active {stateValueOrZero(response.stateCounts?.active)}</strong>
-        <span className="text-muted">, </span>
-        <strong>
-          suppressed {stateValueOrZero(response.stateCounts?.suppressed)}
-        </strong>
-        <span className="text-muted">, </span>
-        <strong>
-          unprocessed {stateValueOrZero(response.stateCounts?.unprocessed)}
-        </strong>
-        <span className="text-muted">, </span>
-        <strong>inactive {stateValueOrZero(response.stateCounts?.inactive)}</strong>
-        <span className="text-muted">, </span>
-        <strong>resolved {stateValueOrZero(response.stateCounts?.resolved)}</strong>
+        {stateEntries.length === 0 ? (
+          <strong>none</strong>
+        ) : (
+          stateEntries.map(([state, count], idx) => (
+            <span key={state}>
+              {idx > 0 ? <span className="text-muted">, </span> : null}
+              <strong>
+                {titleCase(state)} {stateValueOrZero(count)}
+              </strong>
+            </span>
+          ))
+        )}
       </div>
       <div className="mb-2">
         <span className="text-muted">DB size:</span>{" "}
