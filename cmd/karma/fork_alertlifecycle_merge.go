@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/prymitive/karma/internal/alertmanager"
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
@@ -35,6 +36,7 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 	}
 
 	byGroup := make(map[string]*models.AlertGroup)
+	lifecycleRecencyByGroup := make(map[string]time.Time)
 	for i := range live {
 		group := &live[i]
 		group.StateCount = ensureStateCountKeys(group.StateCount)
@@ -62,6 +64,12 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 			byGroup[current.GroupID] = group
 		}
 
+		if current.LastSeenAt != nil {
+			if lastSeen, hasLastSeen := lifecycleRecencyByGroup[current.GroupID]; !hasLastSeen || current.LastSeenAt.After(lastSeen) {
+				lifecycleRecencyByGroup[current.GroupID] = *current.LastSeenAt
+			}
+		}
+
 		if hasAlertByID(group.Alerts, alert.LabelsFingerprint()) {
 			continue
 		}
@@ -75,7 +83,11 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 
 	for i := range live {
 		live[i].Alerts = sortAlerts(live[i].Alerts)
-		live[i].LatestStartsAt = live[i].FindLatestStartsAt()
+		latest := live[i].FindLatestStartsAt()
+		if lifecycleLatest, found := lifecycleRecencyByGroup[live[i].ID]; found && lifecycleLatest.After(latest) {
+			latest = lifecycleLatest
+		}
+		live[i].LatestStartsAt = latest
 		live[i].Hash = live[i].ContentFingerprint()
 	}
 
