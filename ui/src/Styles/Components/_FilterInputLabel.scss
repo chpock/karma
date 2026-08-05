@@ -72,6 +72,10 @@ button.components-label.btn {
     background-color: var(--bs-warning);
   }
 
+  &.btn-inactive:hover {
+    background-color: #e97826;
+  }
+
   &.btn-danger:hover {
     background-color: var(--bs-danger);
   }

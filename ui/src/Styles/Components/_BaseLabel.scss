@@ -37,6 +37,15 @@
   background-color: #33425f;
 }
 
+.btn-inactive,
+.bg-inactive {
+  background-color: #e97826;
+}
+
+.border-inactive {
+  border: 1px solid #cf671d;
+}
+
 .border-resolved {
   border: 1px solid #273247;
 }
@@ -75,6 +84,12 @@
   &.bg-warning,
   &.btn-warning {
     border: 1px solid var(--karma-label-warning-border);
+  }
+
+  &.bg-inactive,
+  &.btn-inactive {
+    border: 1px solid #cf671d;
+    background-color: #e97826 !important;
   }
 
   &.bg-info,
