@@ -366,7 +366,7 @@ func filterAlerts(dedupedAlerts []models.AlertGroup, fl []filters.Filter) (filte
 				continue
 			}
 
-			if hasAMFilters {
+			if hasAMFilters && len(alert.Alertmanager) > 0 {
 				clear(blockedAMs)
 				for _, am := range alert.Alertmanager {
 					for _, filter := range fl {
@@ -385,7 +385,7 @@ func filterAlerts(dedupedAlerts []models.AlertGroup, fl []filters.Filter) (filte
 					alert.Alertmanager = ams
 				}
 			}
-			if len(alert.Alertmanager) == 0 {
+			if len(alert.Alertmanager) == 0 && alert.State != models.AlertStateInactive && alert.State != models.AlertStateResolved {
 				continue
 			}
 
