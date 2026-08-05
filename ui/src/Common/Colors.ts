@@ -36,7 +36,7 @@ const StateLabelClassMap = Object.freeze({
   suppressed: "success",
   unprocessed: "secondary",
   inactive: "warning",
-  resolved: "secondary",
+  resolved: "warning",
 });
 
 export {

@@ -486,6 +486,10 @@ func (s *Store) GetStats() (Stats, error) {
 	if err != nil {
 		return Stats{}, fmt.Errorf("failed to count current alerts: %w", err)
 	}
+	stateCounts, err := s.queryStateCounts()
+	if err != nil {
+		return Stats{}, err
+	}
 	historyRows, err := queryInt(s.db, `SELECT COUNT(*) FROM alert_state_history`)
 	if err != nil {
 		return Stats{}, fmt.Errorf("failed to count state history rows: %w", err)
@@ -530,6 +534,7 @@ func (s *Store) GetStats() (Stats, error) {
 	return Stats{
 		CurrentRows:             currentRows,
 		HistoryRows:             historyRows,
+		StateCounts:             stateCounts,
 		FileSizeBytes:           fileSize,
 		PageCount:               pageCount,
 		PageSizeBytes:           pageSize,
@@ -537,6 +542,41 @@ func (s *Store) GetStats() (Stats, error) {
 		LastHousekeepingAt:      lastHousekeepingAt,
 		LastIncrementalVacuumAt: lastVacuumAt,
 	}, nil
+}
+
+func (s *Store) queryStateCounts() (map[State]int, error) {
+	out := map[State]int{}
+	for _, state := range []State{StateActive, StateSuppressed, StateUnprocessed, StateInactive, StateResolved} {
+		out[state] = 0
+	}
+
+	rows, err := s.db.Query(`
+SELECT state, COUNT(*)
+FROM alerts_current
+GROUP BY state
+`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query per-state counts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		var count int
+		if scanErr := rows.Scan(&raw, &count); scanErr != nil {
+			return nil, fmt.Errorf("failed to scan per-state counts row: %w", scanErr)
+		}
+		state := State(raw)
+		if !state.IsValid() {
+			continue
+		}
+		out[state] = count
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate per-state counts: %w", err)
+	}
+
+	return out, nil
 }
 
 func (s *Store) ResolveAlert(alertID string, changedBy *string, reason *string, changedAt time.Time) (*ResolveResult, error) {

@@ -15,6 +15,7 @@ type alertLifecycleStatsResponse struct {
 	MaxAlerts         int     `json:"maxAlerts"`
 
 	CurrentRows             int     `json:"currentRows"`
+	StateCounts             map[string]int `json:"stateCounts"`
 	HistoryRows             int     `json:"historyRows"`
 	FileSizeBytes           int64   `json:"fileSizeBytes"`
 	PageCount               int     `json:"pageCount"`
@@ -36,6 +37,7 @@ func alertLifecycleStats(w http.ResponseWriter, _ *http.Request) {
 			SQLitePath:        config.Config.AlertLifecycle.SQLite.Path,
 			RetentionTTLHours: config.Config.AlertLifecycle.Retention.TTL.Hours(),
 			MaxAlerts:         config.Config.AlertLifecycle.Retention.MaxAlerts,
+			StateCounts:       map[string]int{},
 		})
 		_, _ = w.Write(out)
 		return
@@ -56,11 +58,15 @@ func alertLifecycleStats(w http.ResponseWriter, _ *http.Request) {
 		RetentionTTLHours: config.Config.AlertLifecycle.Retention.TTL.Hours(),
 		MaxAlerts:         config.Config.AlertLifecycle.Retention.MaxAlerts,
 		CurrentRows:       stats.CurrentRows,
+		StateCounts:       map[string]int{},
 		HistoryRows:       stats.HistoryRows,
 		FileSizeBytes:     stats.FileSizeBytes,
 		PageCount:         stats.PageCount,
 		PageSizeBytes:     stats.PageSizeBytes,
 		FreelistCount:     stats.FreelistCount,
+	}
+	for state, count := range stats.StateCounts {
+		response.StateCounts[string(state)] = count
 	}
 	if stats.LastHousekeepingAt != nil {
 		value := stats.LastHousekeepingAt.UTC().Format(time.RFC3339Nano)

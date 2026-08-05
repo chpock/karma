@@ -265,6 +265,13 @@ export interface APIAlertLifecycleStatsResponseT {
   retentionTTLHours: number;
   maxAlerts: number;
   currentRows?: number;
+  stateCounts?: {
+    active?: number;
+    suppressed?: number;
+    unprocessed?: number;
+    inactive?: number;
+    resolved?: number;
+  };
   historyRows?: number;
   fileSizeBytes?: number;
   pageCount?: number;

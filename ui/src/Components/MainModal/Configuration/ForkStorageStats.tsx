@@ -24,6 +24,11 @@ const valueOrDash = (v: number | undefined): string => {
   return `${v}`;
 };
 
+const stateValueOrZero = (v: number | undefined): string => {
+  if (typeof v !== "number") return "0";
+  return `${v}`;
+};
+
 const timeOrDash = (ts: string | null | undefined): string => {
   if (!ts) return "-";
   const date = new Date(ts);
@@ -70,6 +75,22 @@ const ForkStorageStats: FC<{
         <strong>{valueOrDash(response.currentRows)}</strong>
         <span className="text-muted">, history rows:</span>{" "}
         <strong>{valueOrDash(response.historyRows)}</strong>
+      </div>
+      <div className="mb-2">
+        <span className="text-muted">By state:</span>{" "}
+        <strong>active {stateValueOrZero(response.stateCounts?.active)}</strong>
+        <span className="text-muted">, </span>
+        <strong>
+          suppressed {stateValueOrZero(response.stateCounts?.suppressed)}
+        </strong>
+        <span className="text-muted">, </span>
+        <strong>
+          unprocessed {stateValueOrZero(response.stateCounts?.unprocessed)}
+        </strong>
+        <span className="text-muted">, </span>
+        <strong>inactive {stateValueOrZero(response.stateCounts?.inactive)}</strong>
+        <span className="text-muted">, </span>
+        <strong>resolved {stateValueOrZero(response.stateCounts?.resolved)}</strong>
       </div>
       <div className="mb-2">
         <span className="text-muted">DB size:</span>{" "}
