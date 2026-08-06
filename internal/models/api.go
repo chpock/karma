@@ -359,6 +359,7 @@ func (ag APIAlertGroup) MarshalJSONTo(enc *jsontext.Encoder) error {
 // ag must have been processed by DedupSharedMaps before calling this.
 func NewAPIAlertGroup(ag AlertGroup, shared AlertGroupSharedMaps, allLabels map[string]map[string][]string, totalAlerts int) APIAlertGroup {
 	alerts := make([]APIAlert, len(ag.Alerts))
+	suppressedBreakdown := map[string]int{"current": 0, "past": 0}
 	for i, a := range ag.Alerts {
 		raw := a.RawState
 		if !a.HasRawState || int(raw) >= len(AlertStateList) {
@@ -367,6 +368,13 @@ func NewAPIAlertGroup(ag AlertGroup, shared AlertGroupSharedMaps, allLabels map[
 		isLive := a.IsLive
 		if !a.HasIsLive && len(a.Alertmanager) > 0 && a.State != AlertStateInactive && a.State != AlertStateResolved {
 			isLive = true
+		}
+		if a.State == AlertStateSuppressed {
+			if isLive {
+				suppressedBreakdown["current"]++
+			} else {
+				suppressedBreakdown["past"]++
+			}
 		}
 		alerts[i] = APIAlert{
 			StartsAt:     a.StartsAt,
@@ -387,7 +395,7 @@ func NewAPIAlertGroup(ag AlertGroup, shared AlertGroupSharedMaps, allLabels map[
 		Alerts:              alerts,
 		AlertmanagerCount:   ag.AlertmanagerCount,
 		StateCount:          ag.StateCount,
-		SuppressedBreakdown: ag.SuppressedBreakdown,
+		SuppressedBreakdown: suppressedBreakdown,
 		Receiver:            ag.Receiver,
 		ID:                  ag.ID,
 		LatestStartsAt:      ag.LatestStartsAt,

@@ -29,6 +29,10 @@
   },
   "alertmanagerCount": null,
   "stateCount": null,
+  "suppressedBreakdown": {
+    "current": 2,
+    "past": 0
+  },
   "receiver": "default",
   "id": "",
   "shared": {

@@ -29,6 +29,11 @@ const GroupHeader: FC<{
   setIsMenuOpen,
   gridLabelValue,
 }) => {
+  const suppressedCurrent =
+    group.suppressedBreakdown?.current ||
+    (group.suppressedBreakdown?.past ? 0 : group.stateCount.suppressed || 0);
+  const suppressedPast = group.suppressedBreakdown?.past || 0;
+
   const onCollapseClick = (event: MouseEvent) => {
     // left click       => toggle current group
     // left click + alt => toggle all groups
@@ -88,7 +93,7 @@ const GroupHeader: FC<{
         <FilteringCounterBadge
           name="@state"
           value="suppressed"
-          counter={group.suppressedBreakdown?.current || 0}
+          counter={suppressedCurrent}
           themed={themedCounters}
           alertStore={alertStore}
           appendFilters={["@is_live=true"]}
@@ -97,7 +102,7 @@ const GroupHeader: FC<{
           name="@state"
           value="suppressed-past"
           filterValue="suppressed"
-          counter={group.suppressedBreakdown?.past || 0}
+          counter={suppressedPast}
           themed={themedCounters}
           alertStore={alertStore}
           appendFilters={["@is_live=false"]}

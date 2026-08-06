@@ -31,6 +31,11 @@ const Swimlane = ({
   paddingTop,
   ref,
 }: SwimlaneProps) => {
+  const suppressedCurrent =
+    grid.suppressedBreakdown?.current ||
+    (grid.suppressedBreakdown?.past ? 0 : grid.stateCount.suppressed || 0);
+  const suppressedPast = grid.suppressedBreakdown?.past || 0;
+
   return (
     <h5
       ref={ref}
@@ -78,7 +83,7 @@ const Swimlane = ({
         <FilteringCounterBadge
           name="@state"
           value="suppressed"
-          counter={grid.suppressedBreakdown?.current || 0}
+          counter={suppressedCurrent}
           themed={true}
           alertStore={alertStore}
           appendFilters={["@is_live=true"]}
@@ -87,7 +92,7 @@ const Swimlane = ({
           name="@state"
           value="suppressed-past"
           filterValue="suppressed"
-          counter={grid.suppressedBreakdown?.past || 0}
+          counter={suppressedPast}
           themed={true}
           alertStore={alertStore}
           appendFilters={["@is_live=false"]}
