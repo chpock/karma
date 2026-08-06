@@ -24,15 +24,6 @@ const valueOrDash = (v: number | undefined): string => {
   return `${v}`;
 };
 
-const stateValueOrZero = (v: number | undefined): string =>
-  typeof v !== "number" ? "0" : `${v}`;
-
-const titleCase = (v: string): string =>
-  v.length > 0 ? v[0].toUpperCase() + v.slice(1) : v;
-
-const isUnknownState = (state: string): boolean =>
-  state.trim().toLowerCase() === "unknown";
-
 const timeOrDash = (ts: string | null | undefined): string => {
   if (!ts) return "-";
   const date = new Date(ts);
@@ -58,9 +49,15 @@ const ForkStorageStats: FC<{
     return <div className="text-muted">Loading storage stats...</div>;
   }
 
-  const stateEntries = Object.entries(response.stateCounts || {}).sort(
-    ([a], [b]) => a.localeCompare(b),
-  );
+  const active = response.stateCounts?.active || 0;
+  const unprocessed = response.stateCounts?.unprocessed || 0;
+  const inactive = response.stateCounts?.inactive || 0;
+  const resolved = response.stateCounts?.resolved || 0;
+  const suppressedCurrent =
+    response.suppressedBreakdown?.current ||
+    (response.suppressedBreakdown?.past ? 0 : response.stateCounts?.suppressed || 0);
+  const suppressedPast = response.suppressedBreakdown?.past || 0;
+  const pastUnprocessed = 0;
 
   return (
     <div className="small">
@@ -110,39 +107,28 @@ const ForkStorageStats: FC<{
         <strong>{response.maxAlerts}</strong>
       </div>
       <div className="mb-2">
-        <span className="text-muted">Current alerts:</span>{" "}
+        <span className="text-muted">Total stored alerts:</span>{" "}
         <strong>{valueOrDash(response.currentRows)}</strong>
         <span className="text-muted">, history rows:</span>{" "}
         <strong>{valueOrDash(response.historyRows)}</strong>
       </div>
       <div className="mb-2">
-        <span className="text-muted">By state:</span>{" "}
-        {stateEntries.length === 0 ? (
-          <strong>none</strong>
-        ) : (
-          stateEntries.map(([state, count], idx) => (
-            <span key={state}>
-              {idx > 0 ? <span className="text-muted">, </span> : null}
-              {isUnknownState(state) ? (
-                <span className="badge bg-warning text-dark">
-                  {titleCase(state)} {stateValueOrZero(count)}
-                </span>
-              ) : (
-                <strong>
-                  {titleCase(state)} {stateValueOrZero(count)}
-                </strong>
-              )}
-            </span>
-          ))
-        )}
+        <span className="text-muted">Current alerts:</span>{" "}
+        <strong>active {active}</strong>
+        <span className="text-muted">, </span>
+        <strong>suppressed {suppressedCurrent}</strong>
+        <span className="text-muted">, </span>
+        <strong>unprocessed {unprocessed}</strong>
       </div>
       <div className="mb-2">
-        <span className="text-muted">Suppressed split:</span>{" "}
-        <strong>
-          current {stateValueOrZero(response.suppressedBreakdown?.current)}
-        </strong>
+        <span className="text-muted">Past alerts:</span>{" "}
+        <strong>inactive {inactive}</strong>
         <span className="text-muted">, </span>
-        <strong>past {stateValueOrZero(response.suppressedBreakdown?.past)}</strong>
+        <strong>suppressed {suppressedPast}</strong>
+        <span className="text-muted">, </span>
+        <strong>unprocessed {pastUnprocessed}</strong>
+        <span className="text-muted">, </span>
+        <strong>resolved {resolved}</strong>
       </div>
       <div className="mb-2">
         <span className="text-muted">DB size:</span>{" "}
