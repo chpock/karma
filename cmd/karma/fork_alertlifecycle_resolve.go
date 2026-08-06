@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	jsonv2 "github.com/go-json-experiment/json"
 	"github.com/go-chi/chi/v5"
+	jsonv2 "github.com/go-json-experiment/json"
 
 	"github.com/prymitive/karma/internal/config"
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
@@ -23,6 +23,8 @@ type resolveAlertResponse struct {
 	AlertID   string  `json:"alertId"`
 	OldState  string  `json:"oldState"`
 	NewState  string  `json:"newState"`
+	Applied   bool    `json:"applied"`
+	Reason    string  `json:"reason,omitempty"`
 	ChangedAt string  `json:"changedAt"`
 	ChangedBy *string `json:"changedBy"`
 }
@@ -58,11 +60,17 @@ func resolveAlert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+	reason := ""
+	if !result.Applied {
+		reason = "already_resolved"
+	}
 	out, _ := marshalJSON(resolveAlertResponse{
 		Status:    "success",
 		AlertID:   result.AlertID,
 		OldState:  string(result.OldState),
 		NewState:  string(result.NewState),
+		Applied:   result.Applied,
+		Reason:    reason,
 		ChangedAt: result.ChangedAt.UTC().Format(time.RFC3339Nano),
 		ChangedBy: result.ChangedBy,
 	})
@@ -116,7 +124,7 @@ func handleResolveAlertError(w http.ResponseWriter, err error) {
 	case errors.Is(err, alertlifecycle.ErrAlertNotFound):
 		status = http.StatusNotFound
 		message = err.Error()
-	case errors.Is(err, alertlifecycle.ErrResolveStateConflict), errors.Is(err, alertlifecycle.ErrAlertAlreadyResolved):
+	case errors.Is(err, alertlifecycle.ErrResolveStateConflict):
 		status = http.StatusConflict
 		message = err.Error()
 	case errors.Is(err, alertlifecycle.ErrInvalidAlertID):

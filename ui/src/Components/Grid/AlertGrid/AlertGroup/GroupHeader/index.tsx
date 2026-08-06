@@ -88,9 +88,19 @@ const GroupHeader: FC<{
         <FilteringCounterBadge
           name="@state"
           value="suppressed"
-          counter={group.stateCount.suppressed}
+          counter={group.suppressedBreakdown?.current || 0}
           themed={themedCounters}
           alertStore={alertStore}
+          appendFilters={["@is_live=true"]}
+        />
+        <FilteringCounterBadge
+          name="@state"
+          value="suppressed-past"
+          filterValue="suppressed"
+          counter={group.suppressedBreakdown?.past || 0}
+          themed={themedCounters}
+          alertStore={alertStore}
+          appendFilters={["@is_live=false"]}
         />
         <FilteringCounterBadge
           name="@state"

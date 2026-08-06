@@ -2,139 +2,91 @@
 
 ## 1. Scope
 
-This document defines the architecture for adding persistent lifecycle tracking to the karma fork while minimizing divergence from upstream.
+This document explains lifecycle architecture for fork-only persistence while keeping upstream divergence minimal.
 
 Primary objective:
 
-- Continue showing alerts after they disappear from live Alertmanager data.
+- retain and serve non-live alerts after they disappear from Alertmanager live snapshots.
 
 Secondary objectives:
 
-- Preserve upstream compatibility and reduce merge conflicts.
-- Maintain deterministic behavior during partial outages.
-- Keep implementation simple and operationally safe.
+- deterministic behavior during partial outages,
+- operationally safe retention and housekeeping,
+- low-conflict upstream syncs.
 
-## 2. Existing upstream flow (baseline)
+## 2. Baseline upstream flow
 
-Upstream pipeline:
+Upstream pipeline is live-only:
 
-1. Poll Alertmanager instances.
-2. Build per-upstream in-memory alert groups.
-3. Deduplicate across upstreams.
-4. Build API response for `POST /alerts.json`.
-5. UI renders only current live data.
+1. poll Alertmanager,
+2. deduplicate in-memory groups,
+3. build API response,
+4. UI renders current snapshot.
 
-Important baseline properties:
+Without fork persistence, disappeared alerts vanish on next cycle.
 
-- If an upstream poll fails, no trustworthy state transitions can be inferred.
-- The system is optimized for live snapshot rendering.
-
-## 3. Fork architecture overview
-
-Fork introduces a sidecar lifecycle subsystem with SQLite persistence.
-
-High-level components:
+## 3. Fork architecture components
 
 1. **Live Snapshot Source**
-   - Existing upstream alert collection and dedup path.
-2. **Lifecycle Store (SQLite)**
-   - Current state per alert.
-   - State transition history per alert.
+   - existing upstream poll + dedup flow.
+2. **Lifecycle Store**
+   - SQLite tables `alert_states` and `alert_events`.
 3. **Transition Engine**
-   - Computes lifecycle updates from successful live snapshots.
+   - applies poll-cycle updates and disappearance logic.
 4. **Response Merger**
-   - Merges live alerts with persisted non-live alerts for API response.
+   - injects non-live persisted alerts into response dataset.
 5. **Manual Resolve API**
-   - User-triggered transition `inactive -> resolved`.
-6. **Retention + Housekeeping**
-   - TTL cleanup, cap by record count, periodic vacuum.
+   - explicit operator action with idempotent semantics for non-live alerts.
+6. **Housekeeping and Regroup**
+   - retention, vacuum, regroup consistency controls.
 
-## 4. Integration boundaries (upstream isolation)
+## 4. State model architecture
 
-To keep merge friction low, fork changes should be concentrated in new fork-specific packages and small integration hooks:
+Current-state row is modeled by tuple:
 
-- Add lifecycle module under a dedicated namespace (for example `internal/historyalerts` or similar).
-- Keep upstream `internal/alertmanager` collection logic mostly unchanged.
-- Add minimal hooks near:
-  - end of successful collection cycle,
-  - `alerts.json` response construction,
-  - new fork API handlers and config wiring.
+- `raw_state` (upstream fact),
+- `is_live` (presence in current live snapshot),
+- `is_resolved` (manual operator flag).
 
-Avoid deep invasive rewrites in:
+User-facing `state` is a deterministic projection over this tuple.
 
-- alert mappers,
-- upstream dedup internals,
-- generic shared model semantics not required for the fork.
+Why this is architecturally correct:
 
-## 5. State ownership model
+- separates upstream facts from fork semantics,
+- prevents semantic collisions (suppressed vs inactive),
+- supports future extension (silence-aware reclassification) without changing base model.
 
-State ownership is split:
+## 5. Deterministic transition semantics
 
-- **Live states** (`active`, `suppressed`, `unprocessed`) come from current Alertmanager data.
-- **Derived non-live state** (`inactive`) is computed by fork transition rules.
-- **Manual state** (`resolved`) is user-driven only.
+- Poll updates refresh live tuple and clear stale manual resolve when alert reappears.
+- Disappearance transition (`is_live=true -> false`) runs only with full relevant upstream success coverage.
+- Manual resolve only affects non-live alerts and is idempotent.
+- Every logical mutation writes one immutable `alert_events` row with old/new tuple.
 
-The fork never auto-promotes anything to `resolved`.
+## 6. Failure and uncertainty contract
 
-## 6. Failure semantics and stability
+Core rule: do not invent state when data is incomplete.
 
-Design rule: do not invent state when data is unavailable.
+Operationally:
 
-Therefore:
+- partial upstream failures block disappearance inference,
+- lifecycle state is left unchanged until coverage is trustworthy.
 
-- If relevant upstream coverage is incomplete in a cycle, do not auto-transition alert to `inactive`.
-- Manual resolve remains explicit and independent of upstream polling.
+## 7. Upstream-isolation contract
 
-This ensures behavior is stable under network instability and partial outages.
+Fork logic lives in dedicated modules.
 
-## 7. Relevant upstream model
+Upstream-owned integration hooks remain narrow:
 
-Relevant upstreams for an alert are based on the **latest successful live snapshot of that alert**, not on historical "ever seen" sets.
+- `cmd/karma/main.go` (bootstrap + routes),
+- `cmd/karma/timer.go` (post-poll hook),
+- `cmd/karma/views.go` (merged dataset path).
 
-Why:
+## 8. Observability model
 
-- Prevent stale historical memberships from blocking `inactive` forever after topology/config changes.
-- Reflect current routing reality.
+Fork exposes lifecycle operational state through:
 
-Operational effect:
+- `/alerts-history/stats` (rows, state counts, suppressed split, db/housekeeping/regroup telemetry),
+- `/alerts-history/warning` (persistent warning contract for DB expected-state).
 
-- Alert can become `inactive` when absent across upstreams that are relevant now.
-
-## 8. Storage mode and deployment model
-
-Initial supported mode:
-
-- **Single replica only** with local SQLite.
-
-Not supported in this phase:
-
-- Shared-write multi-replica with cross-node DB synchronization.
-
-This limitation must stay explicit in user-facing and operator docs.
-
-## 9. UI architecture contract
-
-Default visibility in main grid:
-
-- shown: `active`, `suppressed`, `unprocessed`, `inactive`
-- hidden by default: `resolved`
-
-Visual contract:
-
-- `inactive` uses yellow styling.
-
-`resolved` remains queryable/filterable for retrospective use, but is not in default view.
-
-## 10. Operational observability
-
-Fork adds storage observability endpoints and fields for:
-
-- total alert records,
-- total transition records,
-- SQLite file size,
-- configured TTL and limit,
-- housekeeping timestamps/status.
-
-Goal:
-
-- operators can monitor growth and retention behavior without opening SQLite manually.
+This avoids manual DB inspection for normal operations.

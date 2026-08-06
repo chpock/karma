@@ -213,6 +213,11 @@ type Alert struct {
 	InhibitedBy  []string               `json:"-"`
 	Alertmanager []AlertmanagerInstance `json:"alertmanager"`
 	State        AlertState             `json:"state"`
+	RawState     AlertState             `json:"-"`
+	HasRawState  bool                   `json:"-"`
+	IsLive       bool                   `json:"-"`
+	HasIsLive    bool                   `json:"-"`
+	IsResolved   bool                   `json:"-"`
 }
 
 // APIAlert is the JSON-serializable representation of Alert.
@@ -220,6 +225,9 @@ type Alert struct {
 type APIAlert struct {
 	StartsAt     time.Time              `json:"startsAt"`
 	State        string                 `json:"state"`
+	RawState     string                 `json:"rawState"`
+	IsLive       bool                   `json:"isLive"`
+	IsResolved   bool                   `json:"isResolved"`
 	Receiver     string                 `json:"receiver"`
 	LabelsFP     string                 `json:"id"`
 	Annotations  Annotations            `json:"annotations"`
@@ -239,6 +247,12 @@ func (a *APIAlert) marshalTo(w *jsonWriter) {
 	w.time(a.StartsAt)
 	w.key("state")
 	w.str(a.State)
+	w.key("rawState")
+	w.str(a.RawState)
+	w.key("isLive")
+	w.boolean(a.IsLive)
+	w.key("isResolved")
+	w.boolean(a.IsResolved)
 	w.key("receiver")
 	w.str(a.Receiver)
 	w.key("id")
@@ -294,6 +308,28 @@ func (a *Alert) UpdateFingerprints() {
 	_, _ = h.Write(seps)
 	_, _ = h.WriteString(a.StartsAt.Format(time.RFC3339))
 	_, _ = h.WriteString(a.State.String())
+	rawState := a.RawState
+	if !a.HasRawState {
+		rawState = a.State
+	}
+	isLive := a.IsLive
+	if !a.HasIsLive {
+		if a.State == AlertStateInactive || a.State == AlertStateResolved {
+			isLive = false
+		} else if len(a.Alertmanager) > 0 {
+			isLive = true
+		}
+	}
+	isResolved := a.IsResolved
+	if a.State == AlertStateResolved {
+		isResolved = true
+	}
+	_, _ = h.Write(seps)
+	_, _ = h.WriteString(rawState.String())
+	_, _ = h.Write(seps)
+	_, _ = h.WriteString(strconv.FormatBool(isLive))
+	_, _ = h.Write(seps)
+	_, _ = h.WriteString(strconv.FormatBool(isResolved))
 	for _, am := range a.Alertmanager {
 		_, _ = h.WriteString(am.Fingerprint)
 		_, _ = h.Write(seps)

@@ -2,21 +2,17 @@
 
 ## 1. Scope
 
-This spec defines fork-specific API additions.
-
-Existing upstream endpoints remain unchanged unless explicitly documented here.
+This document describes fork-specific API behavior and additive response fields.
 
 ## 2. Resolve endpoint
 
-## 2.1 Route
+### 2.1 Route
 
 - `POST /alerts/{id}/resolve`
 
-Where `{id}` is alert identity used by current core/UI behavior.
+### 2.2 Request
 
-## 2.2 Request
-
-Body (optional):
+Optional body:
 
 ```json
 {
@@ -24,30 +20,17 @@ Body (optional):
 }
 ```
 
-If authentication is enabled and a user exists in request context, that user is stored as `changed_by`.
-If no user context exists, `changed_by` is stored as `NULL`.
+### 2.3 Preconditions
 
-## 2.3 Preconditions
+- Resolve is allowed only when alert is non-live (`is_live=false`).
+- Live alerts return conflict.
 
-Resolve is allowed only when current state is `inactive`.
+### 2.4 Idempotency contract
 
-If state is not `inactive`, return conflict.
+- If non-live alert is not yet resolved: apply transition (`applied=true`).
+- If non-live alert is already resolved: return `200` no-op (`applied=false`, `reason=already_resolved`).
 
-## 2.4 Behavior
-
-On success:
-
-1. update `alerts_current.state` to `resolved`.
-2. append transition row to `alert_state_history` with:
-   - `old_state=inactive`
-   - `new_state=resolved`
-   - `change_source=manual`
-   - nullable `changed_by`
-3. return success payload.
-
-## 2.5 Response
-
-Success (200):
+### 2.5 Success response
 
 ```json
 {
@@ -55,103 +38,60 @@ Success (200):
   "alertId": "...",
   "oldState": "inactive",
   "newState": "resolved",
+  "applied": true,
   "changedAt": "2026-08-03T10:11:12Z",
   "changedBy": null
 }
 ```
 
-Possible errors:
+### 2.6 Errors
 
-- `404` alert not found.
-- `409` state transition not allowed from current state.
-- `500` storage failure.
+- `404` alert not found
+- `409` resolve is not allowed for live alerts
+- `500` storage/internal errors
 
-## 3. Storage stats endpoint
+## 3. Alerts response (`POST /alerts.json`) additions
 
-## 3.1 Route
+Each alert includes:
+
+- `state` (projected user-facing state)
+- `rawState`
+- `isLive`
+- `isResolved`
+
+Group/grid objects can include:
+
+- `suppressedBreakdown.current`
+- `suppressedBreakdown.past`
+
+`stateCount.suppressed` remains total suppressed count (compatibility).
+
+Resolved merge visibility:
+
+- resolved alerts are excluded by default,
+- included only when request filters include explicit `@state=resolved`.
+
+## 4. Storage stats endpoint
+
+### 4.1 Route
 
 - `GET /alerts-history/stats`
 
-## 3.2 Response
+### 4.2 Response additions
 
-Success (200):
+- `stateCounts` (dynamic map)
+- `suppressedBreakdown` (`current`/`past`)
+- regroup status/progress and expected-state fields
+- DB size/page/freelist and housekeeping timestamps
 
-```json
-{
-  "status": "ok",
-  "storageEnabled": true,
-  "sqlitePath": "/var/lib/karma/alert-lifecycle.sqlite",
-  "retentionTTLHours": 720,
-  "maxAlerts": 100000,
-  "currentRows": 1234,
-  "stateCounts": {
-    "active": 1000,
-    "suppressed": 120,
-    "unprocessed": 40,
-    "inactive": 60,
-    "resolved": 14
-  },
-  "historyRows": 9876,
-  "groupingFingerprint": "sha256:...",
-  "regroupTargetFingerprint": "sha256:...",
-  "regroupStatus": "ready",
-  "regroupError": "",
-  "regroupProcessed": 1234,
-  "regroupTotal": 1234,
-  "dbExpectedState": true,
-  "dbExpectedStateReason": "",
-  "lastRegroupStartedAt": "2026-08-04T08:58:00Z",
-  "lastRegroupFinishedAt": "2026-08-04T08:58:01Z",
-  "fileSizeBytes": 12345678,
-  "pageCount": 3020,
-  "pageSizeBytes": 4096,
-  "freelistCount": 16,
-  "lastHousekeepingAt": "2026-08-04T09:00:00Z",
-  "lastIncrementalVacuumAt": "2026-08-04T09:05:00Z"
-}
-```
-
-Notes:
-
-- when lifecycle storage is disabled, `storageEnabled=false` and counters are omitted/zero-valued.
-- `last*At` fields are nullable and can be `null` before first housekeeping run.
-- `dbExpectedState=false` means grouping data is currently not in expected state and UI must show persistent warning.
-
-## 3.3 Warning endpoint
+## 5. Warning endpoint
 
 - `GET /alerts-history/warning`
 
-Success (200):
+Returns persistent-warning status for DB expected-state contract:
 
-```json
-{
-  "status": "ok",
-  "storageEnabled": true,
-  "dbExpectedState": false,
-  "reason": "Background regroup is in progress or failed",
-  "regroupStatus": "running",
-  "regroupError": "",
-  "regroupProcessed": 500,
-  "regroupTotal": 1234
-}
-```
+- `dbExpectedState`
+- `reason`
+- regroup status/error/progress
 
-UI contract:
-
-- warning is persistent while `dbExpectedState=false`.
-- warning disappears only when DB returns to expected state.
-
-## 4. Alerts response behavior changes
-
-`POST /alerts.json` behavior in fork:
-
-- default state set includes `inactive` records from persistent store.
-- `resolved` records are excluded by default.
-- `resolved` records are included only if requested via explicit state filter (`@state=resolved`).
-- non-state filters alone do not cause resolved records to be merged.
-
-## 5. Backward compatibility
-
-- Existing clients expecting upstream behavior should continue working.
-- New fields/states must be additive where possible.
-- Versioning strategy for breaking API shape changes must be documented if introduced later.
+UI must keep warning visible while `dbExpectedState=false`.

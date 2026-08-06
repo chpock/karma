@@ -22,6 +22,9 @@ const (
 type AlertCurrent struct {
 	AlertID           string
 	State             State
+	RawState          State
+	IsLive            bool
+	IsResolved        bool
 	Receiver          string
 	GroupID           string
 	GroupLabelsJSON   string
@@ -30,18 +33,28 @@ type AlertCurrent struct {
 	StartsAt          time.Time
 	LastSeenAt        *time.Time
 	RelevantUpstreams string
+	ResolvedAt        *time.Time
+	ResolvedBy        *string
+	ResolvedComment   *string
 	UpdatedAt         time.Time
 }
 
 type AlertStateTransition struct {
-	ID           int64
-	AlertID      string
-	OldState     *State
-	NewState     State
-	ChangedAt    time.Time
-	ChangeSource ChangeSource
-	ChangedBy    *string
-	Reason       *string
+	ID            int64
+	AlertID       string
+	OldState      *State
+	NewState      State
+	OldRawState   *State
+	NewRawState   State
+	OldIsLive     *bool
+	NewIsLive     bool
+	OldIsResolved *bool
+	NewIsResolved bool
+	ChangedAt     time.Time
+	ChangeSource  ChangeSource
+	ChangedBy     *string
+	ReasonCode    *string
+	ReasonText    *string
 }
 
 type LiveAlertSnapshot struct {
@@ -76,6 +89,7 @@ type ResolveResult struct {
 	AlertID   string
 	OldState  State
 	NewState  State
+	Applied   bool
 	ChangedAt time.Time
 	ChangedBy *string
 }
@@ -91,23 +105,25 @@ type HousekeepingResult struct {
 }
 
 type Stats struct {
-	CurrentRows              int
-	HistoryRows              int
-	StateCounts              map[string]int
-	GroupingFingerprint      string
-	RegroupTargetFingerprint string
-	RegroupStatus            string
-	RegroupError             string
-	RegroupProcessed         int
-	RegroupTotal             int
-	RegroupStartedAt         *time.Time
-	RegroupFinishedAt        *time.Time
-	FileSizeBytes            int64
-	PageCount                int
-	PageSizeBytes            int
-	FreelistCount            int
-	LastHousekeepingAt       *time.Time
-	LastIncrementalVacuumAt  *time.Time
+	CurrentRows                int
+	HistoryRows                int
+	StateCounts                map[string]int
+	SuppressedBreakdownCurrent int
+	SuppressedBreakdownPast    int
+	GroupingFingerprint        string
+	RegroupTargetFingerprint   string
+	RegroupStatus              string
+	RegroupError               string
+	RegroupProcessed           int
+	RegroupTotal               int
+	RegroupStartedAt           *time.Time
+	RegroupFinishedAt          *time.Time
+	FileSizeBytes              int64
+	PageCount                  int
+	PageSizeBytes              int
+	FreelistCount              int
+	LastHousekeepingAt         *time.Time
+	LastIncrementalVacuumAt    *time.Time
 }
 
 type RegroupResult struct {

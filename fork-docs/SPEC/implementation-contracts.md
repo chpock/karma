@@ -2,101 +2,55 @@
 
 ## 1. Objective
 
-Define strict boundaries for how fork functionality integrates into upstream code paths.
+Keep fork behavior isolated while integrating the refactored state model end-to-end.
 
-## 2. Minimal integration points
+## 2. Minimal upstream touchpoints
 
-Integration should be limited to a small set of touchpoints:
-
-1. **Startup/bootstrap**
-   - initialize lifecycle store and housekeeping scheduler.
-2. **Post-poll processing**
-   - after each successful cycle, run lifecycle transition processor.
-3. **Alerts response assembly**
-   - merge stored `inactive` alerts into response dataset.
-4. **Fork API routes**
-   - resolve endpoint.
-   - stats endpoint.
-
-Implemented touchpoints in upstream-owned files:
+Only these upstream-owned files are integration hooks:
 
 - `cmd/karma/main.go`
-  - route hooks:
-    - `POST /alerts/{id}/resolve`
-    - `GET /alerts-history/stats`
-    - `GET /alerts-history/warning`
-  - startup/shutdown hooks:
-    - `setupAlertLifecycleStorage()`
-    - `closeAlertLifecycleStorage()`
+  - lifecycle bootstrap/shutdown hooks
+  - fork routes (`/alerts/{id}/resolve`, `/alerts-history/stats`, `/alerts-history/warning`)
 - `cmd/karma/timer.go`
-  - post-poll hook:
-    - `runAlertLifecyclePollCycle(successfulUpstreams)`
+  - post-poll lifecycle cycle hook
 - `cmd/karma/views.go`
-  - dataset assembly hook:
-    - `dedupedAlertsWithLifecycle(matchFilters)`
+  - merged lifecycle dataset in response build path
 
-## 3. Non-invasive contract
+All lifecycle logic remains in fork files/modules.
 
-Do not alter core upstream responsibilities unless required:
+## 3. Data ownership
 
-- alert fetching/parsing,
-- Alertmanager proxying semantics,
-- silence management behavior,
-- existing API payloads unrelated to lifecycle.
+- Live snapshot ownership: Alertmanager collector + dedup pipeline.
+- Lifecycle ownership: `internal/fork/alertlifecycle` (`alert_states` / `alert_events`).
+- Merge ownership: `cmd/karma/fork_alertlifecycle_merge.go`.
 
-## 4. Data ownership contract
+## 4. Filter and projection contract
 
-- Live snapshot remains source of truth for live states.
-- Lifecycle store is source of truth for `inactive/resolved` and transition history.
-- Merge layer combines both for UI consumption.
+- `@state` must operate on projected state (`alert.State`), not AM-only states.
+- `@is_live` is lifecycle-aware and falls back to AM presence for legacy alerts without lifecycle fields.
+- `@state` is not flagged as Alertmanager-only filter anymore.
 
-## 5. Concurrency contract
+## 5. Resolve contract
 
-In single-replica mode:
+- Resolve endpoint delegates to store idempotent semantics.
+- Non-live + already resolved is `200` no-op (`applied=false`).
+- Live alerts return conflict.
 
-- one process owns writes to SQLite.
-- writes from poller and resolve endpoint must use consistent transaction boundaries.
+## 6. Event logging contract
 
-Recommended:
-
-- short transactions,
-- retry-on-busy with bounded backoff,
-- idempotent transition writes.
-
-## 6. Config contract
-
-Fork-specific config must be namespaced and additive.
-
-Suggested shape (exact key naming can be finalized during implementation):
-
-- `alertLifecycle.enabled`
-- `alertLifecycle.sqlite.path`
-- `alertLifecycle.retention.ttl`
-- `alertLifecycle.retention.maxAlerts`
-- `alertLifecycle.housekeeping.incrementalVacuumInterval`
-
-Defaults must match documented policy.
+Every logical mutation writes exactly one `alert_events` row with full old/new tuple and reason metadata.
 
 ## 7. Testing contract
 
-Required test layers:
+Required checks for this model:
 
-- unit tests for storage and transition engine.
-- API tests for resolve and stats endpoints.
-- integration tests covering poll cycles with upstream failures.
-- UI tests for inactive rendering and resolve action behavior.
+- lifecycle store unit tests (`internal/fork/alertlifecycle`)
+- filter tests (`internal/filters`) including `@is_live`
+- model snapshot tests (`internal/models`)
+- lifecycle integration tests (`cmd/karma` focused tests)
+- UI TypeScript build
 
-## 8. Logging contract
+## 8. Docs and migration contract
 
-Log key lifecycle operations at info/debug levels with structured context:
-
-- cycle id/timestamp,
-- transition counts by type,
-- skipped inactive transitions due to incomplete upstream coverage,
-- cleanup and vacuum results.
-
-## 9. Database evolution contract
-
-- Any SQLite schema change must follow `fork-docs/SPEC/db-migrations.md`.
-- Every schema version bump requires an append-only migration note in
-  `fork-docs/SPEC/db-migrations/`.
+- Schema and API/UI contracts must be synced in `fork-docs/SPEC/`.
+- Any future schema bump remains subject to `fork-docs/SPEC/db-migrations.md` + dedicated migration note.

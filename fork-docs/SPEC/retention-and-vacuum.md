@@ -5,7 +5,7 @@
 Fork default settings:
 
 - TTL: 30 days
-- Max stored alerts in `alerts_current`: 100000
+- Max stored alerts in `alert_states`: 100000
 
 TTL window uses `last_seen_at` semantics.
 
@@ -27,15 +27,15 @@ Related history rows handling:
 
 ## 4. Limit cleanup policy
 
-After TTL pass, if `alerts_current` count exceeds max:
+After TTL pass, if `alert_states` count exceeds max:
 
 - evict oldest alerts by "state changed long ago" ordering.
 
 Ordering source:
 
 - current implementation orders by latest transition timestamp from history:
-  `MAX(alert_state_history.changed_at)` per alert.
-- fallback for alerts without transition rows is `alerts_current.updated_at`.
+  `MAX(alert_events.changed_at)` per alert.
+- fallback for alerts without transition rows is `alert_states.updated_at`.
 
 This aligns with requirement to remove records that had older state changes first.
 
@@ -58,7 +58,7 @@ Recommended periodic schedule:
 Expose at least:
 
 - DB file size bytes.
-- counts for `alerts_current` and `alert_state_history`.
+- counts for `alert_states` and `alert_events`.
 - last housekeeping timestamp.
 - last incremental vacuum timestamp.
 

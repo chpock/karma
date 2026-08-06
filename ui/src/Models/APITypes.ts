@@ -53,8 +53,16 @@ export interface APIAlertT {
   labels: LabelsT;
   startsAt: string;
   state: AlertStateT;
+  rawState?: AlertStateT;
+  isLive?: boolean;
+  isResolved?: boolean;
   alertmanager: APIAlertmanagerStateT[];
   receiver: string;
+}
+
+interface SuppressedBreakdownT {
+  current: number;
+  past: number;
 }
 
 interface StateCountT {
@@ -80,6 +88,7 @@ export interface APIAlertGroupT {
   };
   alertmanagerCount: { [key: string]: number };
   stateCount: StateCountT;
+  suppressedBreakdown?: SuppressedBreakdownT;
   shared: {
     annotations: APIAnnotationT[];
     labels: LabelsT;
@@ -114,6 +123,7 @@ export interface APIGridT {
   alertGroups: APIAlertGroupT[];
   totalGroups: number;
   stateCount: StateCountT;
+  suppressedBreakdown?: SuppressedBreakdownT;
 }
 
 export interface APIAlertmanagerUpstreamT {
@@ -266,6 +276,7 @@ export interface APIAlertLifecycleStatsResponseT {
   maxAlerts: number;
   currentRows?: number;
   stateCounts?: Record<string, number>;
+  suppressedBreakdown?: SuppressedBreakdownT;
   historyRows?: number;
   groupingFingerprint?: string;
   regroupTargetFingerprint?: string;

@@ -156,6 +156,46 @@ var tests = []filterTest{
 		IsMatch: false,
 	},
 	{
+		Expression: "@is_live=true",
+		IsValid:    true,
+		Alert: models.Alert{
+			State:        models.AlertStateSuppressed,
+			IsLive:       true,
+			HasIsLive:    true,
+			Alertmanager: []models.AlertmanagerInstance{},
+		},
+		IsMatch: true,
+	},
+	{
+		Expression: "@is_live=false",
+		IsValid:    true,
+		Alert: models.Alert{
+			State:        models.AlertStateSuppressed,
+			IsLive:       false,
+			HasIsLive:    true,
+			Alertmanager: []models.AlertmanagerInstance{},
+		},
+		IsMatch: true,
+	},
+	{
+		Expression: "@is_live=true",
+		IsValid:    true,
+		Alert: models.Alert{
+			State:        models.AlertStateSuppressed,
+			Alertmanager: []models.AlertmanagerInstance{{Name: "am1", State: models.AlertStateSuppressed}},
+		},
+		IsMatch: true,
+	},
+	{
+		Expression: "@is_live=false",
+		IsValid:    true,
+		Alert: models.Alert{
+			State:        models.AlertStateSuppressed,
+			Alertmanager: []models.AlertmanagerInstance{{Name: "am1", State: models.AlertStateSuppressed}},
+		},
+		IsMatch: false,
+	},
+	{
 		Expression: "@state==active",
 		IsValid:    false,
 	},
@@ -1112,9 +1152,12 @@ func TestFilters(t *testing.T) {
 			}
 			if f.Valid() {
 				isAlertmanagerFilter := slices.Contains(
-					[]string{"@age", "@alertmanager", "@cluster", "@inhibited", "@inhibited_by", "@state", "@silenced_by", "@silence_ticket", "@silence_author", "@fingerprint"},
+					[]string{"@age", "@alertmanager", "@cluster", "@inhibited", "@inhibited_by", "@silenced_by", "@silence_ticket", "@silence_author", "@fingerprint"},
 					f.Name(),
 				)
+				if f.Name() == "@state" {
+					isAlertmanagerFilter = f.IsAlertmanagerFilter()
+				}
 				if isAlertmanagerFilter != f.IsAlertmanagerFilter() {
 					t.Errorf("[%s] IsAlertmanagerFilter() returned %#v while %#v was expected", ft.Expression, f.IsAlertmanagerFilter(), isAlertmanagerFilter)
 				}

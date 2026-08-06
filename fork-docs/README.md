@@ -2,43 +2,62 @@
 
 This directory contains fork-specific documentation for the `karma-history` branch.
 
-The goal of this fork is to extend upstream karma with persistent alert lifecycle storage and UI support for historical (non-live) alerts, while keeping changes as isolated as possible from upstream code to reduce merge conflicts during future syncs.
+Goal of this fork: keep historical alert lifecycle in persistent storage while preserving low-conflict syncs with upstream.
 
-## Why this fork exists
+## User-facing behavior (what operators see)
 
-Upstream karma shows alerts that are currently visible in Alertmanager.
-When an alert disappears from Alertmanager responses, it disappears from UI.
+Upstream karma is live-snapshot only: when alert disappears from Alertmanager, it disappears from UI.
 
-This fork adds:
+This fork keeps alert lifecycle in SQLite and changes behavior as follows:
 
-- Persistent storage of alert lifecycle records in SQLite.
-- A new automatic lifecycle state `inactive` for alerts that are no longer present in live Alertmanager data.
-- A manual state `resolved` set explicitly by a UI action.
-- Full state transition history with timestamps.
-- Retention and storage housekeeping (TTL, record limit, VACUUM policy).
+- Alerts can remain visible after disappearance from live Alertmanager data.
+- Default grid shows: `active`, `suppressed`, `unprocessed`, `inactive`.
+- `resolved` alerts remain stored but hidden by default.
+- Operators can explicitly reveal resolved via filter (`@state=resolved`).
+- Resolve action is manual; UI enables it for `inactive` alerts.
+- Backend resolve semantics are idempotent for non-live alerts.
 
-## Design constraints agreed for this fork
+### Why it works this way
 
-- Keep behavior stable and predictable, do not infer state when data is missing.
-- Do not add new dedup/grouping logic now.
-- Alert identity must follow existing core/UI behavior.
-- `resolved` is manual-only (no auto-resolve).
-- Default view includes all states except `resolved`.
-- `inactive` is shown with yellow UI styling.
-- Initial deployment mode is single-replica only (local SQLite).
+- **No guessing under uncertainty**: if upstream data is incomplete, lifecycle engine does not invent state transitions.
+- **Clear operational semantics**:
+  - `inactive` means non-live alert that still needs attention,
+  - `resolved` means operator explicitly marked it resolved.
+- **Suppressed is preserved semantically**:
+  - non-live suppressed alerts stay suppressed in projection,
+  - they are not mixed into inactive bucket.
 
-## Document map
+### Important user-visible details
+
+- `@state` filters projected user state.
+- Additional `@is_live=true|false` allows separating current vs past suppressed alerts.
+- Suppressed counters are split into `current` and `past` in UI badges/stats.
+- A persistent warning banner appears if lifecycle DB is not in expected regroup state.
+
+## Operator and deployment constraints
+
+- Current deployment model: single replica with local SQLite.
+- Lifecycle DB path default: `/var/lib/karma/alert-lifecycle.sqlite`.
+- Retention defaults: TTL 30 days + max 100000 alerts.
+- Housekeeping order: TTL cleanup -> maxAlerts cleanup -> incremental vacuum.
+
+## Documentation map
 
 - `ARCHITECTURE.md` - high-level architecture and integration boundaries.
 - `CONFIGURATION.md` - fork-specific config keys and defaults.
-- `IMPLEMENTATION_PLAN.md` - phased implementation and verification plan.
+- `IMPLEMENTATION_PLAN.md` - delivery record and maintenance policy.
 - `FUTURE_FEATURES.md` - intentionally deferred scope.
-- `SPEC/` - technical contracts by area.
-- `SPEC/db-migrations.md` - migration policy and workflow for schema changes.
-- `SPEC/db-migrations/` - one document per schema version change.
-- `ADR/` - architecture decision records.
+- `SPEC/state-model.md` - canonical lifecycle semantics and projection rules.
+- `SPEC/api-contracts.md` - API behavior and payload contracts.
+- `SPEC/ui-contracts.md` - UI behavior and filtering/counter contracts.
+- `SPEC/storage-schema.md` - SQLite schema and storage invariants.
+- `SPEC/implementation-contracts.md` - integration boundaries, ownership, and test contracts.
+- `SPEC/db-migrations.md` - migration policy.
+- `SPEC/db-migrations/` - one document per schema-version change.
+- `ADR/` - architecture decisions.
 
-## Source of truth policy
+## Source-of-truth policy
 
-For fork-only behavior, documents in this directory are the source of truth.
-If code behavior changes, update the corresponding spec and ADR in the same change.
+For fork-only behavior, docs in `fork-docs/` are source of truth.
+
+If code behavior changes, update matching spec/ADR in the same change.

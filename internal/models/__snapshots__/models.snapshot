@@ -68,6 +68,9 @@
     {
       "startsAt": "0001-01-01T00:00:00Z",
       "state": "suppressed",
+      "rawState": "suppressed",
+      "isLive": true,
+      "isResolved": false,
       "receiver": "default",
       "id": "",
       "annotations": [
@@ -121,6 +124,9 @@
     {
       "startsAt": "0001-01-01T00:00:00Z",
       "state": "active",
+      "rawState": "active",
+      "isLive": true,
+      "isResolved": false,
       "receiver": "default",
       "id": "",
       "annotations": [],
@@ -166,6 +172,9 @@
     {
       "startsAt": "0001-01-01T00:00:00Z",
       "state": "suppressed",
+      "rawState": "suppressed",
+      "isLive": true,
+      "isResolved": false,
       "receiver": "default",
       "id": "",
       "annotations": [],

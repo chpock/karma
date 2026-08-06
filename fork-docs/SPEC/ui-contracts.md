@@ -1,86 +1,57 @@
 # Spec: UI Contracts
 
-## 1. Scope
+## 1. Default visibility
 
-This document defines user-facing behavior for lifecycle states and resolve actions.
-
-## 2. Default visibility
-
-Main grid default must include alerts in states:
+Default grid includes projected states:
 
 - `active`
 - `suppressed`
 - `unprocessed`
 - `inactive`
 
-`resolved` alerts remain stored and queryable, but hidden by default.
+`resolved` remains hidden by default.
 
-## 3. State colors
+## 2. State rendering contract
 
-Visual mapping:
+- UI uses API `state` as projected state.
+- `rawState` and `isLive` are additive dimensions for refined visuals.
 
-- `active` - existing danger/red style.
-- `suppressed` - existing success/green style.
-- `unprocessed` - existing neutral style.
-- `inactive` - yellow style.
-- `resolved` - hidden by default (style only needed if explicitly displayed in future).
+Suppressed split:
 
-## 4. Resolve action
+- `state=suppressed` + `isLive=true` -> current suppressed style.
+- `state=suppressed` + `isLive=false` -> `suppressed-past` style token.
 
-The alert menu adds action "Resolve" for `inactive` alerts.
+## 3. Filter contract
 
-Rules:
+- `@state` filters projected states.
+- `@is_live=true|false` filters live-presence dimension.
+- Contradictory combinations are valid and return empty sets.
 
-- action is always rendered in the alert menu, but enabled only when alert state is `inactive`.
-- action calls `POST /alerts/{id}/resolve`.
-- on success, alert disappears from default grid view.
-- if filter currently includes `resolved`, alert remains visible with updated state.
+## 4. Counter badges
 
-## 5. Authentication behavior
+Group header and swimlane show:
 
-Current phase supports both:
+- unprocessed
+- suppressed current (`suppressedBreakdown.current`)
+- suppressed past (`suppressedBreakdown.past`)
+- inactive
+- active
 
-- authenticated environments,
-- unauthenticated environments.
+Badge actions:
 
-If auth is disabled, resolve action remains available.
+- suppressed current adds `@state=suppressed` + `@is_live=true`
+- suppressed past adds `@state=suppressed` + `@is_live=false`
 
-## 6. Nullable actor display
+Alt+click still applies negative state filter only (without forced append filters).
 
-If UI surfaces transition actor info and `changed_by` is `NULL`, it should render as literal `NULL` with neutral/gray styling to indicate true null value.
+## 5. Resolve action
 
-## 7. Filtering contract
+- Resolve button is visible in alert menu.
+- Current UI policy: enabled for `state=inactive`.
+- Backend policy: resolve endpoint is authoritative and idempotent for non-live alerts.
+- On success, UI forces next fetch and reflects backend `applied` result.
 
-`@state` filter must support:
+## 6. Warning and stats
 
-- `active`
-- `suppressed`
-- `unprocessed`
-- `inactive`
-- `resolved`
-
-Autocomplete and validation must include new values.
-
-Resolved visibility rule:
-
-- `resolved` alerts are merged into response only when `@state=resolved` is present.
-
-Quick access rule:
-
-- filter history menu includes a quick action that adds `@state=resolved`.
-
-Operator visibility rule:
-
-- settings modal includes a fork storage stats section backed by `GET /alerts-history/stats`.
-
-Expected-state warning rule:
-
-- UI shows persistent warning banner when lifecycle DB is not in expected state.
-- warning source endpoint: `GET /alerts-history/warning`.
-- warning is removed only when endpoint reports `dbExpectedState=true`.
-
-## 8. Non-goals in this phase
-
-- Dedicated retrospective page for resolved alerts.
-- Complex lifecycle timeline UI.
-- Advanced resolve/ack workflows.
+- Persistent warning banner must be shown while `GET /alerts-history/warning` returns `dbExpectedState=false`.
+- Configuration modal displays fork storage stats, including dynamic state counts and suppressed current/past split.

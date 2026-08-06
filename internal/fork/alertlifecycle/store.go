@@ -23,7 +23,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = "3"
+const schemaVersion = "4"
 
 const (
 	metaSchemaVersion            = "schema_version"
@@ -39,6 +39,8 @@ const (
 	metaRegroupTargetFingerprint = "regroup_target_fingerprint"
 	metaRegroupCursorRowID       = "regroup_cursor_rowid"
 )
+
+const reasonCodeMaxLength = 64
 
 const (
 	regroupStatusReady   = "ready"
@@ -116,9 +118,12 @@ func (s *Store) bootstrapSchema() error {
 	}
 
 	const schemaSQL = `
-CREATE TABLE IF NOT EXISTS alerts_current (
+CREATE TABLE IF NOT EXISTS alert_states (
   alert_id TEXT PRIMARY KEY,
   state TEXT NOT NULL,
+  raw_state TEXT NOT NULL DEFAULT 'active',
+  is_live INTEGER NOT NULL DEFAULT 1,
+  is_resolved INTEGER NOT NULL DEFAULT 0,
   receiver TEXT NOT NULL,
   group_id TEXT NOT NULL,
   group_labels_json TEXT NOT NULL DEFAULT '{}',
@@ -127,28 +132,40 @@ CREATE TABLE IF NOT EXISTS alerts_current (
   starts_at TEXT NOT NULL,
   last_seen_at TEXT,
   relevant_upstreams_json TEXT NOT NULL,
+  resolved_at TEXT,
+  resolved_by TEXT,
+  resolved_comment TEXT,
   updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_alerts_current_state ON alerts_current(state);
-CREATE INDEX IF NOT EXISTS idx_alerts_current_last_seen ON alerts_current(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_alert_states_state ON alert_states(state);
+CREATE INDEX IF NOT EXISTS idx_alert_states_raw_state ON alert_states(raw_state);
+CREATE INDEX IF NOT EXISTS idx_alert_states_is_live ON alert_states(is_live);
+CREATE INDEX IF NOT EXISTS idx_alert_states_last_seen ON alert_states(last_seen_at);
 
-CREATE TABLE IF NOT EXISTS alert_state_history (
+CREATE TABLE IF NOT EXISTS alert_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   alert_id TEXT NOT NULL,
   old_state TEXT,
   new_state TEXT NOT NULL,
+  old_raw_state TEXT,
+  new_raw_state TEXT NOT NULL,
+  old_is_live INTEGER,
+  new_is_live INTEGER NOT NULL,
+  old_is_resolved INTEGER,
+  new_is_resolved INTEGER NOT NULL,
   changed_at TEXT NOT NULL,
   change_source TEXT NOT NULL,
   changed_by TEXT,
-  reason TEXT,
-  FOREIGN KEY (alert_id) REFERENCES alerts_current(alert_id) ON DELETE CASCADE
+  reason_code TEXT,
+  reason_text TEXT,
+  FOREIGN KEY (alert_id) REFERENCES alert_states(alert_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_state_history_alert_changed_at
-  ON alert_state_history(alert_id, changed_at DESC);
+  ON alert_events(alert_id, changed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_state_history_changed_at
-  ON alert_state_history(changed_at DESC);
+  ON alert_events(changed_at DESC);
 
 CREATE TABLE IF NOT EXISTS metadata (
   key TEXT PRIMARY KEY,
@@ -166,12 +183,67 @@ CREATE TABLE IF NOT EXISTS metadata (
 		return fmt.Errorf("failed to apply schema: %w", err)
 	}
 
-	if _, err = tx.Exec(`ALTER TABLE alerts_current ADD COLUMN group_labels_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+	if _, err = tx.Exec(`ALTER TABLE alert_states ADD COLUMN group_labels_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
 		errText := strings.ToLower(err.Error())
 		if !strings.Contains(errText, "duplicate column") {
 			_ = tx.Rollback()
 			return fmt.Errorf("failed to migrate schema (group_labels_json): %w", err)
 		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE alert_states ADD COLUMN raw_state TEXT NOT NULL DEFAULT 'active'`); err != nil {
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "duplicate column") {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to migrate schema (raw_state): %w", err)
+		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE alert_states ADD COLUMN is_live INTEGER NOT NULL DEFAULT 1`); err != nil {
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "duplicate column") {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to migrate schema (is_live): %w", err)
+		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE alert_states ADD COLUMN is_resolved INTEGER NOT NULL DEFAULT 0`); err != nil {
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "duplicate column") {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to migrate schema (is_resolved): %w", err)
+		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE alert_states ADD COLUMN resolved_at TEXT`); err != nil {
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "duplicate column") {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to migrate schema (resolved_at): %w", err)
+		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE alert_states ADD COLUMN resolved_by TEXT`); err != nil {
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "duplicate column") {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to migrate schema (resolved_by): %w", err)
+		}
+	}
+	if _, err = tx.Exec(`ALTER TABLE alert_states ADD COLUMN resolved_comment TEXT`); err != nil {
+		errText := strings.ToLower(err.Error())
+		if !strings.Contains(errText, "duplicate column") {
+			_ = tx.Rollback()
+			return fmt.Errorf("failed to migrate schema (resolved_comment): %w", err)
+		}
+	}
+
+	if _, err = tx.Exec(`UPDATE alert_states SET raw_state = state WHERE trim(raw_state) = '' OR raw_state IS NULL`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to backfill raw_state: %w", err)
+	}
+	if _, err = tx.Exec(`UPDATE alert_states SET is_live = CASE WHEN state IN ('inactive', 'resolved') THEN 0 ELSE 1 END WHERE is_live NOT IN (0,1)`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to normalize is_live: %w", err)
+	}
+	if _, err = tx.Exec(`UPDATE alert_states SET is_resolved = CASE WHEN state = 'resolved' THEN 1 ELSE 0 END WHERE is_resolved NOT IN (0,1)`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to normalize is_resolved: %w", err)
 	}
 
 	if _, err = tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metaSchemaVersion, schemaVersion); err != nil {
@@ -211,6 +283,28 @@ func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 	if strings.TrimSpace(alert.GroupLabelsJSON) == "" {
 		alert.GroupLabelsJSON = "{}"
 	}
+	if alert.IsResolved && alert.IsLive {
+		alert.IsResolved = false
+	}
+	if !alert.RawState.IsValid() {
+		alert.RawState = alert.State
+	}
+	if !alert.State.IsValid() {
+		alert.State = projectedState(alert.RawState, alert.IsLive, alert.IsResolved)
+	}
+	if alert.State == StateActive || alert.State == StateSuppressed || alert.State == StateUnprocessed {
+		alert.IsLive = true
+	}
+	if alert.State == StateInactive {
+		alert.IsLive = false
+	}
+	if alert.State == StateResolved {
+		alert.IsResolved = true
+		alert.IsLive = false
+	}
+	if alert.State.IsValid() {
+		alert.State = projectedState(alert.RawState, alert.IsLive, alert.IsResolved)
+	}
 
 	if err := validateCurrentAlert(alert); err != nil {
 		return err
@@ -222,9 +316,12 @@ func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 	}
 
 	_, err := s.db.Exec(`
-INSERT INTO alerts_current(
+INSERT INTO alert_states(
   alert_id,
   state,
+  raw_state,
+  is_live,
+  is_resolved,
   receiver,
   group_id,
   group_labels_json,
@@ -233,10 +330,16 @@ INSERT INTO alerts_current(
   starts_at,
   last_seen_at,
   relevant_upstreams_json,
+  resolved_at,
+  resolved_by,
+  resolved_comment,
   updated_at
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(alert_id) DO UPDATE SET
   state=excluded.state,
+  raw_state=excluded.raw_state,
+  is_live=excluded.is_live,
+  is_resolved=excluded.is_resolved,
   receiver=excluded.receiver,
   group_id=excluded.group_id,
   group_labels_json=excluded.group_labels_json,
@@ -245,10 +348,16 @@ ON CONFLICT(alert_id) DO UPDATE SET
   starts_at=excluded.starts_at,
   last_seen_at=excluded.last_seen_at,
   relevant_upstreams_json=excluded.relevant_upstreams_json,
+  resolved_at=excluded.resolved_at,
+  resolved_by=excluded.resolved_by,
+  resolved_comment=excluded.resolved_comment,
   updated_at=excluded.updated_at
 `,
 		alert.AlertID,
 		string(alert.State),
+		string(alert.RawState),
+		boolToInt(alert.IsLive),
+		boolToInt(alert.IsResolved),
 		alert.Receiver,
 		alert.GroupID,
 		alert.GroupLabelsJSON,
@@ -257,6 +366,9 @@ ON CONFLICT(alert_id) DO UPDATE SET
 		alert.StartsAt.UTC().Format(time.RFC3339Nano),
 		formatNullableTime(alert.LastSeenAt),
 		alert.RelevantUpstreams,
+		formatNullableTime(alert.ResolvedAt),
+		alert.ResolvedBy,
+		alert.ResolvedComment,
 		alert.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -271,36 +383,39 @@ func (s *Store) InsertStateTransition(transition AlertStateTransition) error {
 		return ErrStoreNotInitialized
 	}
 
-	if err := validateTransition(transition); err != nil {
+	if !transition.NewRawState.IsValid() {
+		if transition.NewState == StateInactive || transition.NewState == StateResolved {
+			transition.NewRawState = StateActive
+		} else {
+			transition.NewRawState = transition.NewState
+		}
+	}
+	if transition.OldRawState == nil && transition.OldState != nil {
+		v := *transition.OldState
+		transition.OldRawState = &v
+	}
+	if transition.OldIsLive == nil {
+		v := transition.OldState != nil && *transition.OldState != StateInactive && *transition.OldState != StateResolved
+		transition.OldIsLive = &v
+	}
+	if transition.OldIsResolved == nil {
+		v := transition.OldState != nil && *transition.OldState == StateResolved
+		transition.OldIsResolved = &v
+	}
+	if transition.NewState.IsValid() {
+		transition.NewState = projectedState(transition.NewRawState, transition.NewIsLive, transition.NewIsResolved)
+	}
+
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transition transaction: %w", err)
+	}
+	if err = insertTransitionTx(tx, transition); err != nil {
+		_ = tx.Rollback()
 		return err
 	}
-
-	changedAt := transition.ChangedAt
-	if changedAt.IsZero() {
-		changedAt = time.Now().UTC()
-	}
-
-	_, err := s.db.Exec(`
-INSERT INTO alert_state_history(
-  alert_id,
-  old_state,
-  new_state,
-  changed_at,
-  change_source,
-  changed_by,
-  reason
-) VALUES(?, ?, ?, ?, ?, ?, ?)
-`,
-		transition.AlertID,
-		formatNullableState(transition.OldState),
-		string(transition.NewState),
-		changedAt.UTC().Format(time.RFC3339Nano),
-		string(transition.ChangeSource),
-		transition.ChangedBy,
-		transition.Reason,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to insert state transition: %w", err)
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transition transaction: %w", err)
 	}
 
 	return nil
@@ -319,6 +434,9 @@ func (s *Store) GetCurrentAlert(alertID string) (*AlertCurrent, error) {
 SELECT
   alert_id,
   state,
+  raw_state,
+  is_live,
+  is_resolved,
   receiver,
   group_id,
   group_labels_json,
@@ -327,22 +445,34 @@ SELECT
   starts_at,
   last_seen_at,
   relevant_upstreams_json,
+  resolved_at,
+  resolved_by,
+  resolved_comment,
   updated_at
-FROM alerts_current
+FROM alert_states
 WHERE alert_id = ?
 `, alertID)
 
 	var (
-		stateRaw     string
-		startsAtRaw  string
-		lastSeenRaw  sql.NullString
-		updatedAtRaw string
-		current      AlertCurrent
+		stateRaw           string
+		rawStateRaw        string
+		isLiveRaw          int
+		isResolvedRaw      int
+		startsAtRaw        string
+		lastSeenRaw        sql.NullString
+		resolvedAtRaw      sql.NullString
+		resolvedByRaw      sql.NullString
+		resolvedCommentRaw sql.NullString
+		updatedAtRaw       string
+		current            AlertCurrent
 	)
 
 	err := row.Scan(
 		&current.AlertID,
 		&stateRaw,
+		&rawStateRaw,
+		&isLiveRaw,
+		&isResolvedRaw,
 		&current.Receiver,
 		&current.GroupID,
 		&current.GroupLabelsJSON,
@@ -351,6 +481,9 @@ WHERE alert_id = ?
 		&startsAtRaw,
 		&lastSeenRaw,
 		&current.RelevantUpstreams,
+		&resolvedAtRaw,
+		&resolvedByRaw,
+		&resolvedCommentRaw,
 		&updatedAtRaw,
 	)
 	if err != nil {
@@ -365,6 +498,13 @@ WHERE alert_id = ?
 		return nil, fmt.Errorf("invalid state in database: %q", stateRaw)
 	}
 	current.State = state
+	rawState := State(rawStateRaw)
+	if !rawState.IsValid() {
+		return nil, fmt.Errorf("invalid raw_state in database: %q", rawStateRaw)
+	}
+	current.RawState = rawState
+	current.IsLive = isLiveRaw != 0
+	current.IsResolved = isResolvedRaw != 0
 
 	startsAt, err := time.Parse(time.RFC3339Nano, startsAtRaw)
 	if err != nil {
@@ -378,6 +518,25 @@ WHERE alert_id = ?
 			return nil, fmt.Errorf("failed to parse last_seen_at: %w", parseErr)
 		}
 		current.LastSeenAt = &lastSeenAt
+	}
+	if resolvedAtRaw.Valid {
+		resolvedAt, parseErr := time.Parse(time.RFC3339Nano, resolvedAtRaw.String)
+		if parseErr != nil {
+			return nil, fmt.Errorf("failed to parse resolved_at: %w", parseErr)
+		}
+		current.ResolvedAt = &resolvedAt
+	}
+	if resolvedByRaw.Valid {
+		v := strings.TrimSpace(resolvedByRaw.String)
+		if v != "" {
+			current.ResolvedBy = &v
+		}
+	}
+	if resolvedCommentRaw.Valid {
+		v := strings.TrimSpace(resolvedCommentRaw.String)
+		if v != "" {
+			current.ResolvedComment = &v
+		}
 	}
 
 	updatedAt, err := time.Parse(time.RFC3339Nano, updatedAtRaw)
@@ -415,7 +574,7 @@ func (s *Store) GetTransitionCount(alertID string) (int, error) {
 	}
 
 	var count int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM alert_state_history WHERE alert_id = ?`, alertID).Scan(&count)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM alert_events WHERE alert_id = ?`, alertID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count alert transitions: %w", err)
 	}
@@ -445,6 +604,9 @@ func (s *Store) ListCurrentAlertsByStates(states []State) ([]AlertCurrent, error
 SELECT
   alert_id,
   state,
+  raw_state,
+  is_live,
+  is_resolved,
   receiver,
   group_id,
   group_labels_json,
@@ -453,8 +615,11 @@ SELECT
   starts_at,
   last_seen_at,
   relevant_upstreams_json,
+  resolved_at,
+  resolved_by,
+  resolved_comment,
   updated_at
-FROM alerts_current
+FROM alert_states
 WHERE state IN (%s)
 `, strings.Join(placeholders, ","))
 
@@ -474,6 +639,59 @@ WHERE state IN (%s)
 	}
 	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("failed to iterate listed alerts: %w", err)
+	}
+
+	return alerts, nil
+}
+
+func (s *Store) ListCurrentAlertsForMerge(includeResolved bool) ([]AlertCurrent, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreNotInitialized
+	}
+
+	query := `
+SELECT
+  alert_id,
+  state,
+  raw_state,
+  is_live,
+  is_resolved,
+  receiver,
+  group_id,
+  group_labels_json,
+  labels_json,
+  annotations_json,
+  starts_at,
+  last_seen_at,
+  relevant_upstreams_json,
+  resolved_at,
+  resolved_by,
+  resolved_comment,
+  updated_at
+FROM alert_states
+WHERE is_live = 0
+`
+	args := []any{}
+	if !includeResolved {
+		query += ` AND is_resolved = 0`
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list alerts for merge: %w", err)
+	}
+	defer rows.Close()
+
+	alerts := []AlertCurrent{}
+	for rows.Next() {
+		current, scanErr := scanCurrentAlert(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		alerts = append(alerts, current)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate merge alerts: %w", err)
 	}
 
 	return alerts, nil
@@ -551,7 +769,7 @@ func (s *Store) GetStats() (Stats, error) {
 		return Stats{}, ErrStoreNotInitialized
 	}
 
-	currentRows, err := queryInt(s.db, `SELECT COUNT(*) FROM alerts_current`)
+	currentRows, err := queryInt(s.db, `SELECT COUNT(*) FROM alert_states`)
 	if err != nil {
 		return Stats{}, fmt.Errorf("failed to count current alerts: %w", err)
 	}
@@ -559,7 +777,11 @@ func (s *Store) GetStats() (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
-	historyRows, err := queryInt(s.db, `SELECT COUNT(*) FROM alert_state_history`)
+	suppressedCurrent, suppressedPast, err := s.querySuppressedBreakdown()
+	if err != nil {
+		return Stats{}, err
+	}
+	historyRows, err := queryInt(s.db, `SELECT COUNT(*) FROM alert_events`)
 	if err != nil {
 		return Stats{}, fmt.Errorf("failed to count state history rows: %w", err)
 	}
@@ -633,23 +855,25 @@ func (s *Store) GetStats() (Stats, error) {
 	}
 
 	return Stats{
-		CurrentRows:              currentRows,
-		HistoryRows:              historyRows,
-		StateCounts:              stateCounts,
-		GroupingFingerprint:      strings.TrimSpace(groupingFingerprint),
-		RegroupTargetFingerprint: strings.TrimSpace(regroupTargetFingerprint),
-		RegroupStatus:            strings.TrimSpace(regroupStatus),
-		RegroupError:             strings.TrimSpace(regroupError),
-		RegroupProcessed:         regroupProcessed,
-		RegroupTotal:             regroupTotal,
-		RegroupStartedAt:         regroupStartedAt,
-		RegroupFinishedAt:        regroupFinishedAt,
-		FileSizeBytes:            fileSize,
-		PageCount:                pageCount,
-		PageSizeBytes:            pageSize,
-		FreelistCount:            freelistCount,
-		LastHousekeepingAt:       lastHousekeepingAt,
-		LastIncrementalVacuumAt:  lastVacuumAt,
+		CurrentRows:                currentRows,
+		HistoryRows:                historyRows,
+		StateCounts:                stateCounts,
+		SuppressedBreakdownCurrent: suppressedCurrent,
+		SuppressedBreakdownPast:    suppressedPast,
+		GroupingFingerprint:        strings.TrimSpace(groupingFingerprint),
+		RegroupTargetFingerprint:   strings.TrimSpace(regroupTargetFingerprint),
+		RegroupStatus:              strings.TrimSpace(regroupStatus),
+		RegroupError:               strings.TrimSpace(regroupError),
+		RegroupProcessed:           regroupProcessed,
+		RegroupTotal:               regroupTotal,
+		RegroupStartedAt:           regroupStartedAt,
+		RegroupFinishedAt:          regroupFinishedAt,
+		FileSizeBytes:              fileSize,
+		PageCount:                  pageCount,
+		PageSizeBytes:              pageSize,
+		FreelistCount:              freelistCount,
+		LastHousekeepingAt:         lastHousekeepingAt,
+		LastIncrementalVacuumAt:    lastVacuumAt,
 	}, nil
 }
 
@@ -658,7 +882,7 @@ func (s *Store) queryStateCounts() (map[string]int, error) {
 
 	rows, err := s.db.Query(`
 SELECT state, COUNT(*)
-FROM alerts_current
+FROM alert_states
 GROUP BY state
 `)
 	if err != nil {
@@ -685,6 +909,39 @@ GROUP BY state
 	return out, nil
 }
 
+func (s *Store) querySuppressedBreakdown() (int, int, error) {
+	rows, err := s.db.Query(`
+SELECT is_live, COUNT(*)
+FROM alert_states
+WHERE raw_state = ? AND is_resolved = 0
+GROUP BY is_live
+`, string(StateSuppressed))
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to query suppressed breakdown: %w", err)
+	}
+	defer rows.Close()
+
+	current := 0
+	past := 0
+	for rows.Next() {
+		var isLiveRaw int
+		var count int
+		if scanErr := rows.Scan(&isLiveRaw, &count); scanErr != nil {
+			return 0, 0, fmt.Errorf("failed to scan suppressed breakdown row: %w", scanErr)
+		}
+		if isLiveRaw != 0 {
+			current += count
+		} else {
+			past += count
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("failed to iterate suppressed breakdown rows: %w", err)
+	}
+
+	return current, past, nil
+}
+
 func (s *Store) ResolveAlert(alertID string, changedBy *string, reason *string, changedAt time.Time) (*ResolveResult, error) {
 	if s == nil || s.db == nil {
 		return nil, ErrStoreNotInitialized
@@ -704,7 +961,7 @@ func (s *Store) ResolveAlert(alertID string, changedBy *string, reason *string, 
 		return nil, fmt.Errorf("failed to begin resolve transaction: %w", err)
 	}
 
-	currentState, err := getCurrentAlertStateTx(tx, alertID)
+	current, err := getCurrentAlertTx(tx, alertID)
 	if err != nil {
 		_ = tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
@@ -713,30 +970,52 @@ func (s *Store) ResolveAlert(alertID string, changedBy *string, reason *string, 
 		return nil, err
 	}
 
-	if currentState == StateResolved {
+	if !current.IsLive && current.IsResolved {
 		_ = tx.Rollback()
-		return nil, ErrAlertAlreadyResolved
+		return &ResolveResult{
+			AlertID:   alertID,
+			OldState:  current.State,
+			NewState:  current.State,
+			Applied:   false,
+			ChangedAt: ts,
+			ChangedBy: sanitizeNullableString(changedBy),
+		}, nil
 	}
 
-	if currentState != StateInactive {
+	if current.IsLive {
 		_ = tx.Rollback()
 		return nil, ErrResolveStateConflict
 	}
 
-	if err = updateStateOnlyTx(tx, alertID, StateResolved, ts); err != nil {
+	cleanChangedBy := sanitizeNullableString(changedBy)
+	cleanComment := sanitizeNullableString(reason)
+	if err = updateManualResolutionTx(tx, alertID, cleanChangedBy, cleanComment, ts); err != nil {
 		_ = tx.Rollback()
 		return nil, err
 	}
 
-	cleanChangedBy := sanitizeNullableString(changedBy)
+	newRaw := current.RawState
+	newState := projectedState(newRaw, false, true)
+	oldLive := current.IsLive
+	newLive := false
+	oldResolved := current.IsResolved
+	newResolved := true
+	reasonCode := sanitizeReasonCode(ptrString("manual_mark_resolved"))
 	if err = insertTransitionTx(tx, AlertStateTransition{
-		AlertID:      alertID,
-		OldState:     &currentState,
-		NewState:     StateResolved,
-		ChangedAt:    ts,
-		ChangeSource: ChangeSourceManual,
-		ChangedBy:    cleanChangedBy,
-		Reason:       sanitizeNullableString(reason),
+		AlertID:       alertID,
+		OldState:      &current.State,
+		NewState:      newState,
+		OldRawState:   &current.RawState,
+		NewRawState:   newRaw,
+		OldIsLive:     &oldLive,
+		NewIsLive:     newLive,
+		OldIsResolved: &oldResolved,
+		NewIsResolved: newResolved,
+		ChangedAt:     ts,
+		ChangeSource:  ChangeSourceManual,
+		ChangedBy:     cleanChangedBy,
+		ReasonCode:    reasonCode,
+		ReasonText:    cleanComment,
 	}); err != nil {
 		_ = tx.Rollback()
 		return nil, err
@@ -748,8 +1027,9 @@ func (s *Store) ResolveAlert(alertID string, changedBy *string, reason *string, 
 
 	return &ResolveResult{
 		AlertID:   alertID,
-		OldState:  currentState,
-		NewState:  StateResolved,
+		OldState:  current.State,
+		NewState:  newState,
+		Applied:   true,
 		ChangedAt: ts,
 		ChangedBy: cleanChangedBy,
 	}, nil
@@ -798,12 +1078,22 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 				_ = tx.Rollback()
 				return PollCycleResult{}, err
 			}
+			newProjected := projectedState(live.State, true, false)
+			newLive := true
+			newResolved := false
 			if err = insertTransitionTx(tx, AlertStateTransition{
-				AlertID:      live.AlertID,
-				OldState:     nil,
-				NewState:     live.State,
-				ChangedAt:    now,
-				ChangeSource: ChangeSourcePoller,
+				AlertID:       live.AlertID,
+				OldState:      nil,
+				NewState:      newProjected,
+				OldRawState:   nil,
+				NewRawState:   live.State,
+				OldIsLive:     nil,
+				NewIsLive:     newLive,
+				OldIsResolved: nil,
+				NewIsResolved: newResolved,
+				ChangedAt:     now,
+				ChangeSource:  ChangeSourcePoller,
+				ReasonCode:    sanitizeReasonCode(ptrString("poll_first_seen")),
 			}); err != nil {
 				_ = tx.Rollback()
 				return PollCycleResult{}, err
@@ -813,8 +1103,11 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			continue
 		}
 
-		newState := live.State
-		if current.State == StateResolved {
+		newRawState := live.State
+		newIsLive := true
+		newIsResolved := false
+		newState := projectedState(newRawState, newIsLive, newIsResolved)
+		if current.IsResolved {
 			result.Reactivated++
 		}
 
@@ -829,20 +1122,37 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			return PollCycleResult{}, marshalErr
 		}
 
-		if err = updateCurrentAlertFromLiveTx(tx, current.AlertID, live, newState, string(relevantJSON), now); err != nil {
+		if err = updateCurrentAlertFromLiveTx(tx, current.AlertID, live, newRawState, newIsLive, newIsResolved, string(relevantJSON), now); err != nil {
 			_ = tx.Rollback()
 			return PollCycleResult{}, err
 		}
 		result.Updated++
 
-		if current.State != newState {
+		if current.State != newState || current.RawState != newRawState || current.IsLive != newIsLive || current.IsResolved != newIsResolved {
 			old := current.State
+			oldRaw := current.RawState
+			oldLive := current.IsLive
+			oldResolved := current.IsResolved
+			reasonCode := "poll_raw_state_changed"
+			if !oldLive {
+				reasonCode = "poll_live_reappeared"
+			}
+			if oldResolved {
+				reasonCode = "poll_reappear_clears_resolved"
+			}
 			if err = insertTransitionTx(tx, AlertStateTransition{
-				AlertID:      current.AlertID,
-				OldState:     &old,
-				NewState:     newState,
-				ChangedAt:    now,
-				ChangeSource: ChangeSourcePoller,
+				AlertID:       current.AlertID,
+				OldState:      &old,
+				NewState:      newState,
+				OldRawState:   &oldRaw,
+				NewRawState:   newRawState,
+				OldIsLive:     &oldLive,
+				NewIsLive:     newIsLive,
+				OldIsResolved: &oldResolved,
+				NewIsResolved: newIsResolved,
+				ChangedAt:     now,
+				ChangeSource:  ChangeSourcePoller,
+				ReasonCode:    sanitizeReasonCode(&reasonCode),
 			}); err != nil {
 				_ = tx.Rollback()
 				return PollCycleResult{}, err
@@ -856,7 +1166,7 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			continue
 		}
 
-		if current.State == StateInactive || current.State == StateResolved {
+		if !current.IsLive {
 			continue
 		}
 
@@ -871,22 +1181,38 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			continue
 		}
 
-		if err = updateStateOnlyTx(tx, alertID, StateInactive, now); err != nil {
+		newRawState := current.RawState
+		newIsLive := false
+		newIsResolved := current.IsResolved
+		newState := projectedState(newRawState, newIsLive, newIsResolved)
+		if err = updateProjectedStateTx(tx, alertID, newRawState, newIsLive, newIsResolved, now); err != nil {
 			_ = tx.Rollback()
 			return PollCycleResult{}, err
 		}
 		old := current.State
+		oldRaw := current.RawState
+		oldLive := current.IsLive
+		oldResolved := current.IsResolved
 		if err = insertTransitionTx(tx, AlertStateTransition{
-			AlertID:      alertID,
-			OldState:     &old,
-			NewState:     StateInactive,
-			ChangedAt:    now,
-			ChangeSource: ChangeSourcePoller,
+			AlertID:       alertID,
+			OldState:      &old,
+			NewState:      newState,
+			OldRawState:   &oldRaw,
+			NewRawState:   newRawState,
+			OldIsLive:     &oldLive,
+			NewIsLive:     newIsLive,
+			OldIsResolved: &oldResolved,
+			NewIsResolved: newIsResolved,
+			ChangedAt:     now,
+			ChangeSource:  ChangeSourcePoller,
+			ReasonCode:    sanitizeReasonCode(ptrString("poll_live_disappeared")),
 		}); err != nil {
 			_ = tx.Rollback()
 			return PollCycleResult{}, err
 		}
-		result.SetInactive++
+		if newState == StateInactive {
+			result.SetInactive++
+		}
 		result.Transitions++
 	}
 
@@ -994,7 +1320,7 @@ func (s *Store) beginOrResumeRegroup(targetFingerprint string) (bool, int, error
 		return false, 0, err
 	}
 
-	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alerts_current`)
+	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
 	if err != nil {
 		_ = tx.Rollback()
 		return false, 0, fmt.Errorf("failed to count rows for regroup: %w", err)
@@ -1124,7 +1450,7 @@ func (s *Store) runRegroupBatch(targetFingerprint string, cfg compiledGroupingCo
 		_ = tx.Rollback()
 		return false, 0, 0, 0, err
 	}
-	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alerts_current`)
+	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
 	if err != nil {
 		_ = tx.Rollback()
 		return false, 0, 0, 0, fmt.Errorf("failed to count rows in regroup batch: %w", err)
@@ -1132,7 +1458,7 @@ func (s *Store) runRegroupBatch(targetFingerprint string, cfg compiledGroupingCo
 
 	rows, err := tx.Query(`
 SELECT rowid, alert_id, receiver, labels_json
-FROM alerts_current
+FROM alert_states
 WHERE rowid > ?
 ORDER BY rowid ASC
 LIMIT ?
@@ -1206,7 +1532,7 @@ LIMIT ?
 
 		updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
 		res, updateErr := tx.Exec(`
-UPDATE alerts_current
+UPDATE alert_states
 SET group_id = ?, group_labels_json = ?, updated_at = ?
 WHERE rowid = ?
 `, groupID, groupLabelsJSON, updatedAt, row.RowID)
@@ -1326,6 +1652,9 @@ func validateCurrentAlert(alert AlertCurrent) error {
 	if !alert.State.IsValid() {
 		return fmt.Errorf("invalid state: %q", alert.State)
 	}
+	if !alert.RawState.IsValid() {
+		return fmt.Errorf("invalid rawState: %q", alert.RawState)
+	}
 	if strings.TrimSpace(alert.Receiver) == "" {
 		return errors.New("receiver cannot be empty")
 	}
@@ -1358,11 +1687,36 @@ func validateTransition(transition AlertStateTransition) error {
 	if !transition.NewState.IsValid() {
 		return fmt.Errorf("invalid new state: %q", transition.NewState)
 	}
+	if !transition.NewRawState.IsValid() {
+		if transition.NewState == StateInactive || transition.NewState == StateResolved {
+			transition.NewRawState = StateActive
+		} else if transition.NewState.IsValid() {
+			transition.NewRawState = transition.NewState
+		} else {
+			return fmt.Errorf("invalid new raw state: %q", transition.NewRawState)
+		}
+	}
+	if transition.OldRawState != nil && !transition.OldRawState.IsValid() {
+		return fmt.Errorf("invalid old raw state: %q", *transition.OldRawState)
+	}
 	if transition.OldState != nil && !transition.OldState.IsValid() {
 		return fmt.Errorf("invalid old state: %q", *transition.OldState)
 	}
 	if !transition.ChangeSource.IsValid() {
 		return fmt.Errorf("invalid change source: %q", transition.ChangeSource)
+	}
+	if transition.ReasonCode != nil {
+		r := strings.TrimSpace(*transition.ReasonCode)
+		if len(r) > reasonCodeMaxLength {
+			return fmt.Errorf("reason_code length exceeds %d", reasonCodeMaxLength)
+		}
+		if r != "" {
+			for _, ch := range r {
+				if !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_') {
+					return fmt.Errorf("reason_code must be snake_case")
+				}
+			}
+		}
 	}
 
 	return nil
@@ -1373,6 +1727,45 @@ func formatNullableState(state *State) any {
 		return nil
 	}
 	return string(*state)
+}
+
+func formatNullableBool(v *bool) any {
+	if v == nil {
+		return nil
+	}
+	if *v {
+		return 1
+	}
+	return 0
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func intToBool(v int) bool {
+	return v != 0
+}
+
+func sanitizeReasonCode(v *string) *string {
+	if v == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*v)
+	if trimmed == "" {
+		return nil
+	}
+	if len(trimmed) > reasonCodeMaxLength {
+		trimmed = trimmed[:reasonCodeMaxLength]
+	}
+	return &trimmed
+}
+
+func ptrString(v string) *string {
+	return &v
 }
 
 func formatNullableTime(ts *time.Time) any {
@@ -1389,6 +1782,29 @@ func (s State) IsValid() bool {
 	default:
 		return false
 	}
+}
+
+func projectedState(rawState State, isLive bool, isResolved bool) State {
+	if isLive {
+		switch rawState {
+		case StateActive:
+			return StateActive
+		case StateSuppressed:
+			return StateSuppressed
+		default:
+			return StateUnprocessed
+		}
+	}
+
+	if isResolved {
+		return StateResolved
+	}
+
+	if rawState == StateSuppressed {
+		return StateSuppressed
+	}
+
+	return StateInactive
 }
 
 func (s ChangeSource) IsValid() bool {
@@ -1448,6 +1864,9 @@ func readAllCurrentAlertsTx(tx *sql.Tx) (map[string]AlertCurrent, error) {
 SELECT
   alert_id,
   state,
+  raw_state,
+  is_live,
+  is_resolved,
   receiver,
   group_id,
   group_labels_json,
@@ -1456,8 +1875,11 @@ SELECT
   starts_at,
   last_seen_at,
   relevant_upstreams_json,
+  resolved_at,
+  resolved_by,
+  resolved_comment,
   updated_at
-FROM alerts_current
+FROM alert_states
 `)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query current alerts: %w", err)
@@ -1481,16 +1903,25 @@ FROM alerts_current
 
 func scanCurrentAlert(scanner interface{ Scan(dest ...any) error }) (AlertCurrent, error) {
 	var (
-		stateRaw     string
-		startsAtRaw  string
-		lastSeenRaw  sql.NullString
-		updatedAtRaw string
-		current      AlertCurrent
+		stateRaw           string
+		rawStateRaw        string
+		isLiveRaw          int
+		isResolvedRaw      int
+		startsAtRaw        string
+		lastSeenRaw        sql.NullString
+		resolvedAtRaw      sql.NullString
+		resolvedByRaw      sql.NullString
+		resolvedCommentRaw sql.NullString
+		updatedAtRaw       string
+		current            AlertCurrent
 	)
 
 	err := scanner.Scan(
 		&current.AlertID,
 		&stateRaw,
+		&rawStateRaw,
+		&isLiveRaw,
+		&isResolvedRaw,
 		&current.Receiver,
 		&current.GroupID,
 		&current.GroupLabelsJSON,
@@ -1499,6 +1930,9 @@ func scanCurrentAlert(scanner interface{ Scan(dest ...any) error }) (AlertCurren
 		&startsAtRaw,
 		&lastSeenRaw,
 		&current.RelevantUpstreams,
+		&resolvedAtRaw,
+		&resolvedByRaw,
+		&resolvedCommentRaw,
 		&updatedAtRaw,
 	)
 	if err != nil {
@@ -1510,6 +1944,13 @@ func scanCurrentAlert(scanner interface{ Scan(dest ...any) error }) (AlertCurren
 		return AlertCurrent{}, fmt.Errorf("invalid state in database: %q", stateRaw)
 	}
 	current.State = state
+	rawState := State(rawStateRaw)
+	if !rawState.IsValid() {
+		return AlertCurrent{}, fmt.Errorf("invalid raw_state in database: %q", rawStateRaw)
+	}
+	current.RawState = rawState
+	current.IsLive = intToBool(isLiveRaw)
+	current.IsResolved = intToBool(isResolvedRaw)
 
 	startsAt, err := time.Parse(time.RFC3339Nano, startsAtRaw)
 	if err != nil {
@@ -1523,6 +1964,25 @@ func scanCurrentAlert(scanner interface{ Scan(dest ...any) error }) (AlertCurren
 			return AlertCurrent{}, fmt.Errorf("failed to parse last_seen_at: %w", parseErr)
 		}
 		current.LastSeenAt = &lastSeenAt
+	}
+	if resolvedAtRaw.Valid {
+		resolvedAt, parseErr := time.Parse(time.RFC3339Nano, resolvedAtRaw.String)
+		if parseErr != nil {
+			return AlertCurrent{}, fmt.Errorf("failed to parse resolved_at: %w", parseErr)
+		}
+		current.ResolvedAt = &resolvedAt
+	}
+	if resolvedByRaw.Valid {
+		v := strings.TrimSpace(resolvedByRaw.String)
+		if v != "" {
+			current.ResolvedBy = &v
+		}
+	}
+	if resolvedCommentRaw.Valid {
+		v := strings.TrimSpace(resolvedCommentRaw.String)
+		if v != "" {
+			current.ResolvedComment = &v
+		}
 	}
 
 	updatedAt, err := time.Parse(time.RFC3339Nano, updatedAtRaw)
@@ -1539,11 +1999,18 @@ func insertCurrentAlertTx(tx *sql.Tx, live LiveAlertSnapshot, now time.Time) err
 	if err != nil {
 		return err
 	}
+	rawState := live.State
+	isLive := true
+	isResolved := false
+	state := projectedState(rawState, isLive, isResolved)
 
 	_, err = tx.Exec(`
-INSERT INTO alerts_current(
+INSERT INTO alert_states(
   alert_id,
   state,
+  raw_state,
+  is_live,
+  is_resolved,
   receiver,
   group_id,
   group_labels_json,
@@ -1552,11 +2019,17 @@ INSERT INTO alerts_current(
   starts_at,
   last_seen_at,
   relevant_upstreams_json,
+  resolved_at,
+  resolved_by,
+  resolved_comment,
   updated_at
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		live.AlertID,
-		string(live.State),
+		string(state),
+		string(rawState),
+		1,
+		0,
 		live.Receiver,
 		live.GroupID,
 		live.GroupLabelsJSON,
@@ -1565,6 +2038,9 @@ INSERT INTO alerts_current(
 		live.StartsAt.UTC().Format(time.RFC3339Nano),
 		live.LastSeenAt.UTC().Format(time.RFC3339Nano),
 		string(relevantJSON),
+		nil,
+		nil,
+		nil,
 		now.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
@@ -1574,10 +2050,14 @@ INSERT INTO alerts_current(
 	return nil
 }
 
-func updateCurrentAlertFromLiveTx(tx *sql.Tx, alertID string, live LiveAlertSnapshot, newState State, relevantJSON string, now time.Time) error {
+func updateCurrentAlertFromLiveTx(tx *sql.Tx, alertID string, live LiveAlertSnapshot, newRawState State, newIsLive bool, newIsResolved bool, relevantJSON string, now time.Time) error {
+	newState := projectedState(newRawState, newIsLive, newIsResolved)
 	_, err := tx.Exec(`
-UPDATE alerts_current SET
+UPDATE alert_states SET
   state = ?,
+  raw_state = ?,
+  is_live = ?,
+  is_resolved = ?,
   receiver = ?,
   group_id = ?,
   group_labels_json = ?,
@@ -1586,10 +2066,16 @@ UPDATE alerts_current SET
   starts_at = ?,
   last_seen_at = ?,
   relevant_upstreams_json = ?,
+  resolved_at = NULL,
+  resolved_by = NULL,
+  resolved_comment = NULL,
   updated_at = ?
 WHERE alert_id = ?
 `,
 		string(newState),
+		string(newRawState),
+		boolToInt(newIsLive),
+		boolToInt(newIsResolved),
 		live.Receiver,
 		live.GroupID,
 		live.GroupLabelsJSON,
@@ -1608,12 +2094,13 @@ WHERE alert_id = ?
 	return nil
 }
 
-func updateStateOnlyTx(tx *sql.Tx, alertID string, newState State, now time.Time) error {
+func updateProjectedStateTx(tx *sql.Tx, alertID string, rawState State, isLive bool, isResolved bool, now time.Time) error {
+	newState := projectedState(rawState, isLive, isResolved)
 	_, err := tx.Exec(`
-UPDATE alerts_current
-SET state = ?, updated_at = ?
+UPDATE alert_states
+SET state = ?, raw_state = ?, is_live = ?, is_resolved = ?, updated_at = ?
 WHERE alert_id = ?
-`, string(newState), now.UTC().Format(time.RFC3339Nano), alertID)
+`, string(newState), string(rawState), boolToInt(isLive), boolToInt(isResolved), now.UTC().Format(time.RFC3339Nano), alertID)
 	if err != nil {
 		return fmt.Errorf("failed to update alert state: %w", err)
 	}
@@ -1621,7 +2108,36 @@ WHERE alert_id = ?
 	return nil
 }
 
+func updateManualResolutionTx(tx *sql.Tx, alertID string, changedBy *string, comment *string, now time.Time) error {
+	_, err := tx.Exec(`
+UPDATE alert_states
+SET is_resolved = 1,
+    state = CASE WHEN is_live = 0 THEN 'resolved' ELSE state END,
+    resolved_at = ?,
+    resolved_by = ?,
+    resolved_comment = ?,
+    updated_at = ?
+WHERE alert_id = ?
+`, now.UTC().Format(time.RFC3339Nano), changedBy, comment, now.UTC().Format(time.RFC3339Nano), alertID)
+	if err != nil {
+		return fmt.Errorf("failed to apply manual resolution: %w", err)
+	}
+
+	return nil
+}
+
 func insertTransitionTx(tx *sql.Tx, transition AlertStateTransition) error {
+	if !transition.NewRawState.IsValid() {
+		if transition.NewState == StateInactive || transition.NewState == StateResolved {
+			transition.NewRawState = StateActive
+		} else {
+			transition.NewRawState = transition.NewState
+		}
+	}
+	if transition.OldRawState == nil && transition.OldState != nil {
+		v := *transition.OldState
+		transition.OldRawState = &v
+	}
 	if err := validateTransition(transition); err != nil {
 		return err
 	}
@@ -1632,23 +2148,37 @@ func insertTransitionTx(tx *sql.Tx, transition AlertStateTransition) error {
 	}
 
 	_, err := tx.Exec(`
-INSERT INTO alert_state_history(
+INSERT INTO alert_events(
   alert_id,
   old_state,
   new_state,
+  old_raw_state,
+  new_raw_state,
+  old_is_live,
+  new_is_live,
+  old_is_resolved,
+  new_is_resolved,
   changed_at,
   change_source,
   changed_by,
-  reason
-) VALUES(?, ?, ?, ?, ?, ?, ?)
+  reason_code,
+  reason_text
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		transition.AlertID,
 		formatNullableState(transition.OldState),
 		string(transition.NewState),
+		formatNullableState(transition.OldRawState),
+		string(transition.NewRawState),
+		formatNullableBool(transition.OldIsLive),
+		boolToInt(transition.NewIsLive),
+		formatNullableBool(transition.OldIsResolved),
+		boolToInt(transition.NewIsResolved),
 		changedAt.UTC().Format(time.RFC3339Nano),
 		string(transition.ChangeSource),
 		transition.ChangedBy,
-		transition.Reason,
+		sanitizeReasonCode(transition.ReasonCode),
+		sanitizeNullableString(transition.ReasonText),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert state transition: %w", err)
@@ -1742,19 +2272,31 @@ func areAllUpstreamsSuccessful(successful map[string]bool) bool {
 	return true
 }
 
-func getCurrentAlertStateTx(tx *sql.Tx, alertID string) (State, error) {
-	var stateRaw string
-	err := tx.QueryRow(`SELECT state FROM alerts_current WHERE alert_id = ?`, alertID).Scan(&stateRaw)
-	if err != nil {
-		return "", err
-	}
+func getCurrentAlertTx(tx *sql.Tx, alertID string) (AlertCurrent, error) {
+	row := tx.QueryRow(`
+SELECT
+  alert_id,
+  state,
+  raw_state,
+  is_live,
+  is_resolved,
+  receiver,
+  group_id,
+  group_labels_json,
+  labels_json,
+  annotations_json,
+  starts_at,
+  last_seen_at,
+  relevant_upstreams_json,
+  resolved_at,
+  resolved_by,
+  resolved_comment,
+  updated_at
+FROM alert_states
+WHERE alert_id = ?
+`, alertID)
 
-	state := State(stateRaw)
-	if !state.IsValid() {
-		return "", fmt.Errorf("invalid state in database: %q", stateRaw)
-	}
-
-	return state, nil
+	return scanCurrentAlert(row)
 }
 
 func sanitizeNullableString(v *string) *string {
@@ -1770,7 +2312,7 @@ func sanitizeNullableString(v *string) *string {
 
 func deleteExpiredAlertsTx(tx *sql.Tx, cutoff time.Time) (int, error) {
 	res, err := tx.Exec(`
-DELETE FROM alerts_current
+DELETE FROM alert_states
 WHERE last_seen_at IS NOT NULL
   AND last_seen_at < ?
 `, cutoff.UTC().Format(time.RFC3339Nano))
@@ -1787,7 +2329,7 @@ WHERE last_seen_at IS NOT NULL
 }
 
 func enforceMaxAlertsTx(tx *sql.Tx, maxAlerts int) (int, error) {
-	currentCount, err := queryInt(tx, `SELECT COUNT(*) FROM alerts_current`)
+	currentCount, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to count current alerts for max limit: %w", err)
 	}
@@ -1798,12 +2340,12 @@ func enforceMaxAlertsTx(tx *sql.Tx, maxAlerts int) (int, error) {
 
 	toDelete := currentCount - maxAlerts
 	res, err := tx.Exec(`
-DELETE FROM alerts_current
+DELETE FROM alert_states
 WHERE alert_id IN (
   SELECT alert_id
-  FROM alerts_current
+  FROM alert_states
   ORDER BY COALESCE(
-      (SELECT MAX(h.changed_at) FROM alert_state_history h WHERE h.alert_id = alerts_current.alert_id),
+      (SELECT MAX(h.changed_at) FROM alert_events h WHERE h.alert_id = alert_states.alert_id),
       updated_at
     ) ASC,
     alert_id ASC

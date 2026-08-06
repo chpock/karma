@@ -12,6 +12,7 @@ const StaticLabels = Object.freeze({
   Fingerprint: "@fingerprint",
   Receiver: "@receiver",
   State: "@state",
+  IsLive: "@is_live",
   SilencedBy: "@silenced_by",
   Inhibited: "@inhibited",
   InhibitedBy: "@inhibited_by",

@@ -32,6 +32,9 @@ const MockAlert = (
   labels: labels,
   startsAt: "2018-08-14T17:36:40.017867056Z",
   state: state,
+  rawState: state,
+  isLive: true,
+  isResolved: false,
   alertmanager: [
     {
       fingerprint: "1234567",
@@ -75,6 +78,10 @@ const MockAlertGroup = (
     unprocessed: 0,
     inactive: 0,
     resolved: 0,
+  },
+  suppressedBreakdown: {
+    current: 0,
+    past: 0,
   },
   shared: {
     annotations: sharedAnnotations,

@@ -9,8 +9,8 @@ import (
 	promlabels "github.com/prometheus/prometheus/model/labels"
 
 	"github.com/prymitive/karma/internal/alertmanager"
-	"github.com/prymitive/karma/internal/fork/alertlifecycle"
 	"github.com/prymitive/karma/internal/filters"
+	"github.com/prymitive/karma/internal/fork/alertlifecycle"
 	"github.com/prymitive/karma/internal/models"
 )
 
@@ -24,11 +24,7 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 		return live
 	}
 
-	stateFilter := []alertlifecycle.State{alertlifecycle.StateInactive}
-	if includeResolved {
-		stateFilter = append(stateFilter, alertlifecycle.StateResolved)
-	}
-	stored, err := lifecycleStore.ListCurrentAlertsByStates(stateFilter)
+	stored, err := lifecycleStore.ListCurrentAlertsForMerge(includeResolved)
 	if err != nil {
 		slog.Error("Failed to query lifecycle alerts for merge", slog.Any("error", err))
 		return live
@@ -83,6 +79,16 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 		}
 
 		group.Alerts = append(group.Alerts, alert)
+		if group.SuppressedBreakdown == nil {
+			group.SuppressedBreakdown = map[string]int{"current": 0, "past": 0}
+		}
+		if alert.State == models.AlertStateSuppressed {
+			if alert.IsLive {
+				group.SuppressedBreakdown["current"]++
+			} else {
+				group.SuppressedBreakdown["past"]++
+			}
+		}
 		group.StateCount[alert.State.String()]++
 		group.Alerts = sortAlerts(group.Alerts)
 		group.LatestStartsAt = group.FindLatestStartsAt()
@@ -128,6 +134,11 @@ func lifecycleCurrentToModelAlert(current alertlifecycle.AlertCurrent) (models.A
 		Annotations:  models.AnnotationsFromMap(annotationsMap),
 		Alertmanager: []models.AlertmanagerInstance{},
 		State:        alertState,
+		RawState:     models.ParseAlertState(string(current.RawState)),
+		HasRawState:  true,
+		IsLive:       current.IsLive,
+		HasIsLive:    true,
+		IsResolved:   current.IsResolved,
 	}
 	alert.UpdateFingerprints()
 

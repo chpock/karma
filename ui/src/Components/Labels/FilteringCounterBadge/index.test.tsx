@@ -45,6 +45,8 @@ const validateOnClick = (
   themed: boolean,
   isNegative: boolean,
   isAppend: boolean,
+  appendFilters: string[] = [],
+  replaceWith?: string,
 ) => {
   alertStore.filters.setFilterValues([NewUnappliedFilter("foo=bar")]);
   render(
@@ -55,6 +57,8 @@ const validateOnClick = (
       counter={1}
       themed={themed}
       isAppend={isAppend}
+      appendFilters={appendFilters}
+      replaceWith={replaceWith}
     />,
   );
   fireEvent.click(screen.getByText("1"), { altKey: isNegative ? true : false });
@@ -66,11 +70,14 @@ const validateOnClick = (
   }
   expect(alertStore.filters.values).toContainEqual(
     NewUnappliedFilter(
-      `@state${
-        isNegative ? QueryOperators.NotEqual : QueryOperators.Equal
-      }${value}`,
+      isNegative
+        ? `@state${QueryOperators.NotEqual}${value}`
+        : replaceWith || `@state${QueryOperators.Equal}${value}`,
     ),
   );
+  for (const raw of appendFilters) {
+    expect(alertStore.filters.values).toContainEqual(NewUnappliedFilter(raw));
+  }
 };
 
 describe("<FilteringCounterBadge />", () => {
@@ -82,6 +89,9 @@ describe("<FilteringCounterBadge />", () => {
   });
   it("themed @state=suppressed counter badge should have className 'bg-secondary'", () => {
     validateClassName("suppressed", "bg-success", true);
+  });
+  it("themed @state=suppressed-past counter badge should have className 'bg-suppressed-past'", () => {
+    validateClassName("suppressed-past", "bg-suppressed-past", true);
   });
   it("unthemed @state=suppressed counter badge should have className 'bg-light'", () => {
     validateClassName("suppressed", "bg-light", false);
@@ -110,7 +120,7 @@ describe("<FilteringCounterBadge />", () => {
     expect(screen.getByText("123")).toBeInTheDocument();
   });
 
-  for (const state of ["unprocessed", "active", "suppressed"]) {
+  for (const state of ["unprocessed", "active", "suppressed", "suppressed-past"]) {
     it(`click on @state=${state} counter badge should add a new filter`, () => {
       validateOnClick(state, true, false, true);
     });

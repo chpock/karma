@@ -17,6 +17,7 @@ type alertLifecycleStatsResponse struct {
 
 	CurrentRows              int            `json:"currentRows"`
 	StateCounts              map[string]int `json:"stateCounts"`
+	SuppressedBreakdown      map[string]int `json:"suppressedBreakdown,omitempty"`
 	HistoryRows              int            `json:"historyRows"`
 	GroupingFingerprint      string         `json:"groupingFingerprint"`
 	RegroupTargetFingerprint string         `json:"regroupTargetFingerprint"`
@@ -43,13 +44,14 @@ func alertLifecycleStats(w http.ResponseWriter, _ *http.Request) {
 	if !config.Config.AlertLifecycle.Enabled || lifecycleStore == nil {
 		w.WriteHeader(http.StatusOK)
 		out, _ := marshalJSON(alertLifecycleStatsResponse{
-			Status:            "ok",
-			StorageEnabled:    false,
-			SQLitePath:        config.Config.AlertLifecycle.SQLite.Path,
-			RetentionTTLHours: config.Config.AlertLifecycle.Retention.TTL.Hours(),
-			MaxAlerts:         config.Config.AlertLifecycle.Retention.MaxAlerts,
-			StateCounts:       map[string]int{},
-			DBExpectedState:   true,
+			Status:              "ok",
+			StorageEnabled:      false,
+			SQLitePath:          config.Config.AlertLifecycle.SQLite.Path,
+			RetentionTTLHours:   config.Config.AlertLifecycle.Retention.TTL.Hours(),
+			MaxAlerts:           config.Config.AlertLifecycle.Retention.MaxAlerts,
+			StateCounts:         map[string]int{},
+			SuppressedBreakdown: map[string]int{"current": 0, "past": 0},
+			DBExpectedState:     true,
 		})
 		_, _ = w.Write(out)
 		return
@@ -79,6 +81,7 @@ func alertLifecycleStats(w http.ResponseWriter, _ *http.Request) {
 		MaxAlerts:                config.Config.AlertLifecycle.Retention.MaxAlerts,
 		CurrentRows:              stats.CurrentRows,
 		StateCounts:              map[string]int{},
+		SuppressedBreakdown:      map[string]int{"current": stats.SuppressedBreakdownCurrent, "past": stats.SuppressedBreakdownPast},
 		HistoryRows:              stats.HistoryRows,
 		GroupingFingerprint:      stats.GroupingFingerprint,
 		RegroupTargetFingerprint: stats.RegroupTargetFingerprint,

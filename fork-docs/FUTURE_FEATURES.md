@@ -11,6 +11,18 @@ Deferred:
 
 Current scope remains single-replica local SQLite only.
 
+## 0. Silence-aware state reclassification
+
+Deferred:
+
+- second-layer lifecycle logic that can reclassify some non-live alerts based on fresh silence data.
+- specifically, inactive-to-suppressed reclassification path driven by silence synchronization.
+
+Current scope:
+
+- foundational state model (`raw_state`, `is_live`, `is_resolved`) is implemented.
+- no silence-driven reclassification logic is active yet.
+
 ## 2. Advanced alert identity and dedup strategy
 
 Deferred:

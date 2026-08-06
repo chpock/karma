@@ -17,20 +17,26 @@ const FilteringCounterBadge: FC<{
   alertStore: AlertStore;
   name: string;
   value: string;
+  filterValue?: string;
   counter: number;
   themed: boolean;
   alwaysVisible?: boolean;
   defaultColor?: "bg-light" | "bg-primary";
   isAppend?: boolean;
+  appendFilters?: string[];
+  replaceWith?: string;
 }> = ({
   alertStore,
   name,
   value,
+  filterValue,
   counter,
   themed,
   alwaysVisible = false,
   defaultColor = "bg-light",
   isAppend = true,
+  appendFilters = [],
+  replaceWith,
 }) => {
   const { ref, props } = useFlashTransition(counter);
 
@@ -45,16 +51,32 @@ const FilteringCounterBadge: FC<{
 
       event.preventDefault();
 
+      const stateValue = filterValue || value;
+      const positive = replaceWith || FormatQuery(name, QueryOperators.Equal, stateValue);
+      const negative = FormatQuery(name, QueryOperators.NotEqual, stateValue);
+      const isPositive = operators[0] === QueryOperators.Equal;
+      const selected = isPositive ? positive : negative;
+
       if (isAppend) {
-        alertStore.filters.replaceFilter(
-          FormatQuery(name, operators[1], value),
-          FormatQuery(name, operators[0], value),
-        );
+        alertStore.filters.replaceFilter(negative, selected);
+        if (isPositive) {
+          for (const raw of appendFilters) {
+            alertStore.filters.addFilter(raw);
+          }
+        }
       } else {
-        alertStore.filters.setFilters([FormatQuery(name, operators[0], value)]);
+        const raws = [selected];
+        if (isPositive) {
+          for (const raw of appendFilters) {
+            if (!raws.includes(raw)) {
+              raws.push(raw);
+            }
+          }
+        }
+        alertStore.filters.setFilters(raws);
       }
     },
-    [alertStore.filters, name, value, isAppend],
+    [alertStore.filters, name, value, isAppend, appendFilters, replaceWith],
   );
 
   const cs = GetClassAndStyle(

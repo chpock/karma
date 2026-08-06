@@ -30,11 +30,12 @@ func CompareAlerts(a, b Alert) int {
 type AlertGroup struct {
 	// LatestStartsAt is the most recent StartsAt timestamp across all alerts
 	// in this group, used for sorting groups by time in the API response.
-	LatestStartsAt    time.Time
-	AlertmanagerCount map[string]int
-	StateCount        map[string]int
-	Receiver          string
-	ID                string
+	LatestStartsAt      time.Time
+	AlertmanagerCount   map[string]int
+	StateCount          map[string]int
+	SuppressedBreakdown map[string]int
+	Receiver            string
+	ID                  string
 	// Hash is a content fingerprint of all alerts in this group, used by the
 	// UI to detect changes and avoid unnecessary re-renders.
 	Hash string

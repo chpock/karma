@@ -253,13 +253,14 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 				agCopy, found := perGridAlertGroup[alertGridLabelValue]
 				if !found {
 					agCopy = &models.AlertGroup{
-						ID:                ag.ID,
-						Receiver:          ag.Receiver,
-						Labels:            ag.Labels,
-						LatestStartsAt:    ag.LatestStartsAt,
-						Alerts:            []models.Alert{},
-						AlertmanagerCount: map[string]int{},
-						StateCount:        map[string]int{},
+						ID:                  ag.ID,
+						Receiver:            ag.Receiver,
+						Labels:              ag.Labels,
+						LatestStartsAt:      ag.LatestStartsAt,
+						Alerts:              []models.Alert{},
+						AlertmanagerCount:   map[string]int{},
+						StateCount:          map[string]int{},
+						SuppressedBreakdown: map[string]int{"current": 0, "past": 0},
 					}
 					for _, s := range models.AlertStateList {
 						agCopy.StateCount[s.String()] = 0
@@ -296,6 +297,13 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 				alert.State = stateFromStateCount(stateCount, alert.State)
 
 				agCopy.Alerts = append(agCopy.Alerts, alert)
+				if alert.State == models.AlertStateSuppressed {
+					if alert.IsLive {
+						agCopy.SuppressedBreakdown["current"]++
+					} else {
+						agCopy.SuppressedBreakdown["past"]++
+					}
+				}
 
 				if ck, foundKey := dedupedColors["@receiver"]; foundKey {
 					if cv, foundVal := ck[alert.Receiver]; foundVal {
@@ -389,10 +397,11 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 				grid, found := grids[gridLabelValue]
 				if !found {
 					grid = models.APIGrid{
-						LabelName:   gridLabel,
-						LabelValue:  gridLabelValue,
-						AlertGroups: []models.APIAlertGroup{},
-						StateCount:  map[string]int{},
+						LabelName:           gridLabel,
+						LabelValue:          gridLabelValue,
+						AlertGroups:         []models.APIAlertGroup{},
+						StateCount:          map[string]int{},
+						SuppressedBreakdown: map[string]int{"current": 0, "past": 0},
 					}
 					for _, s := range models.AlertStateList {
 						grid.StateCount[s.String()] = 0
@@ -402,6 +411,10 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 				grid.AlertGroups = append(grid.AlertGroups, apiAG)
 				for k, v := range apiAG.StateCount {
 					grid.StateCount[k] += v
+				}
+				if apiAG.SuppressedBreakdown != nil {
+					grid.SuppressedBreakdown["current"] += apiAG.SuppressedBreakdown["current"]
+					grid.SuppressedBreakdown["past"] += apiAG.SuppressedBreakdown["past"]
 				}
 				grids[gridLabelValue] = grid
 			}

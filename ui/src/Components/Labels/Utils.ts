@@ -3,9 +3,9 @@ import {
   DefaultLabelClassMap,
   AlertNameLabelClassMap,
   StateLabelClassMap,
+  ExtendedStateLabelT,
 } from "Common/Colors";
 import { StaticLabels } from "Common/Query";
-import type { AlertStateT } from "Models/APITypes";
 import type { AlertStore } from "Stores/AlertStore";
 
 const isBackgroundDark = (brightness: number) => brightness <= 130;
@@ -39,8 +39,8 @@ const GetClassAndStyle = (
     data.colorClassNames.push(AlertNameLabelClassMap[elementType]);
   } else if (name === StaticLabels.State) {
     data.colorClassNames.push(
-      StateLabelClassMap[value as AlertStateT]
-        ? `bg-${StateLabelClassMap[value as AlertStateT]} text-white`
+      StateLabelClassMap[value as ExtendedStateLabelT]
+        ? `bg-${StateLabelClassMap[value as ExtendedStateLabelT]} text-white`
         : DefaultLabelClassMap[elementType],
     );
   } else if (labelSettings?.isStatic) {

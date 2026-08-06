@@ -17,6 +17,15 @@ import { RenderNonLinkAnnotation, RenderLinkAnnotation } from "../Annotation";
 import { AlertMenu } from "./AlertMenu";
 import { RenderSilence } from "../Silences";
 
+function alertBorderState(alert: APIAlertT): string {
+  if (alert.state === "suppressed" && alert.isLive === false) {
+    return "suppressed-past";
+  }
+  return alert.state;
+}
+
+type BorderStateKey = keyof typeof BorderClassMap;
+
 const Alert: FC<{
   group: APIAlertGroupT;
   alert: APIAlertT;
@@ -43,7 +52,7 @@ const Alert: FC<{
     "my-1",
     "rounded-0",
     "border-start-1 border-end-0 border-top-0 border-bottom-0",
-    BorderClassMap[alert.state] || "border-default",
+    BorderClassMap[alertBorderState(alert) as BorderStateKey] || "border-default",
   ];
 
   const silences: {

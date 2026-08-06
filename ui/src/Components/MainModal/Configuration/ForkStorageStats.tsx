@@ -137,6 +137,14 @@ const ForkStorageStats: FC<{
         )}
       </div>
       <div className="mb-2">
+        <span className="text-muted">Suppressed split:</span>{" "}
+        <strong>
+          current {stateValueOrZero(response.suppressedBreakdown?.current)}
+        </strong>
+        <span className="text-muted">, </span>
+        <strong>past {stateValueOrZero(response.suppressedBreakdown?.past)}</strong>
+      </div>
+      <div className="mb-2">
         <span className="text-muted">DB size:</span>{" "}
         <strong>
           {typeof response.fileSizeBytes === "number"

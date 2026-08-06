@@ -11,21 +11,26 @@ Fork requires persisted lifecycle with explicit operator control over final reso
 
 ## Decision
 
-Adopt lifecycle states:
+Adopt tuple-based lifecycle model:
 
-- Live: `active`, `suppressed`, `unprocessed`
-- Fork: `inactive`, `resolved`
+- `raw_state` (`active|suppressed|unprocessed`) - upstream fact,
+- `is_live` - live presence flag,
+- `is_resolved` - manual operator flag.
 
-Resolution semantics:
+User-facing `state` is a deterministic projection of this tuple.
 
-- `resolved` is manual-only via UI/API.
-- Automatic transition to `resolved` is forbidden.
-- Manual resolve is allowed only from `inactive`.
+Resolve semantics:
 
-If a resolved alert reappears live, it transitions back to live state.
+- `is_resolved` is manual-only via UI/API.
+- automatic resolve is forbidden.
+- resolve is allowed only for non-live alerts (`is_live=false`).
+- resolve endpoint is idempotent for already resolved non-live alerts.
+
+If resolved alert reappears live (`is_live=true`), resolved flag is cleared by poll cycle.
 
 ## Consequences
 
-- Clear distinction between data-driven inactivity and human acknowledgement.
-- Better retrospective traceability.
-- Requires resolve API and UI action.
+- Clear separation of upstream state fact vs lifecycle semantics.
+- Suppressed alerts can remain suppressed even when non-live (no forced suppressed->inactive mapping).
+- Better retrospective traceability through tuple-aware event history.
+- Requires additive API/UI fields (`rawState`, `isLive`, `isResolved`) and filter extension (`@is_live`).

@@ -145,7 +145,16 @@ const AlertGroup = ({
       .map(([k, _]) => k);
     if (stateList.length === 1) {
       const state = stateList.pop();
-      cardBackgroundClass = BackgroundClassMap[state as AlertStateT];
+      if (
+        state === "suppressed" &&
+        group.suppressedBreakdown &&
+        group.suppressedBreakdown.past > 0 &&
+        group.suppressedBreakdown.current === 0
+      ) {
+        cardBackgroundClass = BackgroundClassMap["suppressed-past" as AlertStateT];
+      } else {
+        cardBackgroundClass = BackgroundClassMap[state as AlertStateT];
+      }
       themedCounters = false;
     }
   }

@@ -9,7 +9,7 @@
 
 ## Schema changes
 
-Table `alerts_current`:
+Table `alert_states` (table name in schema v1 before state-refactor rename):
 
 - add column:
   - `group_labels_json TEXT NOT NULL DEFAULT '{}'`
@@ -22,7 +22,7 @@ No data rewrite required.
 On startup:
 
 1. Ensure base tables/indexes exist.
-2. Attempt `ALTER TABLE alerts_current ADD COLUMN group_labels_json ...`.
+2. Attempt `ALTER TABLE alert_states ADD COLUMN group_labels_json ...`.
 3. If column already exists, continue (idempotent path).
 4. Upsert `metadata.schema_version='2'`.
 

@@ -416,7 +416,7 @@ func stateFromStateCount(stateCount map[string]int, fallback models.AlertState) 
 	if stateCount[models.AlertStateSuppressed.String()] > 0 {
 		return models.AlertStateSuppressed
 	}
-	if fallback == models.AlertStateInactive || fallback == models.AlertStateResolved {
+	if fallback == models.AlertStateInactive || fallback == models.AlertStateResolved || fallback == models.AlertStateSuppressed {
 		return fallback
 	}
 	return models.AlertStateUnprocessed

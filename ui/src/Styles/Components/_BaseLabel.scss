@@ -37,6 +37,11 @@
   background-color: #33425f;
 }
 
+.btn-suppressed-past,
+.bg-suppressed-past {
+  background-color: #2d5675;
+}
+
 .btn-inactive,
 .bg-inactive {
   background-color: #e97826;
@@ -48,6 +53,10 @@
 
 .border-resolved {
   border: 1px solid #273247;
+}
+
+.border-suppressed-past {
+  border: 1px solid #24435d;
 }
 
 .border-default {
@@ -74,6 +83,12 @@
   &.bg-success,
   &.btn-success {
     border: 1px solid var(--karma-label-success-border);
+  }
+
+  &.bg-suppressed-past,
+  &.btn-suppressed-past {
+    border: 1px solid #24435d;
+    background-color: #2d5675 !important;
   }
 
   &.bg-danger,

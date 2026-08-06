@@ -78,9 +78,19 @@ const Swimlane = ({
         <FilteringCounterBadge
           name="@state"
           value="suppressed"
-          counter={grid.stateCount.suppressed}
+          counter={grid.suppressedBreakdown?.current || 0}
           themed={true}
           alertStore={alertStore}
+          appendFilters={["@is_live=true"]}
+        />
+        <FilteringCounterBadge
+          name="@state"
+          value="suppressed-past"
+          filterValue="suppressed"
+          counter={grid.suppressedBreakdown?.past || 0}
+          themed={true}
+          alertStore={alertStore}
+          appendFilters={["@is_live=false"]}
         />
         <FilteringCounterBadge
           name="@state"

@@ -2,97 +2,71 @@
 
 ## 1. Purpose
 
-This spec defines alert lifecycle states, transitions, invariants, and merge behavior for the fork.
+This spec defines the canonical lifecycle state model used by the fork.
 
-## 2. States
+## 2. Data model
 
-### 2.1 Live states (from Alertmanager)
+Each stored alert has three state dimensions:
 
-- `active`
-- `suppressed`
-- `unprocessed`
+- `raw_state` - upstream Alertmanager state: `active|suppressed|unprocessed`
+- `is_live` - whether the alert is present in the latest successful live snapshot
+- `is_resolved` - manual flag set by operator action
 
-These are derived from current live data as in upstream behavior.
+User-facing `@state` is a projection over these dimensions.
 
-### 2.2 Fork lifecycle states
+## 3. Projection rules
 
-- `inactive` - alert is absent from current live data after required successful upstream checks.
-- `resolved` - manually set from UI only.
+Projection function:
 
-## 3. Transition rules
+1. if `is_live=true`:
+   - `raw_state=active` -> `active`
+   - `raw_state=suppressed` -> `suppressed`
+   - `raw_state=unprocessed` -> `unprocessed`
+2. if `is_live=false`:
+   - `is_resolved=true` -> `resolved`
+   - else if `raw_state=suppressed` -> `suppressed`
+   - else (`raw_state=active|unprocessed`) -> `inactive`
 
-### 3.1 Live-driven transitions
+This projection is deterministic and is used for API `state` and `@state` filtering.
 
-- Any stored alert that is present in live snapshot must move to a live state according to current snapshot.
-- If a `resolved` alert reappears in live data, it transitions back to live state (typically `active`).
+## 4. Transition rules
 
-### 3.2 Auto-inactive transition
+### 4.1 Live poll updates
 
-- Auto-transition to `inactive` is allowed only if:
-  1. alert is absent from live snapshot in current cycle, and
-  2. all relevant upstreams for this alert were successfully polled in current cycle.
+- Live snapshots update `raw_state`, force `is_live=true`, and clear `is_resolved`.
+- If alert reappears after being resolved, projection moves from `resolved` back to live projected state.
 
-- If (2) is not satisfied, no state downgrade occurs.
+### 4.2 Disappearance handling
 
-### 3.3 Manual resolve transition
+- Disappearance is evaluated only for currently live alerts.
+- Transition to `is_live=false` is allowed only when all relevant upstreams for that alert were successfully polled in current cycle.
+- With partial upstream failure, no inference is made (`is_live` remains unchanged).
 
-- `resolved` can be set only by explicit API/UI action.
-- Allowed source state: `inactive` only.
-- Disallowed transitions by manual resolve:
-  - `active -> resolved`
-  - `suppressed -> resolved`
-  - `unprocessed -> resolved`
+### 4.3 Manual resolve
 
-## 4. Merge output contract
-
-When building `alerts.json` response:
-
-- Include live alerts (`active/suppressed/unprocessed`) from current snapshot.
-- Include persisted `inactive` alerts.
-- Exclude `resolved` by default.
-- Allow filters to include/exclude any state explicitly.
+- Resolve is allowed only for non-live alerts (`is_live=false`).
+- Resolve sets `is_resolved=true` (idempotent if already true).
+- Live alerts cannot be resolved manually.
 
 ## 5. Invariants
 
-The system must satisfy:
+1. **No synthetic resolve** - `is_resolved` is manual-only.
+2. **No inference under uncertainty** - partial upstream failures block disappearance transitions.
+3. **Suppressed semantics preserved** - non-live suppressed alerts project to `suppressed`, not `inactive`.
+4. **Deterministic replay** - each mutation is logged with old/new tuple in append-only events.
 
-1. **No synthetic resolve**: `resolved` is never auto-assigned.
-2. **No inference under uncertainty**: missing upstream data blocks auto-inactive.
-3. **Deterministic replay**: current alert state is derivable from state history.
-4. **Identity parity**: alert identity must match existing core/UI identity behavior.
+## 6. History requirements
 
-## 6. State history requirements
+Each logical mutation writes one event row in the same transaction as current-state update, with:
 
-Every state transition must append one transition row with:
+- `old_state`, `new_state`
+- `old_raw_state`, `new_raw_state`
+- `old_is_live`, `new_is_live`
+- `old_is_resolved`, `new_is_resolved`
+- `changed_at` (UTC RFC3339Nano)
+- `change_source` (`poller|manual` currently)
+- `changed_by` (nullable)
+- `reason_code` (nullable snake_case <= 64)
+- `reason_text` (nullable)
 
-- alert identity
-- previous state
-- new state
-- transition timestamp (UTC)
-- transition source (`poller` or `manual`)
-- actor (nullable; `NULL` when no authenticated user context)
-
-No transition row is required if state did not change.
-
-## 7. Actor nullability
-
-For manual resolve:
-
-- If authentication is enabled and user context exists, set actor to username.
-- If authentication is disabled or unavailable, store actor as `NULL`.
-
-Rationale:
-
-- avoid conflating explicit usernames with implicit anonymous placeholders.
-
-## 8. Time semantics
-
-Use UTC timestamps for all persisted transition times.
-
-`last_seen` semantics:
-
-- Updated when alert appears in live snapshot.
-- Used by TTL retention.
-
-`last_state_change_at` can be derived from transition history (latest row per alert).
-Persisting a denormalized copy is optional optimization, not a behavioral requirement.
+No event row is written when the full tuple is unchanged.

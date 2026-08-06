@@ -56,6 +56,13 @@ var AllFilters = []filterConfig{
 		Autocomplete:       stateAutocomplete,
 	},
 	{
+		Label:              "@is_live",
+		LabelRe:            regexp.MustCompile("^@is_live$"),
+		SupportedOperators: []string{equalOperator},
+		Factory:            newIsLiveFilter,
+		Autocomplete:       isLiveAutocomplete,
+	},
+	{
 		Label:              "@inhibited",
 		LabelRe:            regexp.MustCompile("^@inhibited$"),
 		SupportedOperators: []string{equalOperator},

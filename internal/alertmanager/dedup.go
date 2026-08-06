@@ -81,6 +81,9 @@ func DedupAlerts() []models.AlertGroup {
 					// and append alert state to the slice
 					alertStates[alertLFP] = append(alertStates[alertLFP], alert.State)
 				} else {
+					alert.RawState = alert.State
+					alert.IsLive = true
+					alert.IsResolved = false
 					alerts[alertLFP] = alert
 					// seed alert state slice
 					alertStates[alertLFP] = []models.AlertState{alert.State}
@@ -117,6 +120,11 @@ func DedupAlerts() []models.AlertGroup {
 			default:
 				alert.State = models.AlertStateUnprocessed
 			}
+			alert.RawState = alert.State
+			alert.HasRawState = true
+			alert.IsLive = true
+			alert.HasIsLive = true
+			alert.IsResolved = false
 
 			// sort Alertmanager instances for every alert
 			sort.Slice(alert.Alertmanager, func(i, j int) bool {
