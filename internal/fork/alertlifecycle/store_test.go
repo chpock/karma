@@ -2,11 +2,14 @@ package alertlifecycle
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestOpenStoreBootstrapsSchema(t *testing.T) {
@@ -26,6 +29,65 @@ func TestOpenStoreBootstrapsSchema(t *testing.T) {
 	}
 	if version != schemaVersion {
 		t.Fatalf("unexpected schema version: got=%q want=%q", version, schemaVersion)
+	}
+}
+
+func TestOpenStoreBootstrapsPhase2Tables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	expected := []string{
+		"alertmanager_sources",
+		"silence_rules",
+		"silence_rule_episodes",
+		"silence_revisions",
+		"alertmanager_source_silences",
+		"silence_recheck_jobs",
+		"silence_recheck_job_rules",
+		"alert_suppression_cause_history",
+		"alert_suppression_cause_members",
+	}
+
+	for _, table := range expected {
+		var count int
+		err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count)
+		if err != nil {
+			t.Fatalf("failed checking table %q: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("expected table %q to exist", table)
+		}
+	}
+}
+
+func TestOpenStoreFailsOnLegacyPreviewTableRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error: %v", err)
+	}
+	if _, err = db.Exec(`CREATE TABLE alerts_current(id TEXT); INSERT INTO alerts_current(id) VALUES('x');`); err != nil {
+		_ = db.Close()
+		t.Fatalf("failed to seed legacy table: %v", err)
+	}
+	_ = db.Close()
+
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err == nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatal("expected OpenStore() to fail for legacy preview table rows")
+	}
+	if !errors.Is(err, ErrLegacyPreviewTablesNotMigrated) {
+		t.Fatalf("expected ErrLegacyPreviewTablesNotMigrated, got: %v", err)
 	}
 }
 
@@ -880,6 +942,322 @@ func TestRunRegroupToConfigUpdatesGroupFromCurrentRules(t *testing.T) {
 	expectedFP := BuildGroupingFingerprint(cfg)
 	if stats.GroupingFingerprint != expectedFP {
 		t.Fatalf("grouping fingerprint mismatch: got=%q want=%q", stats.GroupingFingerprint, expectedFP)
+	}
+}
+
+func TestApplyPollCycleEnqueuesRecheckOnSilenceChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	input := PollCycleInput{
+		LiveAlerts:          nil,
+		SuccessfulUpstreams: map[string]bool{"am-a": true},
+		SilenceSources: []SourceSilenceState{
+			{
+				SourceName: "am-a",
+				ClusterID:  "cluster-a",
+				SyncStatus: "success",
+				Silences: []SourceSilenceSnapshot{
+					{
+						SilenceID: "sil-1",
+						Status:    "active",
+						StartsAt:  now.Add(-time.Hour),
+						EndsAt:    now.Add(time.Hour),
+						Matchers:  []SilenceMatcherSnapshot{{Name: "alertname", Value: "CPUHigh", IsRegex: false, IsEqual: true}},
+					},
+				},
+			},
+		},
+		Timestamp: now,
+	}
+
+	res, err := store.ApplyPollCycle(input)
+	if err != nil {
+		t.Fatalf("ApplyPollCycle() returned error: %v", err)
+	}
+	if res.RecheckJobsQueued != 1 {
+		t.Fatalf("expected first silence sync to queue 1 job, got=%d", res.RecheckJobsQueued)
+	}
+
+	input.Timestamp = now.Add(2 * time.Minute)
+	updated := input.SilenceSources[0].Silences[0]
+	updatedAt := now.Add(2 * time.Minute)
+	updated.UpdatedAt = &updatedAt
+	input.SilenceSources[0].Silences = []SourceSilenceSnapshot{updated}
+	res, err = store.ApplyPollCycle(input)
+	if err != nil {
+		t.Fatalf("ApplyPollCycle() second run returned error: %v", err)
+	}
+	if res.RecheckJobsQueued != 1 {
+		t.Fatalf("expected changed silence set to queue 1 job, got=%d", res.RecheckJobsQueued)
+	}
+}
+
+func TestRunSilenceRecheckBatchPromotesInactiveAndAddsCause(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	input := PollCycleInput{
+		LiveAlerts:          nil,
+		SuccessfulUpstreams: map[string]bool{"am-a": true},
+		SilenceSources: []SourceSilenceState{
+			{
+				SourceName: "am-a",
+				ClusterID:  "cluster-a",
+				SyncStatus: "success",
+				Silences: []SourceSilenceSnapshot{
+					{
+						SilenceID: "sil-1",
+						Status:    "active",
+						StartsAt:  now.Add(-time.Hour),
+						EndsAt:    now.Add(time.Hour),
+						Matchers:  []SilenceMatcherSnapshot{{Name: "alertname", Value: "CPUHigh", IsRegex: false, IsEqual: true}},
+					},
+				},
+			},
+		},
+		Timestamp: now,
+	}
+	if _, err = store.ApplyPollCycle(input); err != nil {
+		t.Fatalf("ApplyPollCycle() setup returned error: %v", err)
+	}
+
+	matchLabels := `{"alertname":"CPUHigh"}`
+	relevantSources := `[{"name":"am-a","cluster":"cluster-a"}]`
+	if err = store.UpsertCurrentAlert(AlertCurrent{
+		AlertID:           "inactive-a",
+		State:             StateInactive,
+		RawState:          StateActive,
+		IsLive:            false,
+		IsSuppressed:      false,
+		IsResolved:        false,
+		Receiver:          "team-a",
+		GroupID:           "grp-a",
+		GroupLabelsJSON:   `{"alertname":"CPUHigh"}`,
+		LabelsJSON:        matchLabels,
+		MatchLabelsJSON:   &matchLabels,
+		AnnotationsJSON:   `{}`,
+		StartsAt:          now.Add(-time.Hour),
+		LastSeenAt:        &now,
+		RelevantUpstreams: `["am-a"]`,
+		RelevantSources:   relevantSources,
+	}); err != nil {
+		t.Fatalf("UpsertCurrentAlert() returned error: %v", err)
+	}
+
+	promoted, err := store.RunSilenceRecheckBatch(1000)
+	if err != nil {
+		t.Fatalf("RunSilenceRecheckBatch() returned error: %v", err)
+	}
+	if promoted != 1 {
+		t.Fatalf("expected promoted=1, got=%d", promoted)
+	}
+
+	got, err := store.GetCurrentAlert("inactive-a")
+	if err != nil {
+		t.Fatalf("GetCurrentAlert() returned error: %v", err)
+	}
+	if got == nil || got.State != StateSuppressed || !got.IsSuppressed {
+		t.Fatalf("expected alert promoted to suppressed with is_suppressed=true, got=%+v", got)
+	}
+
+	var causes int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM alert_suppression_cause_history WHERE alert_id = ? AND source = 'silence_recheck'`, "inactive-a").Scan(&causes); err != nil {
+		t.Fatalf("failed to count suppression causes: %v", err)
+	}
+	if causes != 1 {
+		t.Fatalf("expected 1 suppression cause history record, got=%d", causes)
+	}
+}
+
+func TestRunHousekeepingCleansCompletedUnreferencedJobs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for i := 0; i < 2; i++ {
+		fp := "sha256:test-" + string(rune('a'+i))
+		if _, err = store.db.Exec(`
+INSERT INTO silence_recheck_jobs(context_fingerprint, open_context_fingerprint, source_context_json, trigger_type, status, cursor_alert_id, created_at, finished_at)
+VALUES(?, NULL, '{"formatVersion":1}', 'source_changed', 'completed', NULL, ?, ?)
+`, fp, now, now); err != nil {
+			t.Fatalf("failed to insert completed job: %v", err)
+		}
+	}
+
+	if _, err = store.RunHousekeeping(24*time.Hour, 100000); err != nil {
+		t.Fatalf("RunHousekeeping() returned error: %v", err)
+	}
+
+	var count int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status='completed'`).Scan(&count); err != nil {
+		t.Fatalf("failed counting remaining completed jobs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 completed unreferenced job after cleanup, got=%d", count)
+	}
+}
+
+func TestRunSilenceRecheckBatchRequiresAllRelevantSourcesToMatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	input := PollCycleInput{
+		LiveAlerts:          nil,
+		SuccessfulUpstreams: map[string]bool{"am-a": true, "am-b": true},
+		SilenceSources: []SourceSilenceState{
+			{
+				SourceName: "am-a",
+				ClusterID:  "cluster-a",
+				SyncStatus: "success",
+				Silences: []SourceSilenceSnapshot{
+					{
+						SilenceID: "sil-1",
+						Status:    "active",
+						StartsAt:  now.Add(-time.Hour),
+						EndsAt:    now.Add(time.Hour),
+						Matchers:  []SilenceMatcherSnapshot{{Name: "alertname", Value: "CPUHigh", IsRegex: false, IsEqual: true}},
+					},
+				},
+			},
+			{
+				SourceName: "am-b",
+				ClusterID:  "cluster-b",
+				SyncStatus: "success",
+				Silences:   nil,
+			},
+		},
+		Timestamp: now,
+	}
+	if _, err = store.ApplyPollCycle(input); err != nil {
+		t.Fatalf("ApplyPollCycle() setup returned error: %v", err)
+	}
+
+	matchLabels := `{"alertname":"CPUHigh"}`
+	relevantSources := `[{"name":"am-a","cluster":"cluster-a"},{"name":"am-b","cluster":"cluster-b"}]`
+	if err = store.UpsertCurrentAlert(AlertCurrent{
+		AlertID:           "inactive-multi",
+		State:             StateInactive,
+		RawState:          StateActive,
+		IsLive:            false,
+		IsSuppressed:      false,
+		IsResolved:        false,
+		Receiver:          "team-a",
+		GroupID:           "grp-a",
+		GroupLabelsJSON:   `{"alertname":"CPUHigh"}`,
+		LabelsJSON:        matchLabels,
+		MatchLabelsJSON:   &matchLabels,
+		AnnotationsJSON:   `{}`,
+		StartsAt:          now.Add(-time.Hour),
+		LastSeenAt:        &now,
+		RelevantUpstreams: `["am-a","am-b"]`,
+		RelevantSources:   relevantSources,
+	}); err != nil {
+		t.Fatalf("UpsertCurrentAlert() returned error: %v", err)
+	}
+
+	promoted, err := store.RunSilenceRecheckBatch(1000)
+	if err != nil {
+		t.Fatalf("RunSilenceRecheckBatch() returned error: %v", err)
+	}
+	if promoted != 0 {
+		t.Fatalf("expected promoted=0 when only one relevant source matches, got=%d", promoted)
+	}
+
+	got, err := store.GetCurrentAlert("inactive-multi")
+	if err != nil {
+		t.Fatalf("GetCurrentAlert() returned error: %v", err)
+	}
+	if got == nil || got.State != StateInactive || got.IsSuppressed {
+		t.Fatalf("expected alert to remain inactive unsuppressed, got=%+v", got)
+	}
+}
+
+func TestApplyPollCycleDoesNotEnqueueRecheckOnStatusFlipOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	baseSilence := SourceSilenceSnapshot{
+		SilenceID: "sil-1",
+		Status:    "active",
+		StartsAt:  now.Add(-time.Hour),
+		EndsAt:    now.Add(time.Hour),
+		Matchers:  []SilenceMatcherSnapshot{{Name: "alertname", Value: "CPUHigh", IsRegex: false, IsEqual: true}},
+	}
+
+	res, err := store.ApplyPollCycle(PollCycleInput{
+		SuccessfulUpstreams: map[string]bool{"am-a": true},
+		SilenceSources: []SourceSilenceState{{
+			SourceName: "am-a",
+			ClusterID:  "cluster-a",
+			SyncStatus: "success",
+			Silences:   []SourceSilenceSnapshot{baseSilence},
+		}},
+		Timestamp: now,
+	})
+	if err != nil {
+		t.Fatalf("ApplyPollCycle(initial success) returned error: %v", err)
+	}
+	if res.RecheckJobsQueued != 1 {
+		t.Fatalf("expected initial queue=1 got=%d", res.RecheckJobsQueued)
+	}
+
+	res, err = store.ApplyPollCycle(PollCycleInput{
+		SuccessfulUpstreams: map[string]bool{"am-a": false},
+		SilenceSources: []SourceSilenceState{{
+			SourceName: "am-a",
+			ClusterID:  "cluster-a",
+			SyncStatus: "failed",
+			Silences:   []SourceSilenceSnapshot{baseSilence},
+		}},
+		Timestamp: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("ApplyPollCycle(failed) returned error: %v", err)
+	}
+	if res.RecheckJobsQueued != 0 {
+		t.Fatalf("expected failed cycle queue=0 got=%d", res.RecheckJobsQueued)
+	}
+
+	res, err = store.ApplyPollCycle(PollCycleInput{
+		SuccessfulUpstreams: map[string]bool{"am-a": true},
+		SilenceSources: []SourceSilenceState{{
+			SourceName: "am-a",
+			ClusterID:  "cluster-a",
+			SyncStatus: "success",
+			Silences:   []SourceSilenceSnapshot{baseSilence},
+		}},
+		Timestamp: now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("ApplyPollCycle(recovered) returned error: %v", err)
+	}
+	if res.RecheckJobsQueued != 0 {
+		t.Fatalf("expected recovered unchanged silence set queue=0 got=%d", res.RecheckJobsQueued)
 	}
 }
 

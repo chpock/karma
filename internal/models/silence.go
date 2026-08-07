@@ -75,6 +75,10 @@ type Silence struct {
 	TicketID  string           `json:"ticketID"`
 	TicketURL string           `json:"ticketURL"`
 	Matchers  []SilenceMatcher `json:"matchers"`
+	// Internal-only enrichment for fork lifecycle/silence-awareness logic.
+	UpdatedAt   *time.Time  `json:"-"`
+	StatusState string      `json:"-"`
+	Annotations Annotations `json:"-"`
 }
 
 func (s Silence) MarshalJSONTo(enc *jsontext.Encoder) error {

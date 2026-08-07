@@ -86,4 +86,20 @@ func runAlertLifecycleHousekeepingOnce() {
 		slog.Int("currentRowsAfter", result.CurrentRowsAfter),
 		slog.Int("historyRowsAfter", result.HistoryRowsAfter),
 	)
+
+	runAlertLifecycleRecheckOnce()
+}
+
+func runAlertLifecycleRecheckOnce() {
+	if lifecycleStore == nil {
+		return
+	}
+	promoted, err := lifecycleStore.RunSilenceRecheckBatch(1000)
+	if err != nil {
+		slog.Error("Alert lifecycle silence recheck failed", slog.Any("error", err))
+		return
+	}
+	if promoted > 0 {
+		slog.Info("Alert lifecycle silence recheck promoted alerts", slog.Int("promoted", promoted))
+	}
 }

@@ -142,12 +142,18 @@ type matcher struct {
 }
 
 type silence struct {
-	EndsAt    dateTime  `json:"endsAt"`
-	StartsAt  dateTime  `json:"startsAt"`
-	ID        string    `json:"id,omitempty"`
-	Comment   string    `json:"comment"`
-	CreatedBy string    `json:"createdBy"`
-	Matchers  []matcher `json:"matchers"`
+	EndsAt      dateTime          `json:"endsAt"`
+	StartsAt    dateTime          `json:"startsAt"`
+	CreatedAt   *dateTime         `json:"createdAt,omitempty"`
+	UpdatedAt   *dateTime         `json:"updatedAt,omitempty"`
+	ID          string            `json:"id,omitempty"`
+	Comment     string            `json:"comment"`
+	CreatedBy   string            `json:"createdBy"`
+	Matchers    []matcher         `json:"matchers"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+	Status      struct {
+		State string `json:"state"`
+	} `json:"status"`
 }
 
 func newHTTPClient(uri string, headers map[string]string, httpTransport http.RoundTripper) (*http.Client, *url.URL) {
@@ -256,11 +262,27 @@ func silences(client *http.Client, baseURL *url.URL, timeout time.Duration) ([]m
 
 	for _, s := range silences {
 		us := models.Silence{
-			ID:        s.ID,
-			StartsAt:  time.Time(s.StartsAt),
-			EndsAt:    time.Time(s.EndsAt),
-			CreatedBy: s.CreatedBy,
-			Comment:   s.Comment,
+			ID:          s.ID,
+			StartsAt:    time.Time(s.StartsAt),
+			EndsAt:      time.Time(s.EndsAt),
+			CreatedBy:   s.CreatedBy,
+			Comment:     s.Comment,
+			StatusState: s.Status.State,
+		}
+		if s.CreatedAt != nil {
+			us.CreatedAt = time.Time(*s.CreatedAt)
+		}
+		if s.UpdatedAt != nil {
+			t := time.Time(*s.UpdatedAt)
+			us.UpdatedAt = &t
+		}
+		if len(s.Annotations) > 0 {
+			annos := make(models.Annotations, 0, len(s.Annotations))
+			for k, v := range s.Annotations {
+				annos = append(annos, models.NewAnnotation(k, v))
+			}
+			models.SortAnnotations(annos)
+			us.Annotations = annos
 		}
 		for _, m := range s.Matchers {
 			isEqual := true
