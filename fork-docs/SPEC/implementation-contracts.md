@@ -22,6 +22,7 @@ All lifecycle logic remains in fork files/modules.
 
 - Live snapshot ownership: Alertmanager collector + dedup pipeline.
 - Lifecycle ownership: `internal/fork/alertlifecycle` (`alert_states` / `alert_events`).
+- Silence reconciliation ownership: `internal/fork/alertlifecycle` (sources, immutable revisions, jobs, and cause history).
 - Merge ownership: `cmd/karma/fork_alertlifecycle_merge.go`.
 
 ## 4. Filter and projection contract
@@ -50,7 +51,15 @@ Required checks for this model:
 - lifecycle integration tests (`cmd/karma` focused tests)
 - UI TypeScript build
 
-## 8. Docs and migration contract
+## 8. Write and transaction contract
+
+- All lifecycle Store writers are serialized inside one process; background regroup, housekeeping, poll, resolve, and silence recheck must not race as independent SQLite writers.
+- Long-running regroup/recheck work is split into transactions so the writer lock is released between batches.
+- Poll transaction order is source/silence reconciliation first, then alert state/events/live cause history, then commit.
+- A failed source refresh updates health only and preserves the last successful source set and fingerprint.
+- SQLite busy timeout is 5 seconds as a defensive boundary for brief external/process-independent locks.
+
+## 9. Docs and migration contract
 
 - Schema and API/UI contracts must be synced in `fork-docs/SPEC/`.
 - Any future schema bump remains subject to `fork-docs/SPEC/db-migrations.md` + dedicated migration note.

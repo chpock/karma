@@ -30,6 +30,14 @@ func TestOpenStoreBootstrapsSchema(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("unexpected schema version: got=%q want=%q", version, schemaVersion)
 	}
+
+	var busyTimeout int
+	if err = store.db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("failed reading busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Fatalf("unexpected busy_timeout: got=%d want=5000", busyTimeout)
+	}
 }
 
 func TestOpenStoreBootstrapsPhase2Tables(t *testing.T) {
@@ -1232,7 +1240,7 @@ func TestApplyPollCycleDoesNotEnqueueRecheckOnStatusFlipOnly(t *testing.T) {
 			SourceName: "am-a",
 			ClusterID:  "cluster-a",
 			SyncStatus: "failed",
-			Silences:   []SourceSilenceSnapshot{baseSilence},
+			Silences:   nil,
 		}},
 		Timestamp: now.Add(time.Minute),
 	})
@@ -1258,6 +1266,116 @@ func TestApplyPollCycleDoesNotEnqueueRecheckOnStatusFlipOnly(t *testing.T) {
 	}
 	if res.RecheckJobsQueued != 0 {
 		t.Fatalf("expected recovered unchanged silence set queue=0 got=%d", res.RecheckJobsQueued)
+	}
+}
+
+func TestApplyPollCycleFreshDBStoresLiveSuppressionCause(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	matchLabels := `{"alertname":"CPUHigh"}`
+	result, err := store.ApplyPollCycle(PollCycleInput{
+		LiveAlerts: []LiveAlertSnapshot{
+			{
+				AlertID:           "suppressed-live",
+				State:             StateSuppressed,
+				Receiver:          "team-a",
+				GroupID:           "group-a",
+				GroupLabelsJSON:   matchLabels,
+				LabelsJSON:        matchLabels,
+				MatchLabelsJSON:   &matchLabels,
+				AnnotationsJSON:   `{}`,
+				StartsAt:          now.Add(-time.Minute),
+				LastSeenAt:        now,
+				RelevantUpstreams: []string{"local"},
+				RelevantSources:   []SourceRef{{Name: "local", Cluster: "local"}},
+				SilencedBySources: []SourceSilenceRef{{SourceName: "local", ClusterID: "local", SilenceIDs: []string{"sil-1"}}},
+			},
+		},
+		SuccessfulUpstreams: map[string]bool{"local": true},
+		SilenceSources: []SourceSilenceState{
+			{
+				SourceName: "local",
+				ClusterID:  "local",
+				SyncStatus: "success",
+				Silences: []SourceSilenceSnapshot{
+					{
+						SilenceID: "sil-1",
+						Status:    "active",
+						StartsAt:  now.Add(-time.Hour),
+						EndsAt:    now.Add(time.Hour),
+						Matchers:  []SilenceMatcherSnapshot{{Name: "alertname", Value: "CPUHigh", IsEqual: true}},
+					},
+				},
+			},
+		},
+		Timestamp: now,
+	})
+	if err != nil {
+		t.Fatalf("ApplyPollCycle() error: %v", err)
+	}
+	if result.Inserted != 1 {
+		t.Fatalf("expected one inserted alert, got=%d", result.Inserted)
+	}
+
+	var status string
+	var members int
+	err = store.db.QueryRow(`
+SELECT h.cause_status, COUNT(m.member_id)
+FROM alert_suppression_cause_history h
+LEFT JOIN alert_suppression_cause_members m ON m.history_id = h.history_id
+WHERE h.alert_id = ? AND h.source = 'live_alertmanager'
+GROUP BY h.history_id
+`, "suppressed-live").Scan(&status, &members)
+	if err != nil {
+		t.Fatalf("failed reading live suppression cause: %v", err)
+	}
+	if status != "known" || members != 1 {
+		t.Fatalf("expected known cause with one member, got status=%q members=%d", status, members)
+	}
+}
+
+func TestStoreSerializesConcurrentWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	store.writeMu.Lock()
+	housekeepingDone := make(chan error, 1)
+	regroupDone := make(chan error, 1)
+	go func() {
+		_, runErr := store.RunHousekeeping(24*time.Hour, 100000)
+		housekeepingDone <- runErr
+	}()
+	go func() {
+		_, runErr := store.RunRegroupToConfig(context.Background(), GroupingConfig{}, 1000)
+		regroupDone <- runErr
+	}()
+
+	select {
+	case runErr := <-housekeepingDone:
+		store.writeMu.Unlock()
+		t.Fatalf("housekeeping bypassed writer serialization: %v", runErr)
+	case runErr := <-regroupDone:
+		store.writeMu.Unlock()
+		t.Fatalf("regroup bypassed writer serialization: %v", runErr)
+	case <-time.After(20 * time.Millisecond):
+	}
+	store.writeMu.Unlock()
+
+	if runErr := <-housekeepingDone; runErr != nil {
+		t.Fatalf("RunHousekeeping() returned error: %v", runErr)
+	}
+	if runErr := <-regroupDone; runErr != nil {
+		t.Fatalf("RunRegroupToConfig() returned error: %v", runErr)
 	}
 }
 

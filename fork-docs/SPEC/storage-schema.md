@@ -14,6 +14,7 @@
   - `synchronous=NORMAL`
   - `foreign_keys=ON`
   - `auto_vacuum=INCREMENTAL`
+  - `busy_timeout=5000` (milliseconds)
 
 ## 3. Tables
 

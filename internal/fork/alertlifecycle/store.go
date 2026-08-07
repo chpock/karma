@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prymitive/karma/internal/models"
@@ -51,8 +52,9 @@ const (
 )
 
 type Store struct {
-	db   *sql.DB
-	path string
+	db      *sql.DB
+	path    string
+	writeMu sync.Mutex
 }
 
 type StoreOptions struct {
@@ -80,7 +82,7 @@ func OpenStore(opts StoreOptions) (*Store, error) {
 		return nil, fmt.Errorf("failed to create sqlite directory: %w", err)
 	}
 
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=auto_vacuum(INCREMENTAL)", opts.Path)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=auto_vacuum(INCREMENTAL)&_pragma=busy_timeout(5000)", opts.Path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
@@ -603,6 +605,8 @@ func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 	if s == nil || s.db == nil {
 		return ErrStoreNotInitialized
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if strings.TrimSpace(alert.GroupLabelsJSON) == "" {
 		alert.GroupLabelsJSON = "{}"
 	}
@@ -726,6 +730,8 @@ func (s *Store) InsertStateTransition(transition AlertStateTransition) error {
 	if s == nil || s.db == nil {
 		return ErrStoreNotInitialized
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	if !transition.NewRawState.IsValid() {
 		if transition.NewState == StateInactive || transition.NewState == StateResolved {
@@ -1085,6 +1091,8 @@ func (s *Store) RunHousekeeping(retentionTTL time.Duration, maxAlerts int) (Hous
 	if s == nil || s.db == nil {
 		return HousekeepingResult{}, ErrStoreNotInitialized
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if retentionTTL <= 0 {
 		return HousekeepingResult{}, errors.New("retentionTTL must be > 0")
 	}
@@ -1335,6 +1343,8 @@ func (s *Store) ResolveAlert(alertID string, changedBy *string, reason *string, 
 	if s == nil || s.db == nil {
 		return nil, ErrStoreNotInitialized
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if strings.TrimSpace(alertID) == "" {
 		return nil, ErrInvalidAlertID
 	}
@@ -1430,6 +1440,8 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	if s == nil || s.db == nil {
 		return PollCycleResult{}, ErrStoreNotInitialized
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	now := input.Timestamp.UTC()
 	if now.IsZero() {
@@ -1471,6 +1483,12 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	}
 
 	result := PollCycleResult{}
+	queued, qerr := reconcileSilenceSourcesTx(tx, input.SilenceSources, now)
+	if qerr != nil {
+		_ = tx.Rollback()
+		return PollCycleResult{}, qerr
+	}
+	result.RecheckJobsQueued = queued
 
 	currentByID, err := readAllCurrentAlertsTx(tx)
 	if err != nil {
@@ -1655,13 +1673,6 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 		result.Transitions++
 	}
 
-	queued, qerr := reconcileSilenceSourcesTx(tx, input.SilenceSources, now)
-	if qerr != nil {
-		_ = tx.Rollback()
-		return PollCycleResult{}, qerr
-	}
-	result.RecheckJobsQueued = queued
-
 	if err = tx.Commit(); err != nil {
 		return PollCycleResult{}, fmt.Errorf("failed to commit poll cycle transaction: %w", err)
 	}
@@ -1739,6 +1750,9 @@ func (s *Store) RunRegroupToConfig(ctx context.Context, cfg GroupingConfig, batc
 }
 
 func (s *Store) beginOrResumeRegroup(targetFingerprint string) (bool, int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	now := time.Now().UTC()
 
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -1862,6 +1876,9 @@ func compileGroupingConfig(cfg GroupingConfig) (compiledGroupingConfig, error) {
 }
 
 func (s *Store) runRegroupBatch(targetFingerprint string, cfg compiledGroupingConfig, batchSize int) (bool, int, int, int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return false, 0, 0, 0, fmt.Errorf("failed to begin regroup batch transaction: %w", err)
@@ -2019,6 +2036,9 @@ WHERE rowid = ?
 }
 
 func (s *Store) failRegroup(targetFingerprint, reason string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
@@ -2720,6 +2740,8 @@ func (s *Store) RunSilenceRecheckBatch(batchSize int) (int, error) {
 	if s == nil || s.db == nil {
 		return 0, ErrStoreNotInitialized
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
@@ -3715,8 +3737,10 @@ func upsertAlertmanagerSourceTx(tx *sql.Tx, source SourceSilenceState, sourceFP 
 	}
 	attemptAt := now.UTC().Format(time.RFC3339Nano)
 	successAt := any(nil)
+	fingerprint := any(nil)
 	if syncStatus == "success" {
 		successAt = attemptAt
+		fingerprint = sourceFP
 	}
 	_, err := tx.Exec(`
 INSERT INTO alertmanager_sources(
@@ -3727,14 +3751,14 @@ INSERT INTO alertmanager_sources(
 ON CONFLICT(source_name) DO UPDATE SET
   current_cluster_id=excluded.current_cluster_id,
   sync_status=excluded.sync_status,
-  silence_set_fingerprint=excluded.silence_set_fingerprint,
+  silence_set_fingerprint=COALESCE(excluded.silence_set_fingerprint, alertmanager_sources.silence_set_fingerprint),
   last_configured_at=excluded.last_configured_at,
   last_attempt_at=excluded.last_attempt_at,
   last_success_at=COALESCE(excluded.last_success_at, alertmanager_sources.last_success_at),
   last_confirmed_at=COALESCE(excluded.last_success_at, alertmanager_sources.last_confirmed_at),
   last_error=excluded.last_error,
   retired_at=CASE WHEN excluded.sync_status='retired' THEN excluded.last_attempt_at ELSE NULL END
-`, sourceName, clusterID, syncStatus, sourceFP, attemptAt, attemptAt, attemptAt, successAt, successAt, sanitizeNullableString(ptrString(source.LastError)), nil)
+`, sourceName, clusterID, syncStatus, fingerprint, attemptAt, attemptAt, attemptAt, successAt, successAt, sanitizeNullableString(ptrString(source.LastError)), nil)
 	if err != nil {
 		return fmt.Errorf("failed to upsert alertmanager source %q: %w", sourceName, err)
 	}
