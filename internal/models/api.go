@@ -299,7 +299,7 @@ type APIAlertGroup struct {
 	AllLabels           map[string]map[string][]string `json:"allLabels"`
 	AlertmanagerCount   map[string]int                 `json:"alertmanagerCount"`
 	StateCount          map[string]int                 `json:"stateCount"`
-	SuppressedBreakdown map[string]int                 `json:"suppressedBreakdown,omitempty"`
+	SuppressedBreakdown map[string]int                 `json:"suppressedBreakdown"`
 	Receiver            string                         `json:"receiver"`
 	ID                  string                         `json:"id"`
 	Shared              APIAlertGroupSharedMaps        `json:"shared"`
@@ -322,8 +322,10 @@ func (ag APIAlertGroup) MarshalJSONTo(enc *jsontext.Encoder) error {
 	w.mapStringInt(ag.AlertmanagerCount)
 	w.key("stateCount")
 	w.mapStringInt(ag.StateCount)
-	if len(ag.SuppressedBreakdown) > 0 {
-		w.key("suppressedBreakdown")
+	w.key("suppressedBreakdown")
+	if ag.SuppressedBreakdown == nil {
+		w.mapStringInt(map[string]int{"current": 0, "past": 0})
+	} else {
 		w.mapStringInt(ag.SuppressedBreakdown)
 	}
 	w.key("receiver")
@@ -893,7 +895,7 @@ func (ai AuthenticationInfo) MarshalJSONTo(enc *jsontext.Encoder) error {
 
 type APIGrid struct {
 	StateCount          map[string]int  `json:"stateCount"`
-	SuppressedBreakdown map[string]int  `json:"suppressedBreakdown,omitempty"`
+	SuppressedBreakdown map[string]int  `json:"suppressedBreakdown"`
 	LabelName           string          `json:"labelName"`
 	LabelValue          string          `json:"labelValue"`
 	AlertGroups         []APIAlertGroup `json:"alertGroups"`
@@ -905,8 +907,10 @@ func (g APIGrid) MarshalJSONTo(enc *jsontext.Encoder) error {
 	w.beginObject()
 	w.key("stateCount")
 	w.mapStringInt(g.StateCount)
-	if len(g.SuppressedBreakdown) > 0 {
-		w.key("suppressedBreakdown")
+	w.key("suppressedBreakdown")
+	if g.SuppressedBreakdown == nil {
+		w.mapStringInt(map[string]int{"current": 0, "past": 0})
+	} else {
 		w.mapStringInt(g.SuppressedBreakdown)
 	}
 	w.key("labelName")
@@ -929,8 +933,10 @@ func (g APIGrid) MarshalJSONTo(enc *jsontext.Encoder) error {
 		w.mapStringInt(ag.AlertmanagerCount)
 		w.key("stateCount")
 		w.mapStringInt(ag.StateCount)
-		if len(ag.SuppressedBreakdown) > 0 {
-			w.key("suppressedBreakdown")
+		w.key("suppressedBreakdown")
+		if ag.SuppressedBreakdown == nil {
+			w.mapStringInt(map[string]int{"current": 0, "past": 0})
+		} else {
 			w.mapStringInt(ag.SuppressedBreakdown)
 		}
 		w.key("receiver")
@@ -1114,6 +1120,12 @@ func (r AlertsResponse) MarshalJSONTo(enc *jsontext.Encoder) error {
 		w.beginObject()
 		w.key("stateCount")
 		w.mapStringInt(g.StateCount)
+		w.key("suppressedBreakdown")
+		if g.SuppressedBreakdown == nil {
+			w.mapStringInt(map[string]int{"current": 0, "past": 0})
+		} else {
+			w.mapStringInt(g.SuppressedBreakdown)
+		}
 		w.key("labelName")
 		w.str(g.LabelName)
 		w.key("labelValue")
@@ -1134,6 +1146,12 @@ func (r AlertsResponse) MarshalJSONTo(enc *jsontext.Encoder) error {
 			w.mapStringInt(ag.AlertmanagerCount)
 			w.key("stateCount")
 			w.mapStringInt(ag.StateCount)
+			w.key("suppressedBreakdown")
+			if ag.SuppressedBreakdown == nil {
+				w.mapStringInt(map[string]int{"current": 0, "past": 0})
+			} else {
+				w.mapStringInt(ag.SuppressedBreakdown)
+			}
 			w.key("receiver")
 			w.str(ag.Receiver)
 			w.key("id")

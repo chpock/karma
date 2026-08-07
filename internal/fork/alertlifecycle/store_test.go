@@ -82,6 +82,75 @@ func TestUpsertAndReadCurrentAlert(t *testing.T) {
 	}
 }
 
+func TestBootstrapReprojectsSuppressedPastState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() returned error: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err = store.UpsertCurrentAlert(AlertCurrent{
+		AlertID:           "id-suppressed-past",
+		State:             StateSuppressed,
+		RawState:          StateSuppressed,
+		IsLive:            false,
+		IsResolved:        false,
+		Receiver:          "team-a",
+		GroupID:           "group-1",
+		LabelsJSON:        `{"alertname":"DiskFull"}`,
+		AnnotationsJSON:   `{"summary":"Disk full"}`,
+		StartsAt:          now.Add(-time.Hour),
+		LastSeenAt:        &now,
+		RelevantUpstreams: `["am-a"]`,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatalf("UpsertCurrentAlert() setup failed: %v", err)
+	}
+
+	// Simulate old/stale projected state kept as inactive.
+	if _, err = store.db.Exec(`
+UPDATE alert_states
+SET state='inactive', raw_state='suppressed', is_live=0, is_resolved=0
+WHERE alert_id='id-suppressed-past'
+`); err != nil {
+		_ = store.Close()
+		t.Fatalf("failed to seed stale projected state: %v", err)
+	}
+
+	if err = store.Close(); err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+
+	store, err = OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() reopen returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	current, err := store.GetCurrentAlert("id-suppressed-past")
+	if err != nil {
+		t.Fatalf("GetCurrentAlert() returned error: %v", err)
+	}
+	if current == nil {
+		t.Fatal("GetCurrentAlert() returned nil alert")
+	}
+	if current.State != StateSuppressed {
+		t.Fatalf("expected projected state suppressed after bootstrap normalize, got=%q", current.State)
+	}
+
+	stats, err := store.GetStats()
+	if err != nil {
+		t.Fatalf("GetStats() returned error: %v", err)
+	}
+	if stats.SuppressedBreakdownPast != 1 {
+		t.Fatalf("expected suppressed past=1 got=%d", stats.SuppressedBreakdownPast)
+	}
+}
+
 func TestInsertStateTransition(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 

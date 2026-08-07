@@ -499,8 +499,8 @@ describe("<AlertGroup /> renderConfig", () => {
 });
 
 describe("<AlertGroup /> card theme", () => {
-  it("shows suppressed counter badge from stateCount when suppressedBreakdown is missing", () => {
-    group.suppressedBreakdown = undefined;
+  it("shows suppressed current badge when suppressedBreakdown.current > 0", () => {
+    group.suppressedBreakdown = { current: 4, past: 0 };
     group.stateCount = { active: 0, suppressed: 4, unprocessed: 0, inactive: 0 };
 
     const { container } = renderAlertGroup(jest.fn());
@@ -524,6 +524,23 @@ describe("<AlertGroup /> card theme", () => {
     );
     expect(pastBadge).toBeInTheDocument();
     expect(pastBadge?.textContent).toBe("3");
+  });
+
+  it("shows split suppressed current/past badges from suppressedBreakdown", () => {
+    group.suppressedBreakdown = { current: 1, past: 1 };
+    group.stateCount = { active: 0, suppressed: 2, unprocessed: 0, inactive: 0 };
+
+    const { container } = renderAlertGroup(jest.fn());
+
+    const currentBadge = container.querySelector(".card-header .badge.bg-success");
+    const pastBadge = container.querySelector(
+      ".card-header .badge.bg-suppressed-past",
+    );
+
+    expect(currentBadge).toBeInTheDocument();
+    expect(currentBadge?.textContent).toBe("1");
+    expect(pastBadge).toBeInTheDocument();
+    expect(pastBadge?.textContent).toBe("1");
   });
 
   it("renders bg-light background when colorTitleBar=false", () => {

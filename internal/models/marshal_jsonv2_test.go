@@ -406,16 +406,18 @@ func TestMarshalJSONTo_MatchesV1(t *testing.T) {
 			// API grid with state counts, label info, and nested alert groups
 			name: "APIGrid/full",
 			val: models.APIGrid{
-				StateCount: map[string]int{"active": 2, "suppressed": 1},
-				LabelName:  "cluster",
-				LabelValue: "prod",
+				StateCount:          map[string]int{"active": 2, "suppressed": 1},
+				SuppressedBreakdown: map[string]int{"current": 1, "past": 0},
+				LabelName:           "cluster",
+				LabelValue:          "prod",
 				AlertGroups: []models.APIAlertGroup{
 					{
-						AllLabels:         map[string]map[string][]string{},
-						AlertmanagerCount: map[string]int{"am1": 1},
-						StateCount:        map[string]int{"active": 1},
-						Receiver:          "default",
-						ID:                "group-1",
+						AllLabels:           map[string]map[string][]string{},
+						AlertmanagerCount:   map[string]int{"am1": 1},
+						StateCount:          map[string]int{"active": 1},
+						SuppressedBreakdown: map[string]int{"current": 0, "past": 0},
+						Receiver:            "default",
+						ID:                  "group-1",
 						Shared: models.APIAlertGroupSharedMaps{
 							Annotations: models.Annotations{},
 							Labels:      models.OrderedLabels{},
@@ -435,18 +437,20 @@ func TestMarshalJSONTo_MatchesV1(t *testing.T) {
 			// exercising the inner alert marshaling loop in APIGrid.MarshalJSONTo
 			name: "APIGrid/with_alerts",
 			val: models.APIGrid{
-				StateCount: map[string]int{"active": 1},
-				LabelName:  "cluster",
-				LabelValue: "prod",
+				StateCount:          map[string]int{"active": 1},
+				SuppressedBreakdown: map[string]int{"current": 0, "past": 0},
+				LabelName:           "cluster",
+				LabelValue:          "prod",
 				AlertGroups: []models.APIAlertGroup{
 					{
 						AllLabels: map[string]map[string][]string{
 							"active": {"alertname": {"Test"}},
 						},
-						AlertmanagerCount: map[string]int{"am1": 1},
-						StateCount:        map[string]int{"active": 1},
-						Receiver:          "default",
-						ID:                "group-1",
+						AlertmanagerCount:   map[string]int{"am1": 1},
+						StateCount:          map[string]int{"active": 1},
+						SuppressedBreakdown: map[string]int{"current": 0, "past": 0},
+						Receiver:            "default",
+						ID:                  "group-1",
 						Shared: models.APIAlertGroupSharedMaps{
 							Annotations: models.Annotations{},
 							Labels:      models.OrderedLabels{{Name: "job", Value: "test"}},
@@ -499,8 +503,12 @@ func TestMarshalJSONTo_MatchesV1(t *testing.T) {
 				},
 				AlertmanagerCount: map[string]int{"am1": 2},
 				StateCount:        map[string]int{"active": 1, "suppressed": 1},
-				Receiver:          "default",
-				ID:                "group-1",
+				SuppressedBreakdown: map[string]int{
+					"current": 1,
+					"past":    0,
+				},
+				Receiver: "default",
+				ID:       "group-1",
 				Shared: models.APIAlertGroupSharedMaps{
 					Annotations: models.Annotations{},
 					Labels:      models.OrderedLabels{{Name: "job", Value: "test"}},
@@ -570,5 +578,100 @@ func TestMarshalJSONTo_MatchesV1(t *testing.T) {
 				t.Errorf("v1 vs v2 mismatch\nv1: %s\nv2: %s", v1Bytes, v2Bytes)
 			}
 		})
+	}
+}
+
+func TestAlertsResponseMarshalIncludesSuppressedBreakdown(t *testing.T) {
+	resp := models.AlertsResponse{
+		Status:      "ok",
+		Timestamp:   "2026-08-07T00:00:00Z",
+		Version:     "test",
+		Silences:    map[string]map[string]models.Silence{},
+		Colors:      models.LabelsColorMap{},
+		LabelNames:  []string{},
+		Filters:     []models.Filter{},
+		Receivers:   []string{},
+		TotalAlerts: 1,
+		Upstreams: models.AlertmanagerAPISummary{
+			Clusters:  map[string][]string{},
+			Instances: []models.AlertmanagerAPIStatus{},
+			Counters: models.AlertmanagerAPICounters{
+				Total:   0,
+				Healthy: 0,
+				Failed:  0,
+			},
+		},
+		Authentication: models.AuthenticationInfo{},
+		Settings:       models.Settings{},
+		Grids: []models.APIGrid{
+			{
+				StateCount: map[string]int{"suppressed": 1},
+				LabelName:  "",
+				LabelValue: "",
+				AlertGroups: []models.APIAlertGroup{
+					{
+						AllLabels:         map[string]map[string][]string{},
+						AlertmanagerCount: map[string]int{},
+						StateCount:        map[string]int{"suppressed": 1},
+						Receiver:          "default",
+						ID:                "g1",
+						Shared: models.APIAlertGroupSharedMaps{
+							Annotations: models.Annotations{},
+							Labels:      models.OrderedLabels{},
+							Silences:    map[string][]string{},
+							Sources:     []string{},
+							Clusters:    []string{},
+						},
+						Labels:      models.OrderedLabels{},
+						Alerts:      []models.APIAlert{},
+						TotalAlerts: 1,
+					},
+				},
+				TotalGroups: 1,
+			},
+		},
+	}
+
+	raw, err := jsonv2.Marshal(resp)
+	if err != nil {
+		t.Fatalf("jsonv2.Marshal() returned error: %v", err)
+	}
+
+	var parsed map[string]any
+	if err = json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal() returned error: %v", err)
+	}
+
+	grids, ok := parsed["grids"].([]any)
+	if !ok || len(grids) == 0 {
+		t.Fatalf("expected grids array in response JSON")
+	}
+
+	grid, ok := grids[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first grid object")
+	}
+	gridSB, ok := grid["suppressedBreakdown"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected grid.suppressedBreakdown object")
+	}
+	if gridSB["current"] != float64(0) || gridSB["past"] != float64(0) {
+		t.Fatalf("unexpected grid.suppressedBreakdown values: %#v", gridSB)
+	}
+
+	groups, ok := grid["alertGroups"].([]any)
+	if !ok || len(groups) == 0 {
+		t.Fatalf("expected grid.alertGroups array")
+	}
+	ag, ok := groups[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected first alertGroup object")
+	}
+	agSB, ok := ag["suppressedBreakdown"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected alertGroup.suppressedBreakdown object")
+	}
+	if agSB["current"] != float64(0) || agSB["past"] != float64(0) {
+		t.Fatalf("unexpected alertGroup.suppressedBreakdown values: %#v", agSB)
 	}
 }

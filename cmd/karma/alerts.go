@@ -385,7 +385,7 @@ func filterAlerts(dedupedAlerts []models.AlertGroup, fl []filters.Filter) (filte
 					alert.Alertmanager = ams
 				}
 			}
-			if len(alert.Alertmanager) == 0 && alert.State != models.AlertStateInactive && alert.State != models.AlertStateResolved {
+			if len(alert.Alertmanager) == 0 && alert.State != models.AlertStateInactive && alert.State != models.AlertStateResolved && !(alert.State == models.AlertStateSuppressed && alert.HasIsLive && !alert.IsLive) {
 				continue
 			}
 

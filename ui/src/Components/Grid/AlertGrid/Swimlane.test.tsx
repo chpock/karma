@@ -19,10 +19,10 @@ const baseGrid = (): APIGridT => ({
 });
 
 describe("<Swimlane /> suppressed badges", () => {
-  it("renders current suppressed badge from stateCount fallback when breakdown is missing", () => {
+  it("renders current suppressed badge from suppressedBreakdown", () => {
     const grid = baseGrid();
     grid.stateCount.suppressed = 5;
-    grid.suppressedBreakdown = undefined;
+    grid.suppressedBreakdown = { current: 5, past: 0 };
 
     const { container } = render(
       <Swimlane
@@ -60,5 +60,29 @@ describe("<Swimlane /> suppressed badges", () => {
     const pastBadge = container.querySelector(".badge.bg-suppressed-past");
     expect(pastBadge).toBeInTheDocument();
     expect(pastBadge?.textContent).toBe("3");
+  });
+
+  it("renders split current/past badges from suppressedBreakdown", () => {
+    const grid = baseGrid();
+    grid.stateCount.suppressed = 2;
+    grid.suppressedBreakdown = { current: 1, past: 1 };
+
+    const { container } = render(
+      <Swimlane
+        alertStore={new AlertStore([])}
+        settingsStore={new Settings(null)}
+        grid={grid}
+        isExpanded={true}
+        onToggle={jest.fn()}
+        paddingTop={0}
+      />,
+    );
+
+    const currentBadge = container.querySelector(".badge.bg-success");
+    const pastBadge = container.querySelector(".badge.bg-suppressed-past");
+    expect(currentBadge).toBeInTheDocument();
+    expect(currentBadge?.textContent).toBe("1");
+    expect(pastBadge).toBeInTheDocument();
+    expect(pastBadge?.textContent).toBe("1");
   });
 });

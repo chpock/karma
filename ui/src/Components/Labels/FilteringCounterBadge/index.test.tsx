@@ -46,7 +46,9 @@ const validateOnClick = (
   isNegative: boolean,
   isAppend: boolean,
   appendFilters: string[] = [],
+  filterValue?: string,
   replaceWith?: string,
+  expectedFilterCount?: number,
 ) => {
   alertStore.filters.setFilterValues([NewUnappliedFilter("foo=bar")]);
   render(
@@ -58,11 +60,15 @@ const validateOnClick = (
       themed={themed}
       isAppend={isAppend}
       appendFilters={appendFilters}
+      filterValue={filterValue}
       replaceWith={replaceWith}
     />,
   );
   fireEvent.click(screen.getByText("1"), { altKey: isNegative ? true : false });
-  expect(alertStore.filters.values).toHaveLength(isAppend ? 2 : 1);
+  const expectedLength =
+    expectedFilterCount ??
+    (isAppend ? 2 + appendFilters.length : 1 + appendFilters.length);
+  expect(alertStore.filters.values).toHaveLength(expectedLength);
   if (isAppend) {
     expect(alertStore.filters.values).toContainEqual(
       NewUnappliedFilter("foo=bar"),
@@ -71,8 +77,8 @@ const validateOnClick = (
   expect(alertStore.filters.values).toContainEqual(
     NewUnappliedFilter(
       isNegative
-        ? `@state${QueryOperators.NotEqual}${value}`
-        : replaceWith || `@state${QueryOperators.Equal}${value}`,
+        ? `@state${QueryOperators.NotEqual}${filterValue || value}`
+        : replaceWith || `@state${QueryOperators.Equal}${filterValue || value}`,
     ),
   );
   for (const raw of appendFilters) {
@@ -135,4 +141,40 @@ describe("<FilteringCounterBadge />", () => {
       validateOnClick(state, true, true, false);
     });
   }
+
+  it("suppressed-past click uses @state=suppressed and appends @is_live=false", () => {
+    validateOnClick(
+      "suppressed-past",
+      true,
+      false,
+      true,
+      ["@is_live=false"],
+      "suppressed",
+      undefined,
+      3,
+    );
+  });
+
+  it("suppressed-past alt+click uses @state!=suppressed without appending @is_live=false", () => {
+    alertStore.filters.setFilterValues([NewUnappliedFilter("foo=bar")]);
+    render(
+      <FilteringCounterBadge
+        alertStore={alertStore}
+        name="@state"
+        value="suppressed-past"
+        filterValue="suppressed"
+        counter={1}
+        themed={true}
+        appendFilters={["@is_live=false"]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("1"), { altKey: true });
+    expect(alertStore.filters.values).toContainEqual(
+      NewUnappliedFilter("@state!=suppressed"),
+    );
+    expect(alertStore.filters.values).not.toContainEqual(
+      NewUnappliedFilter("@is_live=false"),
+    );
+  });
 });

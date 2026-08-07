@@ -29,10 +29,8 @@ const GroupHeader: FC<{
   setIsMenuOpen,
   gridLabelValue,
 }) => {
-  const suppressedCurrent =
-    group.suppressedBreakdown?.current ||
-    (group.suppressedBreakdown?.past ? 0 : group.stateCount.suppressed || 0);
-  const suppressedPast = group.suppressedBreakdown?.past || 0;
+  const suppressedCurrent = group.suppressedBreakdown?.current ?? 0;
+  const suppressedPast = group.suppressedBreakdown?.past ?? 0;
 
   const onCollapseClick = (event: MouseEvent) => {
     // left click       => toggle current group

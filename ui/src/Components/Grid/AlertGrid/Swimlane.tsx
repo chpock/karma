@@ -31,10 +31,8 @@ const Swimlane = ({
   paddingTop,
   ref,
 }: SwimlaneProps) => {
-  const suppressedCurrent =
-    grid.suppressedBreakdown?.current ||
-    (grid.suppressedBreakdown?.past ? 0 : grid.stateCount.suppressed || 0);
-  const suppressedPast = grid.suppressedBreakdown?.past || 0;
+  const suppressedCurrent = grid.suppressedBreakdown?.current ?? 0;
+  const suppressedPast = grid.suppressedBreakdown?.past ?? 0;
 
   return (
     <h5

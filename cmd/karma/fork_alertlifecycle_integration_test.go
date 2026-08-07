@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prymitive/karma/internal/filters"
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
 	"github.com/prymitive/karma/internal/models"
 )
@@ -73,6 +74,101 @@ func TestMergeLifecycleStoredAlertsResolvedVisibilityByFilter(t *testing.T) {
 	}
 	if !containsAlertState(withResolved, models.AlertStateResolved) {
 		t.Fatal("expected resolved alert when explicitly included")
+	}
+}
+
+func TestFilterAlertsKeepsSuppressedNonLiveWithoutAlertmanager(t *testing.T) {
+	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/lifecycle.sqlite"})
+	if err != nil {
+		t.Fatalf("OpenStore() returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+
+	prev := lifecycleStore
+	lifecycleStore = store
+	t.Cleanup(func() {
+		lifecycleStore = prev
+	})
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	_, err = lifecycleStore.ApplyPollCycle(alertlifecycle.PollCycleInput{
+		Timestamp: now,
+		LiveAlerts: []alertlifecycle.LiveAlertSnapshot{{
+			AlertID:           "suppressed-past-1",
+			State:             alertlifecycle.StateSuppressed,
+			Receiver:          "default",
+			GroupID:           "g-suppressed-past",
+			GroupLabelsJSON:   `{"alertname":"SuppressedPast"}`,
+			LabelsJSON:        `{"alertname":"SuppressedPast","severity":"warning"}`,
+			AnnotationsJSON:   `{"summary":"suppressed past"}`,
+			StartsAt:          now.Add(-2 * time.Hour),
+			LastSeenAt:        now,
+			RelevantUpstreams: []string{"local"},
+		}},
+		SuccessfulUpstreams: map[string]bool{"local": true},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPollCycle(live insert) returned error: %v", err)
+	}
+	_, err = lifecycleStore.ApplyPollCycle(alertlifecycle.PollCycleInput{
+		Timestamp:           now.Add(time.Minute),
+		LiveAlerts:          nil,
+		SuccessfulUpstreams: map[string]bool{"local": true},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPollCycle(disappear) returned error: %v", err)
+	}
+
+	liveOnly := models.AlertGroup{
+		ID:                "g-live-only",
+		Receiver:          "default",
+		Labels:            models.LabelsFromMap(map[string]string{"alertname": "LiveOnly"}),
+		Alerts:            []models.Alert{},
+		AlertmanagerCount: map[string]int{},
+		StateCount:        map[string]int{},
+	}
+	liveAlert := models.Alert{
+		StartsAt:    now,
+		Receiver:    "default",
+		Labels:      models.LabelsFromMap(map[string]string{"alertname": "LiveOnly", "instance": "srv-1"}),
+		Annotations: models.AnnotationsFromMap(map[string]string{"summary": "live"}),
+		State:       models.AlertStateSuppressed,
+		RawState:    models.AlertStateSuppressed,
+		HasRawState: true,
+		IsLive:      true,
+		HasIsLive:   true,
+		IsResolved:  false,
+		Alertmanager: []models.AlertmanagerInstance{{
+			Name:  "local",
+			State: models.AlertStateSuppressed,
+		}},
+	}
+	liveAlert.UpdateFingerprints()
+	liveOnly.Alerts = append(liveOnly.Alerts, liveAlert)
+	liveOnly.StateCount = map[string]int{
+		models.AlertStateSuppressed.String(): 1,
+	}
+
+	groups := mergeLifecycleStoredAlerts([]models.AlertGroup{liveOnly}, false)
+	fs := []filters.Filter{
+		filters.NewFilter("@state=suppressed"),
+		filters.NewFilter("@is_live=false"),
+	}
+	filtered := filterAlerts(groups, fs)
+
+	count := 0
+	for _, g := range filtered {
+		for _, a := range g.Alerts {
+			if a.State == models.AlertStateSuppressed && a.HasIsLive && !a.IsLive {
+				count++
+			}
+		}
+	}
+
+	if count != 1 {
+		t.Fatalf("expected 1 suppressed non-live alert after filtering, got=%d", count)
 	}
 }
 

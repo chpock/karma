@@ -237,6 +237,18 @@ CREATE TABLE IF NOT EXISTS metadata (
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to backfill raw_state: %w", err)
 	}
+	if _, err = tx.Exec(`
+UPDATE alert_states
+SET raw_state = CASE
+  WHEN raw_state IN ('active', 'suppressed', 'unprocessed') THEN raw_state
+  WHEN state = 'suppressed' THEN 'suppressed'
+  WHEN state = 'unprocessed' THEN 'unprocessed'
+  ELSE 'active'
+END
+`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to normalize raw_state values: %w", err)
+	}
 	if _, err = tx.Exec(`UPDATE alert_states SET is_live = CASE WHEN state IN ('inactive', 'resolved') THEN 0 ELSE 1 END WHERE is_live NOT IN (0,1)`); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to normalize is_live: %w", err)
@@ -244,6 +256,23 @@ CREATE TABLE IF NOT EXISTS metadata (
 	if _, err = tx.Exec(`UPDATE alert_states SET is_resolved = CASE WHEN state = 'resolved' THEN 1 ELSE 0 END WHERE is_resolved NOT IN (0,1)`); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to normalize is_resolved: %w", err)
+	}
+	if _, err = tx.Exec(`
+UPDATE alert_states
+SET state = CASE
+  WHEN is_live = 1 THEN
+    CASE
+      WHEN raw_state = 'active' THEN 'active'
+      WHEN raw_state = 'suppressed' THEN 'suppressed'
+      ELSE 'unprocessed'
+    END
+  WHEN is_resolved = 1 THEN 'resolved'
+  WHEN raw_state = 'suppressed' THEN 'suppressed'
+  ELSE 'inactive'
+END
+`); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to normalize projected state: %w", err)
 	}
 
 	if _, err = tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, metaSchemaVersion, schemaVersion); err != nil {
@@ -913,7 +942,7 @@ func (s *Store) querySuppressedBreakdown() (int, int, error) {
 	rows, err := s.db.Query(`
 SELECT is_live, COUNT(*)
 FROM alert_states
-WHERE raw_state = ? AND is_resolved = 0
+WHERE state = ?
 GROUP BY is_live
 `, string(StateSuppressed))
 	if err != nil {
