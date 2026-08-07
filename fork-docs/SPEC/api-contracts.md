@@ -59,10 +59,16 @@ Each alert includes:
 - `isLive`
 - `isResolved`
 
-Group/grid objects can include:
+Group/grid objects always include:
 
 - `suppressedBreakdown.current`
 - `suppressedBreakdown.past`
+
+Even when both values are zero, the object is present as:
+
+```json
+"suppressedBreakdown": { "current": 0, "past": 0 }
+```
 
 `stateCount.suppressed` remains total suppressed count (compatibility).
 

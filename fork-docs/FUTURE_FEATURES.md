@@ -22,6 +22,7 @@ Current scope:
 
 - foundational state model (`raw_state`, `is_live`, `is_resolved`) is implemented.
 - no silence-driven reclassification logic is active yet.
+- non-live suppressed alerts currently do not carry historical silence-rule metadata in alert cards.
 
 ## 2. Advanced alert identity and dedup strategy
 

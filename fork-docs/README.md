@@ -32,6 +32,7 @@ This fork keeps alert lifecycle in SQLite and changes behavior as follows:
 - `@state` filters projected user state.
 - Additional `@is_live=true|false` allows separating current vs past suppressed alerts.
 - Suppressed counters are split into `current` and `past` in UI badges/stats.
+- `suppressedBreakdown` is emitted by backend for every grid/group (including zero values) and is the single source for suppressed split badges.
 - A persistent warning banner appears if lifecycle DB is not in expected regroup state.
 
 ## Operator and deployment constraints

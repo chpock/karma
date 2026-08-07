@@ -37,6 +37,9 @@ Group header and swimlane show:
 - inactive
 - active
 
+`suppressedBreakdown` is backend-owned and always present in API payload.
+UI must not reconstruct current/past split from raw alert list as a fallback.
+
 Badge actions:
 
 - suppressed current adds `@state=suppressed` + `@is_live=true`
