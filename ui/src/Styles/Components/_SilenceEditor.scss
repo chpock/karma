@@ -271,6 +271,40 @@
   border: 1px dashed currentcolor;
 }
 
+.fork-silence-editor__preview-label {
+  border: 1px solid var(--bs-border-color);
+  color: var(--bs-body-color);
+  background: var(--bs-secondary-bg);
+}
+
+.fork-silence-editor__preview-label--matched {
+  border-color: var(--bs-warning);
+  color: #262626;
+  background: var(--bs-warning);
+}
+
+.fork-silence-editor__preview-label--matched-only {
+  border-color: var(--bs-info);
+  color: #262626;
+  background: var(--bs-info);
+}
+
+.fork-silence-editor__cancel {
+  border: 1px solid var(--bs-secondary-color);
+  color: var(--bs-secondary-color);
+  background: transparent;
+}
+
+.fork-silence-editor__cancel:hover:not(:disabled) {
+  border-color: var(--bs-secondary-color);
+  color: var(--bs-body-bg);
+  background: var(--bs-secondary-color);
+}
+
+.fork-silence-editor__cancel:disabled {
+  opacity: 0.5;
+}
+
 .fork-silence-editor__actions {
   display: flex;
   justify-content: flex-end;

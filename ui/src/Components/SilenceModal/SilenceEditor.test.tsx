@@ -2130,4 +2130,44 @@ describe("<SilenceEditor />", () => {
       ).toBeInTheDocument(),
     );
   });
+
+  it("uses dedicated visual roles for preview labels and Cancel", async () => {
+    const stores = createStores(false);
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      if (!input.toString().includes("/silence-editor/preview")) {
+        return new Response(JSON.stringify({ silenceID: "unused" }), {
+          status: 200,
+        });
+      }
+      return previewResponse([
+        {
+          ...previewAlert("preview-label-colors"),
+          labels: [
+            { name: "alertname", value: "preview-label-colors" },
+            { name: "service", value: "payments" },
+          ],
+          matchedLabels: [
+            { name: "alertname", value: "preview-label-colors" },
+          ],
+          matchedLabelNames: ["alertname"],
+        },
+      ]);
+    }) as typeof fetch;
+
+    renderEditor(stores);
+
+    await waitFor(() =>
+      expect(screen.getByText("service=payments")).toBeInTheDocument(),
+    );
+
+    expect(screen.getByText("service=payments")).toHaveClass(
+      "fork-silence-editor__preview-label",
+    );
+    expect(screen.getByText("alertname=preview-label-colors")).toHaveClass(
+      "fork-silence-editor__preview-label--matched",
+    );
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveClass(
+      "fork-silence-editor__cancel",
+    );
+  });
 });

@@ -2354,10 +2354,10 @@ const SilenceEditor: FC<{
                     {alert.labels.map((label) => (
                       <span
                         key={`${alert.id}:${label.name}:${label.value}`}
-                        className={`badge me-1 ${
+                        className={`badge me-1 fork-silence-editor__preview-label ${
                           alert.matchedLabelNames.includes(label.name)
-                            ? "bg-warning text-dark"
-                            : "bg-light text-dark"
+                            ? "fork-silence-editor__preview-label--matched"
+                            : ""
                         }`}
                         title={matcherTitle(label.name)}
                       >
@@ -2367,7 +2367,7 @@ const SilenceEditor: FC<{
                     {alert.missingLabelNames.map((name) => (
                       <span
                         key={`${alert.id}:missing:${name}`}
-                        className="badge bg-warning text-dark me-1 fork-silence-editor__missing-label"
+                        className="badge me-1 fork-silence-editor__preview-label fork-silence-editor__preview-label--matched fork-silence-editor__missing-label"
                         title={matcherTitle(name)}
                       >
                         {name}={"<missing>"}
@@ -2383,7 +2383,7 @@ const SilenceEditor: FC<{
                       .map((matched) => (
                         <span
                           key={`${alert.id}:matched-only:${matched.name}:${matched.value}`}
-                          className="badge bg-info text-dark me-1"
+                          className="badge me-1 fork-silence-editor__preview-label fork-silence-editor__preview-label--matched-only"
                           title={matcherTitle(matched.name)}
                         >
                           {matched.name}={matched.value}
@@ -2431,7 +2431,7 @@ const SilenceEditor: FC<{
         <div className="fork-silence-editor__actions mt-3">
           <button
             type="button"
-            className="btn btn-outline-secondary"
+            className="btn fork-silence-editor__cancel"
             disabled={readOnly}
             onClick={onClose}
           >
