@@ -2150,6 +2150,7 @@ describe("<SilenceEditor />", () => {
             { name: "alertname", value: "preview-label-colors" },
           ],
           matchedLabelNames: ["alertname"],
+          missingLabelNames: ["cluster"],
         },
       ]);
     }) as typeof fetch;
@@ -2165,6 +2166,9 @@ describe("<SilenceEditor />", () => {
     );
     expect(screen.getByText("alertname=preview-label-colors")).toHaveClass(
       "fork-silence-editor__preview-label--matched",
+    );
+    expect(screen.getByText("cluster=<missing>")).toHaveClass(
+      "fork-silence-editor__preview-label--missing",
     );
     expect(screen.getByRole("button", { name: "Cancel" })).toHaveClass(
       "fork-silence-editor__cancel",

@@ -2367,7 +2367,7 @@ const SilenceEditor: FC<{
                     {alert.missingLabelNames.map((name) => (
                       <span
                         key={`${alert.id}:missing:${name}`}
-                        className="badge me-1 fork-silence-editor__preview-label fork-silence-editor__preview-label--matched fork-silence-editor__missing-label"
+                        className="badge me-1 fork-silence-editor__preview-label fork-silence-editor__preview-label--missing fork-silence-editor__missing-label"
                         title={matcherTitle(name)}
                       >
                         {name}={"<missing>"}

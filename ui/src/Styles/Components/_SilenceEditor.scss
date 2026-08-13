@@ -272,21 +272,27 @@
 }
 
 .fork-silence-editor__preview-label {
-  border: 1px solid var(--bs-border-color);
-  color: var(--bs-body-color);
-  background: var(--bs-secondary-bg);
+  border: 1px solid var(--karma-silence-editor-preview-label-border);
+  color: var(--karma-silence-editor-preview-label-color) !important;
+  background: var(--karma-silence-editor-preview-label-bg);
 }
 
 .fork-silence-editor__preview-label--matched {
-  border-color: var(--bs-warning);
-  color: #262626;
-  background: var(--bs-warning);
+  border-color: var(--karma-silence-editor-preview-match-border);
+  color: var(--karma-silence-editor-preview-match-color) !important;
+  background: var(--karma-silence-editor-preview-match-bg);
 }
 
 .fork-silence-editor__preview-label--matched-only {
-  border-color: var(--bs-info);
-  color: #262626;
-  background: var(--bs-info);
+  border-color: var(--karma-silence-editor-preview-match-only-border);
+  color: var(--karma-silence-editor-preview-match-only-color) !important;
+  background: var(--karma-silence-editor-preview-match-only-bg);
+}
+
+.fork-silence-editor__preview-label--missing {
+  border-color: var(--karma-silence-editor-preview-missing-border);
+  color: var(--karma-silence-editor-preview-missing-color) !important;
+  background: var(--karma-silence-editor-preview-missing-bg);
 }
 
 .fork-silence-editor__cancel {

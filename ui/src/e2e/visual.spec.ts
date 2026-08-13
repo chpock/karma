@@ -67,6 +67,35 @@ for (const story of stories) {
   });
 }
 
+test("SilenceModalEditorPreview", async ({ page }) => {
+  await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+  await page.addStyleTag({
+    content: "* { caret-color: transparent !important; }",
+  });
+
+  const editors = page.locator(".fork-silence-editor");
+  const count = await editors.count();
+  for (let i = 0; i < count; i++) {
+    const editor = editors.nth(i);
+    await editor.locator(".fork-silence-editor__matcher-expression").click();
+    const matcher = editor.getByRole("combobox", {
+      name: "Matcher 1 expression, editing",
+    });
+    await matcher.fill('service="api"');
+    await matcher.press("Enter");
+  }
+  await page.clock.runFor(500);
+
+  const previews = page.locator(".fork-silence-editor__preview");
+  await previews
+    .first()
+    .locator(".fork-silence-editor__preview-item")
+    .first()
+    .waitFor();
+  await expect(previews).toHaveScreenshot("SilenceModalEditorPreview.png");
+});
+
 test("SilenceModalEditorEndsAtDateTime", async ({ page }) => {
   await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
   await page.goto(`/src/e2e/stories.html#SilenceModalEditor`);
