@@ -379,16 +379,17 @@ func NewAPIAlertGroup(ag AlertGroup, shared AlertGroupSharedMaps, allLabels map[
 			}
 		}
 		alerts[i] = APIAlert{
-			StartsAt:     a.StartsAt,
-			State:        a.State.String(),
-			RawState:     raw.String(),
-			IsLive:       isLive,
-			IsResolved:   a.IsResolved,
-			Receiver:     a.Receiver,
-			LabelsFP:     a.LabelsFP,
-			Annotations:  a.Annotations,
-			Labels:       LabelsToOrderedLabels(a.Labels),
-			Alertmanager: a.Alertmanager,
+			StartsAt:          a.StartsAt,
+			State:             a.State.String(),
+			RawState:          raw.String(),
+			IsLive:            isLive,
+			IsResolved:        a.IsResolved,
+			Receiver:          a.Receiver,
+			LabelsFP:          a.LabelsFP,
+			Annotations:       a.Annotations,
+			Labels:            LabelsToOrderedLabels(a.Labels),
+			Alertmanager:      a.Alertmanager,
+			SuppressionCauses: append([]SuppressionCause{}, a.SuppressionCauses...),
 		}
 	}
 	return APIAlertGroup{

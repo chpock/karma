@@ -2,7 +2,30 @@
 
 This document tracks intentionally deferred features.
 
-## 1. Multi-replica and shared storage
+## 1. Silence rule annotations
+
+Deferred:
+
+- display Alertmanager silence annotations in the compact editor;
+- create, edit, and remove annotation key/value pairs;
+- preserve annotations through Edit and Recreate;
+- support annotations in both server-routed and browser-routed submissions;
+- include annotations in validation, optimistic-concurrency behavior, API types,
+  and regression tests;
+- verify compatibility with Alertmanager versions that support silence annotations
+  (`0.32+`).
+
+Current scope:
+
+- Karma does not support Alertmanager silence annotations;
+- the compact editor does not display or edit them;
+- Create does not send them;
+- Edit and Recreate may remove or overwrite annotations already stored in
+  Alertmanager;
+- this data-loss behavior is an explicitly accepted limitation of the current
+  preview implementation, not a current defect.
+
+## 2. Multi-replica and shared storage
 
 Deferred:
 
@@ -11,20 +34,7 @@ Deferred:
 
 Current scope remains single-replica local SQLite only.
 
-## 0. Silence-aware state reclassification
-
-Deferred:
-
-- second-layer lifecycle logic that can reclassify some non-live alerts based on fresh silence data.
-- specifically, inactive-to-suppressed reclassification path driven by silence synchronization.
-
-Current scope:
-
-- foundational state model (`raw_state`, `is_live`, `is_resolved`) is implemented.
-- no silence-driven reclassification logic is active yet.
-- non-live suppressed alerts currently do not carry historical silence-rule metadata in alert cards.
-
-## 2. Advanced alert identity and dedup strategy
+## 3. Advanced alert identity and dedup strategy
 
 Deferred:
 
@@ -35,7 +45,7 @@ Current scope:
 
 - keep alert identity exactly aligned with existing behavior.
 
-## 3. Rich retrospective UI
+## 4. Rich retrospective UI
 
 Deferred:
 
@@ -47,7 +57,7 @@ Current scope:
 
 - use existing grid and filtering with default hiding of resolved.
 
-## 4. Resolve authorization policy extensions
+## 5. Resolve authorization policy extensions
 
 Deferred:
 
@@ -58,7 +68,7 @@ Current scope:
 
 - use existing auth context if present, allow operation without auth.
 
-## 5. Acknowledgement workflow for active alerts
+## 6. Acknowledgement workflow for active alerts
 
 Deferred:
 
@@ -67,9 +77,10 @@ Deferred:
 
 Current scope:
 
-- manual resolve only from inactive.
+- manual resolve is exposed in the current UI only for inactive alerts; backend
+  accepts any non-live alert.
 
-## 6. Extended audit semantics
+## 7. Extended audit semantics
 
 Deferred:
 
@@ -80,7 +91,7 @@ Current scope:
 
 - nullable `changed_by` with explicit `NULL` semantics.
 
-## 7. Storage backend alternatives
+## 8. Storage backend alternatives
 
 Deferred:
 
@@ -90,3 +101,18 @@ Deferred:
 Current scope:
 
 - SQLite only.
+
+## 9. Silence rule browser
+
+Deferred:
+
+- exposing a UI for searching, sorting, inspecting, editing, recreating, and
+  deleting existing Alertmanager silence rules.
+
+The retained source, missing product decisions, and known risks are documented in
+[Future Silence Browser](SPEC/future-silence-browser.md).
+
+Current scope:
+
+- the compact silence editor has no Browse tab or hidden Browser entry point;
+- existing external create/edit/recreate actions open the compact editor directly.

@@ -3,6 +3,7 @@ package alertmanager
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -237,6 +238,99 @@ func TestAlertmanagerPullSilencesWithInvalidVersion(t *testing.T) {
 	err := am.pullSilences("0.0.1")
 	if err == nil {
 		t.Error("am.pullSilences(invalid version) didn't return any error")
+	}
+}
+
+func TestPullSilencesKeepsValidRulesAndReplacesWarnings(t *testing.T) {
+	const upstreamURI = "http://silence-warning.localhost"
+	transport := httpmock.NewMockTransport()
+	response := `[
+  {
+    "id":"valid",
+    "status":{"state":"active"},
+    "startsAt":"2025-03-10T12:00:00Z",
+    "endsAt":"2025-03-11T12:00:00Z",
+	"updatedAt":"2025-03-10T13:00:00Z",
+    "createdBy":"user@example.com",
+    "comment":"valid",
+    "matchers":[{"name":"service","value":"api","isRegex":false}]
+  },
+  {
+    "id":"invalid",
+    "startsAt":"2025-03-10T12:00:00Z",
+    "endsAt":"2025-03-11T12:00:00Z",
+	"updatedAt":"2025-03-10T13:00:00Z",
+    "createdBy":"user@example.com",
+    "comment":"invalid",
+    "matchers":[]
+  }
+]`
+	transport.RegisterResponder("GET", upstreamURI+"/api/v2/silences", func(*http.Request) (*http.Response, error) {
+		return httpmock.NewStringResponse(200, response), nil
+	})
+
+	am, err := NewAlertmanager("cluster", "am-1", upstreamURI, WithHTTPTransport(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := am.pullSilences("0.22.0"); err != nil {
+		t.Fatal(err)
+	}
+	if !am.IsHealthy() {
+		t.Fatalf("non-fatal silence warning made upstream unhealthy: %s", am.Error())
+	}
+	if silences := am.Silences(); len(silences) != 1 || silences["valid"].ID != "valid" {
+		t.Fatalf("silences=%+v, want only valid", silences)
+	}
+	warnings := am.SilenceWarnings()
+	if len(warnings) != 1 || warnings[0].SilenceID != "invalid" {
+		t.Fatalf("warnings=%+v, want invalid silence warning", warnings)
+	}
+
+	response = `[
+  {
+    "id":"valid",
+    "status":{"state":"active"},
+    "startsAt":"2025-03-10T12:00:00Z",
+    "endsAt":"2025-03-11T12:00:00Z",
+	"updatedAt":"2025-03-10T13:00:00Z",
+    "createdBy":"user@example.com",
+    "comment":"valid",
+    "matchers":[{"name":"service","value":"api","isRegex":false}]
+  }
+]`
+	if err := am.pullSilences("0.22.0"); err != nil {
+		t.Fatal(err)
+	}
+	if warnings := am.SilenceWarnings(); len(warnings) != 0 {
+		t.Fatalf("warnings not cleared after valid poll: %+v", warnings)
+	}
+}
+
+func TestPullSilencesSkipsInvalidEntryWithoutDiscardingValidNeighbors(t *testing.T) {
+	const upstreamURI = "http://silence-entry-validation.localhost"
+	transport := httpmock.NewMockTransport()
+	response := `[
+{"id":"before","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]},
+{"id":"invalid","status":{"state":"active"},"startsAt":42,"endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]},
+{"id":"after","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]}
+]`
+	transport.RegisterResponder("GET", upstreamURI+"/api/v2/silences", func(*http.Request) (*http.Response, error) {
+		return httpmock.NewStringResponse(http.StatusOK, response), nil
+	})
+	am, err := NewAlertmanager("cluster", "am-entry-validation", upstreamURI, WithHTTPTransport(transport))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = am.pullSilences("0.22.0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := am.Silences(); len(got) != 2 || got["before"].ID != "before" || got["after"].ID != "after" {
+		t.Fatalf("valid neighbors were not preserved: %+v", got)
+	}
+	warnings := am.SilenceWarnings()
+	if len(warnings) != 1 || warnings[0].SilenceID != "invalid" || warnings[0].Field != "startsAt" || warnings[0].ReasonCode != "wrong_type" {
+		t.Fatalf("warnings=%+v, want invalid startsAt warning", warnings)
 	}
 }
 

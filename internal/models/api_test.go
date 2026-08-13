@@ -301,6 +301,16 @@ func TestAPIAlertGroupJSONFieldsNonNull(t *testing.T) {
 			if string(alertsRaw) == "null" {
 				t.Error("JSON 'alerts' field is null, expected a non-null array")
 			}
+			var alertRows []map[string]json.RawMessage
+			if err := json.Unmarshal(alertsRaw, &alertRows); err != nil {
+				t.Fatalf("json.Unmarshal alerts failed: %v", err)
+			}
+			for _, alertRow := range alertRows {
+				causesRaw, exists := alertRow["suppressionCauses"]
+				if !exists || string(causesRaw) == "null" {
+					t.Fatalf("alert suppressionCauses must be a non-null array: %s", causesRaw)
+				}
+			}
 
 			// labels field must be a non-null JSON array
 			labelsRaw, ok := raw["labels"]

@@ -69,7 +69,9 @@ func SetupFlags(f *pflag.FlagSet) {
 	f.String("alertLifecycle.sqlite.path", "/var/lib/karma/alert-lifecycle.sqlite", "SQLite path used for persistent alert lifecycle storage")
 	f.Duration("alertLifecycle.retention.ttl", time.Hour*24*30, "TTL for stored alert lifecycle records")
 	f.Int("alertLifecycle.retention.maxAlerts", 100000, "Maximum number of alert records to keep in persistent lifecycle storage")
+	f.Duration("alertLifecycle.silenceHistory.retention.ttl", time.Hour*24*30, "TTL for unreferenced historical silence revisions")
 	f.Duration("alertLifecycle.housekeeping.incrementalVacuumInterval", time.Hour*24, "Interval between incremental SQLite vacuum operations")
+	f.Int64("silenceEditor.maxPayloadBytes", 0, "Maximum silence editor submit and fresh-read payload size in bytes; 0 disables the additional Karma limit")
 
 	f.String("authorization.acl.silences", "", "Path to silence ACL config file")
 
@@ -222,6 +224,18 @@ func readEnvVariables(k *koanf.Koanf) {
 	_ = k.Load(env.Provider(".", env.Opt{
 		TransformFunc: func(s, v string) (string, any) {
 			switch s {
+			case "ALERTLIFECYCLE_ENABLED":
+				return "alertLifecycle.enabled", v
+			case "ALERTLIFECYCLE_SQLITE_PATH":
+				return "alertLifecycle.sqlite.path", v
+			case "ALERTLIFECYCLE_RETENTION_TTL":
+				return "alertLifecycle.retention.ttl", v
+			case "ALERTLIFECYCLE_RETENTION_MAXALERTS":
+				return "alertLifecycle.retention.maxAlerts", v
+			case "ALERTLIFECYCLE_SILENCEHISTORY_RETENTION_TTL":
+				return "alertLifecycle.silenceHistory.retention.ttl", v
+			case "ALERTLIFECYCLE_HOUSEKEEPING_INCREMENTALVACUUMINTERVAL":
+				return "alertLifecycle.housekeeping.incrementalVacuumInterval", v
 			case "ALERTMANAGER_EXTERNAL_URI":
 				return "alertmanager.external_uri", v
 			case "ALERTMANAGER_TLS_INSECURE_SKIP_VERIFY":
@@ -252,6 +266,8 @@ func readEnvVariables(k *koanf.Koanf) {
 				return "silenceForm.strip.labels", v
 			case "SILENCEFORM_DEFAULTALERTMANAGERS":
 				return "silenceForm.defaultAlertmanagers", v
+			case "SILENCEEDITOR_MAXPAYLOADBYTES":
+				return "silenceEditor.maxPayloadBytes", v
 			case "UI_HIDEFILTERSWHENIDLE":
 				return "ui.hideFiltersWhenIdle", v
 			case "UI_COLORTITLEBAR":
@@ -478,6 +494,9 @@ func (config *configSchema) Read(flags *pflag.FlagSet) (string, error) {
 	if config.AlertLifecycle.Retention.MaxAlerts < 1 {
 		return "", errors.New("alertLifecycle.retention.maxAlerts must be >= 1")
 	}
+	if config.AlertLifecycle.SilenceHistory.Retention.TTL <= 0 {
+		return "", errors.New("alertLifecycle.silenceHistory.retention.ttl must be > 0")
+	}
 
 	if config.AlertLifecycle.Housekeeping.IncrementalVacuumInterval <= 0 {
 		return "", errors.New("alertLifecycle.housekeeping.incrementalVacuumInterval must be > 0")
@@ -485,6 +504,9 @@ func (config *configSchema) Read(flags *pflag.FlagSet) (string, error) {
 
 	if strings.TrimSpace(config.AlertLifecycle.SQLite.Path) == "" {
 		return "", errors.New("alertLifecycle.sqlite.path cannot be empty")
+	}
+	if config.SilenceEditor.MaxPayloadBytes < 0 {
+		return "", errors.New("silenceEditor.maxPayloadBytes must be >= 0")
 	}
 	for i := 0; i < len(config.History.Rewrite); i++ {
 		config.History.Rewrite[i].SourceRegex, err = regex.CompileAnchored(config.History.Rewrite[i].Source)

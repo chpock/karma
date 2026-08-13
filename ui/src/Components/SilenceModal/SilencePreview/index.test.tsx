@@ -35,7 +35,7 @@ const renderSilencePreview = () => {
   );
 };
 
-describe("<SilencePreview />", () => {
+describe("[legacy-only] <SilencePreview />", () => {
   it("fetches matching alerts on mount", () => {
     renderSilencePreview();
     expect(useFetchGet).toHaveBeenCalled();

@@ -215,6 +215,7 @@ const MockGrid = (alertStore: AlertStore): void => {
         uri: "http://localhost:9093",
         publicURI: "http://localhost:9093",
         error: "",
+        warnings: [],
         readonly: false,
         headers: {},
         corsCredentials: "include",
@@ -227,6 +228,7 @@ const MockGrid = (alertStore: AlertStore): void => {
         uri: "http://localhost:9094",
         publicURI: "http://localhost:9094",
         error: "Failed to connect to http://localhost:9094",
+        warnings: [],
         readonly: false,
         headers: {},
         corsCredentials: "include",
@@ -240,6 +242,7 @@ const MockGrid = (alertStore: AlertStore): void => {
         publicURI: "https://am.example.com",
         error:
           "Failed to connect to https://am.example.com veryLongStringToTestTextWrappingveryLongStringToTestTextWrappingveryLongStringToTestTextWrappingveryLongStringToTestTextWrappingveryLongStringToTestTextWrappingveryLongStringToTestTextWrapping",
+        warnings: [],
         readonly: false,
         headers: {},
         corsCredentials: "include",

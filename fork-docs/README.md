@@ -1,100 +1,169 @@
-# Karma History Fork
+# Karma History Fork User Guide
 
-This directory contains fork-specific documentation for the `karma-history` branch.
+This fork extends Karma so users can work with alerts that are currently reported by
+Alertmanager and alerts that have disappeared but still need attention. It also adds
+a compact editor for creating and updating Alertmanager silence rules.
 
-Goal of this fork: keep historical alert lifecycle in persistent storage while preserving low-conflict syncs with upstream.
+The default configuration enables these features. Deployment settings are documented
+in [Fork Configuration](CONFIGURATION.md).
 
-## What users see
+## 1. Alert states
 
-Upstream karma is live-snapshot only: when an alert disappears from Alertmanager, it disappears from UI.
+The grid uses five states:
 
-This fork stores alert lifecycle in SQLite, so operators can work with both current and past alerts.
+| State | Meaning |
+| --- | --- |
+| `active` | Alertmanager currently reports the alert as active. |
+| `unprocessed` | Alertmanager currently reports the alert but has not fully processed it. |
+| `suppressed` | The alert is silenced now, or it was retained as suppressed after disappearing. |
+| `inactive` | Alertmanager no longer reports the alert, but it has not been manually resolved. |
+| `resolved` | A user explicitly resolved a past alert. |
 
-### States in the grid
+The default grid shows active, unprocessed, suppressed, and inactive alerts. Resolved
+alerts remain available but are hidden by default so the main grid stays focused on
+current and unresolved work.
 
-- Default view shows `active`, `suppressed`, `unprocessed`, and `inactive`.
-- `resolved` alerts stay in storage but are hidden by default.
-- To show resolved alerts, add `@state=resolved`.
+## 2. Finding current and past alerts
 
-Why:
+Use the normal filter bar:
 
-- `inactive` means the alert is no longer live but still needs attention.
-- `resolved` means a person explicitly marked it resolved.
-- Hidden-by-default resolved alerts keep the main grid focused on actionable alerts.
+- `@state=inactive` shows past alerts that still need attention.
+- `@state=resolved` shows manually resolved alerts.
+- `@state=suppressed` shows both current and retained suppressed alerts.
+- `@is_live=true` shows alerts currently reported by Alertmanager.
+- `@is_live=false` shows retained past alerts.
 
-### Resolve behavior
+State badges and storage statistics split suppressed alerts into current and past
+counts.
 
-- Resolve is a manual action from the alert menu.
-- UI enables resolve for `inactive` alerts.
-- If the same non-live alert is resolved again, backend treats it as a no-op (idempotent), not an error.
+## 3. What happens when an alert disappears
 
-Why:
+Karma retains the alert instead of removing it from the grid. It marks an alert as
+past only after all relevant configured Alertmanager sources were checked
+successfully and no longer report it. A failed or unavailable source does not make an
+alert inactive; Karma keeps the last confirmed state until it has complete data.
 
-- Resolve is an operator decision, not an automatic guess.
+The resulting state depends on the last confirmed alert information:
 
-### Suppressed behavior for non-live alerts
+- an active or unprocessed alert becomes `inactive`;
+- a suppressed alert remains `suppressed`;
+- a previously resolved alert stays resolved until it fires again.
 
-- If a suppressed alert becomes non-live, it stays `suppressed` (it does not become `inactive`).
-- Non-live `inactive` alerts can become `suppressed` automatically when silence data proves they should be suppressed.
-- Automatic promotion is strict: all relevant sources must support suppression; one non-matching source keeps it `inactive`.
-- When source data is incomplete, no automatic suppression transition is made.
-- Once non-live alert is suppressed, later silence edits/deletion/expiry do not flip it back to `inactive` during that same non-live episode.
-- Suppression is recalculated only if alert becomes live again.
+If an inactive alert is later proven to match a complete set of active silence rules,
+Karma can change it to suppressed. It never makes this change when required source
+data is incomplete or contradictory.
 
-Why:
+If the same alert fires again, its live Alertmanager state becomes authoritative. A
+previous manual resolution is cleared and suppression is recalculated from current
+data.
 
-- This follows the "no guessing" rule and keeps suppression semantics stable across outages and silence churn.
+## 4. Resolving a past alert
 
-### Filters, badges, and counters
+To resolve an alert:
 
-- `@state` filters projected user state.
-- `@is_live=true|false` separates current vs past alerts.
-- Suppressed counters are split into `current` and `past` in badges and stats.
+1. Open the menu on an inactive alert.
+2. Select **Resolve this alert**.
 
-Why:
+Resolve is always a user decision. Karma never automatically marks an alert resolved.
+A live alert cannot be resolved. While the request is running, the menu shows
+**Resolving...**; a failure remains visible as **Resolve failed**. Resolving an already
+resolved past alert again through the backend is a harmless no-op.
 
-- Operators can quickly distinguish alerts firing now from historical context.
+Resolved alerts can be found with `@state=resolved`. If a resolved alert fires again,
+it returns to the state currently reported by Alertmanager.
 
-### Warning banner
+## 5. Understanding retained suppression evidence
 
-- UI shows a persistent warning when lifecycle DB state is not yet consistent (for example, background reconciliation/recheck is unfinished or failed).
-- Warning disappears only after DB returns to expected state.
+A past suppressed alert shows **Retained suppression evidence** on its card. This is
+a read-only explanation of why Karma considers that historical alert suppressed.
 
-Why:
+When complete rule details were available, the card shows:
 
-- Inconsistency must be visible, never silent.
+- logical Alertmanager target and physical source;
+- silence rule ID;
+- time window;
+- Author and Comment;
+- matchers.
 
-### Legacy coverage note
+During Alertmanager replication lag, Karma may know the exact silence ID before the
+rule details are available. In that case the card shows the known identity and says
+that details were unavailable. It does not invent missing matchers or metadata.
 
-- Old rows that do not have raw matching labels are still visible in history.
-- Those rows are excluded from automatic silence-based promotion until the alert appears live again and fresh raw labels are captured.
+This evidence describes the past alert. It does not provide Edit or Delete actions
+for a current Alertmanager rule. Editing, expiry, or deletion of the rule does not
+rewrite why an already retained alert was suppressed during that past episode.
 
-## Operator and deployment constraints
+## 6. Creating and updating silence rules
 
-- Current deployment model: single replica with local SQLite.
-- Lifecycle DB path default: `/var/lib/karma/alert-lifecycle.sqlite`.
-- Retention defaults: TTL 30 days + max 100000 alerts.
-- Housekeeping order: TTL cleanup -> maxAlerts cleanup -> incremental vacuum.
+Every normal silence action opens the compact editor. There is no Browse tab in this
+editor.
 
-## Documentation map
+The basic workflow is:
 
-- `ARCHITECTURE.md` - high-level architecture and integration boundaries.
-- `CONFIGURATION.md` - fork-specific config keys and defaults.
-- `IMPLEMENTATION_PLAN.md` - delivery record and maintenance policy.
-- `FUTURE_FEATURES.md` - intentionally deferred scope.
-- `SPEC/state-model.md` - canonical lifecycle semantics and projection rules.
-- `SPEC/phase2-silence-awareness-plan.md` - reviewed Phase 2 requirements, decisions, alternatives, and rationale.
-- `SPEC/phase2-silence-awareness-schema.md` - exact schema v5 DDL, indexes, retention, CAS, and migration contract.
-- `SPEC/api-contracts.md` - API behavior and payload contracts.
-- `SPEC/ui-contracts.md` - UI behavior and filtering/counter contracts.
-- `SPEC/storage-schema.md` - SQLite schema and storage invariants.
-- `SPEC/implementation-contracts.md` - integration boundaries, ownership, and test contracts.
-- `SPEC/db-migrations.md` - migration policy.
-- `SPEC/db-migrations/` - one document per schema-version change.
-- `ADR/` - architecture decisions.
+1. Select an Alertmanager target when the action did not already select one.
+2. Enter one matcher expression per field.
+3. Choose start and end times.
+4. Enter Author and Comment.
+5. Review the automatically updated **Affected alerts** preview.
+6. Select **Create silence**, **Update silence**, or **Recreate silence**.
 
-## Source-of-truth policy
+On confirmed success, Karma refreshes its data and closes the modal. Editing an
+existing rule uses fresh Alertmanager data and refuses to save when the original rule
+changed after the editor was opened.
 
-For fork-only behavior, docs in `fork-docs/` are source of truth.
+See [Compact Silence Editor](SILENCE_EDITOR.md) for matcher syntax, autocomplete,
+time controls, Edit/Recreate behavior, safe retry rules, and editor limitations.
 
-If code behavior changes, update matching spec/ADR in the same change.
+## 7. Warnings and incomplete data
+
+A persistent lifecycle warning means Karma cannot currently prove that its stored
+view is fully consistent. Typical causes are:
+
+- background regrouping is still running or failed;
+- Alertmanager members disagree about silence rules;
+- a silence recheck job failed and blocks later jobs.
+
+Karma keeps serving the last confirmed data and does not invent transitions while
+required information is incomplete. The warning disappears after the underlying
+condition is resolved.
+
+If one silence object returned by Alertmanager is malformed, Karma reports a warning,
+skips that object, and continues processing valid neighboring rules. If the complete
+JSON response is malformed, Karma cannot safely separate entries, so the refresh
+fails and the previous confirmed snapshot is retained.
+
+## 8. Current limitations
+
+- Lifecycle storage currently supports one Karma replica with local SQLite.
+- The compact editor has no production silence-rule Browser.
+- Silence annotations from newer Alertmanager versions are not displayed or edited.
+- There is no dedicated alert timeline or full history explorer.
+- Legacy silence share links are ignored.
+
+Planned work and accepted limitations are listed in
+[Future Features](FUTURE_FEATURES.md).
+
+## 9. More documentation
+
+User and operator documentation:
+
+- [Compact Silence Editor](SILENCE_EDITOR.md)
+- [Fork Configuration](CONFIGURATION.md)
+- [Future Features](FUTURE_FEATURES.md)
+
+Technical documentation for maintainers:
+
+- [Architecture](ARCHITECTURE.md)
+- [Implementation plan](IMPLEMENTATION_PLAN.md)
+- [State model](SPEC/state-model.md)
+- [API contracts](SPEC/api-contracts.md)
+- [UI contracts](SPEC/ui-contracts.md)
+- [Storage schema](SPEC/storage-schema.md)
+- [Silence editor specification](SPEC/silence-editor-redesign.md)
+- [Runtime logging contract](SPEC/runtime-logging-contract.md)
+- [Architecture conformance](SPEC/architecture-conformance.md)
+- [Architecture verification](SPEC/architecture-verification.md)
+- [Architecture decisions](ADR/)
+
+The documents in `fork-docs/` are the source of truth for fork-only behavior. A code
+change that alters these contracts must update the corresponding documentation.

@@ -28,6 +28,7 @@ const generateUpstreams = (): APIAlertsResponseUpstreamsT => ({
       publicURI: "http://example.com",
       readonly: false,
       error: "",
+      warnings: [],
       version: "0.24.0",
       headers: {},
       corsCredentials: "include",
@@ -60,6 +61,7 @@ const renderSilenceDetails = () => {
       alertStore={alertStore}
       silenceFormStore={silenceFormStore}
       silence={silence}
+      isExpired={false}
       cluster={cluster}
       onEditSilence={MockEditSilence}
     />,
@@ -75,8 +77,17 @@ describe("<SilenceDetails />", () => {
   });
 
   it("expired silence endsAt label uses 'danger' class", () => {
-    jest.setSystemTime(Date.UTC(2000, 0, 1, 23, 0, 0));
-    const { container } = renderSilenceDetails();
+    jest.setSystemTime(Date.UTC(2000, 0, 1, 0, 30, 0));
+    const { container } = render(
+      <SilenceDetails
+        alertStore={alertStore}
+        silenceFormStore={silenceFormStore}
+        silence={silence}
+        isExpired={true}
+        cluster={cluster}
+        onEditSilence={MockEditSilence}
+      />,
+    );
     const badges = container.querySelectorAll("span.badge");
     expect(badges[1]?.outerHTML).toMatch(/text-danger/);
   });

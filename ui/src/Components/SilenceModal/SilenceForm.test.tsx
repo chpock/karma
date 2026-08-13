@@ -34,6 +34,7 @@ const generateUpstreams = (
       headers: {},
       corsCredentials: "include",
       error: "",
+      warnings: [],
       version: version,
       cluster: "am1",
       clusterMembers: ["am1"],
@@ -65,7 +66,7 @@ const renderSilenceForm = () => {
   );
 };
 
-describe("<SilenceForm /> matchers", () => {
+describe("[legacy-only] <SilenceForm /> matchers", () => {
   it("has an empty matcher selects on default render", () => {
     const { container } = renderSilenceForm();
     const matchers = container.querySelectorAll("input[id^='isEqual-']");
@@ -488,7 +489,7 @@ describe("<SilenceForm /> matchers", () => {
   });
 });
 
-describe("<SilenceForm /> preview", () => {
+describe("[legacy-only] <SilenceForm /> preview", () => {
   it("doesn't render PayloadPreview by default", () => {
     const { container } = renderSilenceForm();
     expect(container.querySelector(".mt-4")).toBeNull();
@@ -565,7 +566,7 @@ describe("<SilenceForm /> preview", () => {
   });
 });
 
-describe("<SilenceForm /> inputs", () => {
+describe("[legacy-only] <SilenceForm /> inputs", () => {
   it("author is read-only when info.authentication.enabled is true", () => {
     alertStore.info.setAuthentication(true, "auth@example.com");
     const { container } = renderSilenceForm();
@@ -612,7 +613,7 @@ describe("<SilenceForm /> inputs", () => {
   });
 });
 
-describe("<SilenceForm />", () => {
+describe("[legacy-only] <SilenceForm />", () => {
   it("calling submit doesn't move the form to Preview stage when form is invalid", () => {
     const { container } = renderSilenceForm();
     const form = container.querySelector("form");
@@ -648,7 +649,7 @@ describe("<SilenceForm />", () => {
   });
 });
 
-describe("<SilenceForm /> in edit mode", () => {
+describe("[legacy-only] <SilenceForm /> in edit mode", () => {
   it("opening form with silenceID set disables AlertManagerInput", () => {
     silenceFormStore.data.setSilenceID("12345");
     const { container } = renderSilenceForm();

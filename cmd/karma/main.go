@@ -159,6 +159,11 @@ func setupRouter(router *chi.Mux, historyPoller *historyPoller) {
 	router.Get(getViewURL("/autocomplete.json"), autocomplete)
 	router.Get(getViewURL("/labelNames.json"), knownLabelNames)
 	router.Get(getViewURL("/labelValues.json"), knownLabelValues)
+	router.Get(getViewURL("/silence-editor/labels"), silenceEditorLabelNames)
+	router.Get(getViewURL("/silence-editor/values"), silenceEditorLabelValues)
+	router.Get(getViewURL("/silence-editor/status"), silenceEditorStatus)
+	router.Post(getViewURL("/silence-editor/preview"), silenceEditorPreview)
+	router.Post(getViewURL("/silence-editor/submit"), silenceEditorSubmit)
 	router.Get(getViewURL("/silences.json"), silences)
 	router.Get(getViewURL("/counters.json"), counters)
 	router.Post(getViewURL("/history.json"), func(w http.ResponseWriter, r *http.Request) {

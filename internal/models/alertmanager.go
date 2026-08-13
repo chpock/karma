@@ -62,6 +62,7 @@ type AlertmanagerAPIStatus struct {
 	PublicURI       string            `json:"publicURI"`
 	CORSCredentials string            `json:"corsCredentials"`
 	Error           string            `json:"error"`
+	Warnings        []SilenceWarning  `json:"warnings"`
 	Version         string            `json:"version"`
 	Cluster         string            `json:"cluster"`
 	ClusterMembers  []string          `json:"clusterMembers"`
@@ -88,6 +89,12 @@ func (s *AlertmanagerAPIStatus) marshalTo(w *jsonWriter) {
 	w.str(s.CORSCredentials)
 	w.key("error")
 	w.str(s.Error)
+	w.key("warnings")
+	w.beginArray()
+	for i := range s.Warnings {
+		s.Warnings[i].marshalTo(w)
+	}
+	w.endArray()
 	w.key("version")
 	w.str(s.Version)
 	w.key("cluster")

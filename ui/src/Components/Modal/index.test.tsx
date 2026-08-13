@@ -1,7 +1,7 @@
 import React from "react";
 import { act } from "react";
 
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import { PressKey } from "__fixtures__/PressKey";
 import {
@@ -13,6 +13,7 @@ import { Modal, ModalInner } from ".";
 
 beforeEach(() => {
   jest.restoreAllMocks();
+  fakeToggle.mockClear();
 });
 
 afterEach(() => {
@@ -31,6 +32,32 @@ const renderModal = (isOpen: boolean, isUpper?: boolean) => {
 };
 
 describe("<ModalInner />", () => {
+  it("exposes an accessible dialog name", () => {
+    render(
+      <Modal ariaLabel="Silence editor" isOpen toggleOpen={jest.fn()}>
+        <button type="button">Inside</button>
+      </Modal>,
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Silence editor" }),
+    ).toBeVisible();
+  });
+
+  it("does not let an outer focus trap handle an upper portal event", () => {
+    render(
+      <Modal ariaLabel="Outer" isOpen toggleOpen={jest.fn()}>
+        <button type="button">Outer action</button>
+        <Modal ariaLabel="Inner" isOpen isUpper toggleOpen={jest.fn()}>
+          <button type="button">Inner action</button>
+        </Modal>
+      </Modal>,
+    );
+    const innerAction = screen.getByRole("button", { name: "Inner action" });
+    innerAction.focus();
+    fireEvent.keyDown(innerAction, { key: "Tab" });
+    expect(innerAction).toHaveFocus();
+  });
+
   it("'modal-open' class is appended to MountModal container", () => {
     renderModal(true);
     expect(document.body.querySelector("div.modal-open")).toBeInTheDocument();
@@ -141,6 +168,90 @@ describe("<ModalInner />", () => {
     renderModal(true);
     PressKey("Escape", 27);
     expect(fakeToggle).toHaveBeenCalled();
+  });
+
+  it("handles Escape while focus is in a form control", () => {
+    render(
+      <Modal isOpen toggleOpen={fakeToggle}>
+        <input data-modal-initial-focus aria-label="Editor field" />
+      </Modal>,
+    );
+    expect(screen.getByLabelText("Editor field")).toHaveFocus();
+    PressKey("Escape", 27);
+    expect(fakeToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("focuses the preferred control and restores the invoking control", () => {
+    const trigger = document.createElement("button");
+    document.body.appendChild(trigger);
+    trigger.focus();
+
+    const { unmount } = render(
+      <Modal isOpen toggleOpen={fakeToggle}>
+        <button type="button">First</button>
+        <input data-modal-initial-focus aria-label="Preferred" />
+      </Modal>,
+    );
+
+    expect(screen.getByLabelText("Preferred")).toHaveFocus();
+    unmount();
+    expect(trigger).toHaveFocus();
+    trigger.remove();
+  });
+
+  it("focuses a replacement subtree when the active control is removed", async () => {
+    const { rerender } = render(
+      <Modal isOpen toggleOpen={fakeToggle}>
+        <button type="button">Browse edit</button>
+      </Modal>,
+    );
+    const browseEdit = screen.getByRole("button", { name: "Browse edit" });
+    browseEdit.focus();
+    rerender(
+      <Modal isOpen toggleOpen={fakeToggle}>
+        <input data-modal-initial-focus aria-label="Replacement editor" />
+      </Modal>,
+    );
+    await act(async () => {});
+    expect(screen.getByLabelText("Replacement editor")).toHaveFocus();
+  });
+
+  it("focuses lazy content after the dialog itself received fallback focus", async () => {
+    const { rerender } = render(
+      <Modal isOpen toggleOpen={fakeToggle}>
+        <div>Loading</div>
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveFocus();
+
+    rerender(
+      <Modal isOpen toggleOpen={fakeToggle}>
+        <input data-modal-initial-focus aria-label="Lazy editor field" />
+      </Modal>,
+    );
+    await act(async () => {});
+
+    expect(screen.getByLabelText("Lazy editor field")).toHaveFocus();
+  });
+
+  it("traps Tab and Shift+Tab inside the dialog", () => {
+    render(
+      <Modal isOpen toggleOpen={fakeToggle}>
+        <button type="button">First</button>
+        <button type="button">Last</button>
+      </Modal>,
+    );
+    const first = screen.getByRole("button", { name: "First" });
+    const last = screen.getByRole("button", { name: "Last" });
+
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(first).toHaveFocus();
+
+    first.focus();
+    fireEvent.keyDown(first, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
   });
 
   it("scroll isn't enabled if ref is null", () => {

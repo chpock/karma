@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/prymitive/karma/internal/config"
+	runtimeLog "github.com/prymitive/karma/internal/log"
 )
 
 var lifecycleHousekeeping struct {
@@ -35,14 +36,14 @@ func startAlertLifecycleHousekeeping() {
 		tick := time.NewTicker(interval)
 		defer tick.Stop()
 
-		runAlertLifecycleHousekeepingOnce()
+		runAlertLifecycleHousekeepingOnce(ctx)
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				runAlertLifecycleHousekeepingOnce()
+				runAlertLifecycleHousekeepingOnce(ctx)
 			}
 		}
 	}()
@@ -64,42 +65,55 @@ func stopAlertLifecycleHousekeeping() {
 	}
 }
 
-func runAlertLifecycleHousekeepingOnce() {
+func runAlertLifecycleHousekeepingOnce(ctx context.Context) {
 	if lifecycleStore == nil {
 		return
 	}
 
-	result, err := lifecycleStore.RunHousekeeping(
+	startedAt := time.Now()
+	runtimeLog.Event(ctx, slog.LevelDebug, "lifecycle_housekeeping", "housekeeping_started", "Alert lifecycle housekeeping started", slog.Duration("retention_ttl", config.Config.AlertLifecycle.Retention.TTL), slog.Duration("silence_history_retention_ttl", config.Config.AlertLifecycle.SilenceHistory.Retention.TTL), slog.Int("max_alerts", config.Config.AlertLifecycle.Retention.MaxAlerts))
+	result, err := lifecycleStore.RunHousekeepingContext(
+		ctx,
 		config.Config.AlertLifecycle.Retention.TTL,
 		config.Config.AlertLifecycle.Retention.MaxAlerts,
 	)
 	if err != nil {
-		slog.Error("Alert lifecycle housekeeping failed", slog.Any("error", err))
+		runtimeLog.Event(ctx, slog.LevelError, "lifecycle_housekeeping", "housekeeping_failed", "Alert lifecycle housekeeping failed", slog.String("stage", "execute"), slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
 		return
 	}
 
-	slog.Info(
-		"Alert lifecycle housekeeping completed",
+	level := slog.LevelDebug
+	if result.ExpiredDeleted+result.LimitDeleted+result.RecheckJobsDeleted+result.RetiredSourcesDeleted+result.RevisionsDeleted+result.EpisodesDeleted+result.RulesDeleted+result.VacuumPagesFreed > 0 {
+		level = slog.LevelInfo
+	}
+	runtimeLog.Event(ctx, level,
+		"lifecycle_housekeeping", "housekeeping_completed", "Alert lifecycle housekeeping completed",
 		slog.Int("expiredDeleted", result.ExpiredDeleted),
 		slog.Int("limitDeleted", result.LimitDeleted),
+		slog.Int("recheckJobsDeleted", result.RecheckJobsDeleted),
+		slog.Int("retiredSourcesDeleted", result.RetiredSourcesDeleted),
+		slog.Int("revisionsDeleted", result.RevisionsDeleted),
+		slog.Int("episodesDeleted", result.EpisodesDeleted),
+		slog.Int("rulesDeleted", result.RulesDeleted),
 		slog.Int("vacuumPagesFreed", result.VacuumPagesFreed),
 		slog.Int("currentRowsAfter", result.CurrentRowsAfter),
 		slog.Int("historyRowsAfter", result.HistoryRowsAfter),
+		slog.Duration("duration", time.Since(startedAt)),
 	)
 
-	runAlertLifecycleRecheckOnce()
+	runAlertLifecycleRecheckOnce(ctx)
 }
 
-func runAlertLifecycleRecheckOnce() {
+func runAlertLifecycleRecheckOnce(ctx context.Context) {
 	if lifecycleStore == nil {
 		return
 	}
-	promoted, err := lifecycleStore.RunSilenceRecheckBatch(1000)
+	promoted, err := lifecycleStore.RunSilenceRecheckBatchContext(ctx, 1000)
 	if err != nil {
-		slog.Error("Alert lifecycle silence recheck failed", slog.Any("error", err))
+		runtimeLog.Event(ctx, slog.LevelError, "silence_recheck", "worker_failed", "Alert lifecycle silence recheck failed", slog.Any("error", err))
 		return
 	}
 	if promoted > 0 {
-		slog.Info("Alert lifecycle silence recheck promoted alerts", slog.Int("promoted", promoted))
+		runtimeLog.Event(ctx, slog.LevelInfo, "silence_recheck", "batch_promoted", "Alert lifecycle silence recheck promoted alerts", slog.Int("promoted", promoted))
 	}
 }

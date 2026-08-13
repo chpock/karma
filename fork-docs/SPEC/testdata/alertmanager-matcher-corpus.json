@@ -1,0 +1,12 @@
+[
+  {"expression":"severity=critical","valid":true,"name":"severity","value":"critical","isRegex":false,"isEqual":true},
+  {"expression":"summary=Disk full on node","valid":true,"name":"summary","value":"Disk full on node","isRegex":false,"isEqual":true},
+  {"expression":"summary=\"line\\nnext\"","valid":true,"name":"summary","value":"line\nnext","isRegex":false,"isEqual":true},
+  {"expression":"service=~api|payments","valid":true,"name":"service","value":"api|payments","isRegex":true,"isEqual":true},
+  {"expression":"team!=\"platform\"","valid":true,"name":"team","value":"platform","isRegex":false,"isEqual":false},
+  {"expression":"zone!~us-.+","valid":true,"name":"zone","value":"us-.+","isRegex":true,"isEqual":false},
+  {"expression":"note=left,right={value}","valid":true,"name":"note","value":"left,right={value}","isRegex":false,"isEqual":true},
+  {"expression":"missing=","valid":true,"name":"missing","value":"","isRegex":false,"isEqual":true},
+  {"expression":"bad.name=value","valid":false},
+  {"expression":"summary=\"unterminated","valid":false}
+]

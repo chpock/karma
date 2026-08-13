@@ -201,38 +201,60 @@ func LabelsSetIfMissing(ls labels.Labels, name, value string) labels.Labels {
 //     it's pulled out of annotation map and returned under links field,
 //     karma UI used this to show links differently than other annotations
 type Alert struct {
-	StartsAt     time.Time `json:"startsAt"`
-	Fingerprint  string    `json:"-"`
-	GeneratorURL string    `json:"-"`
-	Receiver     string    `json:"receiver"`
-	LabelsFP     string    `json:"id"`
-	contentFP    string
-	Labels       labels.Labels          `json:"-"`
-	Annotations  Annotations            `json:"annotations"`
-	SilencedBy   []string               `json:"-"`
-	InhibitedBy  []string               `json:"-"`
-	Alertmanager []AlertmanagerInstance `json:"alertmanager"`
-	State        AlertState             `json:"state"`
-	RawState     AlertState             `json:"-"`
-	HasRawState  bool                   `json:"-"`
-	IsLive       bool                   `json:"-"`
-	HasIsLive    bool                   `json:"-"`
-	IsResolved   bool                   `json:"-"`
+	StartsAt          time.Time `json:"startsAt"`
+	Fingerprint       string    `json:"-"`
+	GeneratorURL      string    `json:"-"`
+	Receiver          string    `json:"receiver"`
+	LabelsFP          string    `json:"id"`
+	contentFP         string
+	Labels            labels.Labels          `json:"-"`
+	Annotations       Annotations            `json:"annotations"`
+	SilencedBy        []string               `json:"-"`
+	InhibitedBy       []string               `json:"-"`
+	Alertmanager      []AlertmanagerInstance `json:"alertmanager"`
+	SuppressionCauses []SuppressionCause     `json:"suppressionCauses"`
+	State             AlertState             `json:"state"`
+	RawState          AlertState             `json:"-"`
+	HasRawState       bool                   `json:"-"`
+	IsLive            bool                   `json:"-"`
+	HasIsLive         bool                   `json:"-"`
+	IsResolved        bool                   `json:"-"`
 }
 
 // APIAlert is the JSON-serializable representation of Alert.
 // Labels are converted to OrderedLabels for the frontend.
 type APIAlert struct {
-	StartsAt     time.Time              `json:"startsAt"`
-	State        string                 `json:"state"`
-	RawState     string                 `json:"rawState"`
-	IsLive       bool                   `json:"isLive"`
-	IsResolved   bool                   `json:"isResolved"`
-	Receiver     string                 `json:"receiver"`
-	LabelsFP     string                 `json:"id"`
-	Annotations  Annotations            `json:"annotations"`
-	Labels       OrderedLabels          `json:"labels"`
-	Alertmanager []AlertmanagerInstance `json:"alertmanager"`
+	StartsAt          time.Time              `json:"startsAt"`
+	State             string                 `json:"state"`
+	RawState          string                 `json:"rawState"`
+	IsLive            bool                   `json:"isLive"`
+	IsResolved        bool                   `json:"isResolved"`
+	Receiver          string                 `json:"receiver"`
+	LabelsFP          string                 `json:"id"`
+	Annotations       Annotations            `json:"annotations"`
+	Labels            OrderedLabels          `json:"labels"`
+	Alertmanager      []AlertmanagerInstance `json:"alertmanager"`
+	SuppressionCauses []SuppressionCause     `json:"suppressionCauses"`
+}
+
+type SuppressionCause struct {
+	Target           string                    `json:"target"`
+	Source           string                    `json:"source"`
+	SilenceID        string                    `json:"silenceID"`
+	ResolutionStatus string                    `json:"resolutionStatus"`
+	StartsAt         *time.Time                `json:"startsAt"`
+	EndsAt           *time.Time                `json:"endsAt"`
+	CreatedBy        string                    `json:"createdBy"`
+	Comment          string                    `json:"comment"`
+	Matchers         []SuppressionCauseMatcher `json:"matchers"`
+}
+
+// SuppressionCauseMatcher is immutable display evidence, not an executable matcher.
+type SuppressionCauseMatcher struct {
+	Name    string `json:"name"`
+	Value   string `json:"value"`
+	IsRegex bool   `json:"isRegex"`
+	IsEqual bool   `json:"isEqual"`
 }
 
 func (a APIAlert) MarshalJSONTo(enc *jsontext.Encoder) error {
@@ -278,6 +300,54 @@ func (a *APIAlert) marshalTo(w *jsonWriter) {
 	w.beginArray()
 	for i := range a.Alertmanager {
 		a.Alertmanager[i].marshalTo(w)
+	}
+	w.endArray()
+	w.key("suppressionCauses")
+	w.beginArray()
+	for i := range a.SuppressionCauses {
+		cause := &a.SuppressionCauses[i]
+		w.beginObject()
+		w.key("target")
+		w.str(cause.Target)
+		w.key("source")
+		w.str(cause.Source)
+		w.key("silenceID")
+		w.str(cause.SilenceID)
+		w.key("resolutionStatus")
+		w.str(cause.ResolutionStatus)
+		w.key("startsAt")
+		if cause.StartsAt == nil {
+			w.null()
+		} else {
+			w.time(*cause.StartsAt)
+		}
+		w.key("endsAt")
+		if cause.EndsAt == nil {
+			w.null()
+		} else {
+			w.time(*cause.EndsAt)
+		}
+		w.key("createdBy")
+		w.str(cause.CreatedBy)
+		w.key("comment")
+		w.str(cause.Comment)
+		w.key("matchers")
+		w.beginArray()
+		for matcherIndex := range cause.Matchers {
+			matcher := &cause.Matchers[matcherIndex]
+			w.beginObject()
+			w.key("name")
+			w.str(matcher.Name)
+			w.key("value")
+			w.str(matcher.Value)
+			w.key("isRegex")
+			w.boolean(matcher.IsRegex)
+			w.key("isEqual")
+			w.boolean(matcher.IsEqual)
+			w.endObject()
+		}
+		w.endArray()
+		w.endObject()
 	}
 	w.endArray()
 	w.endObject()
@@ -349,6 +419,38 @@ func (a *Alert) UpdateFingerprints() {
 		}
 		for _, s := range am.InhibitedBy {
 			_, _ = h.WriteString(s)
+			_, _ = h.Write(seps)
+		}
+	}
+	for _, cause := range a.SuppressionCauses {
+		_, _ = h.WriteString(cause.Target)
+		_, _ = h.Write(seps)
+		_, _ = h.WriteString(cause.Source)
+		_, _ = h.Write(seps)
+		_, _ = h.WriteString(cause.SilenceID)
+		_, _ = h.Write(seps)
+		_, _ = h.WriteString(cause.ResolutionStatus)
+		_, _ = h.Write(seps)
+		if cause.StartsAt != nil {
+			_, _ = h.WriteString(cause.StartsAt.Format(time.RFC3339Nano))
+		}
+		_, _ = h.Write(seps)
+		if cause.EndsAt != nil {
+			_, _ = h.WriteString(cause.EndsAt.Format(time.RFC3339Nano))
+		}
+		_, _ = h.Write(seps)
+		_, _ = h.WriteString(cause.CreatedBy)
+		_, _ = h.Write(seps)
+		_, _ = h.WriteString(cause.Comment)
+		_, _ = h.Write(seps)
+		for _, matcher := range cause.Matchers {
+			_, _ = h.WriteString(matcher.Name)
+			_, _ = h.Write(seps)
+			_, _ = h.WriteString(matcher.Value)
+			_, _ = h.Write(seps)
+			_, _ = h.WriteString(strconv.FormatBool(matcher.IsRegex))
+			_, _ = h.Write(seps)
+			_, _ = h.WriteString(strconv.FormatBool(matcher.IsEqual))
 			_, _ = h.Write(seps)
 		}
 	}

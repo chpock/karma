@@ -15,6 +15,7 @@ import FilteringLabel from "Components/Labels/FilteringLabel";
 import { InhibitedByModal } from "Components/InhibitedByModal";
 import { RenderNonLinkAnnotation, RenderLinkAnnotation } from "../Annotation";
 import { AlertMenu } from "./AlertMenu";
+import { SuppressionEvidence } from "./SuppressionEvidence";
 import { RenderSilence } from "../Silences";
 
 function alertBorderState(alert: APIAlertT): string {
@@ -52,7 +53,8 @@ const Alert: FC<{
     "my-1",
     "rounded-0",
     "border-start-1 border-end-0 border-top-0 border-bottom-0",
-    BorderClassMap[alertBorderState(alert) as BorderStateKey] || "border-default",
+    BorderClassMap[alertBorderState(alert) as BorderStateKey] ||
+      "border-default",
   ];
 
   const silences: {
@@ -163,6 +165,9 @@ const Alert: FC<{
           />
         )),
       )}
+      {!alert.isLive ? (
+        <SuppressionEvidence causes={alert.suppressionCauses} />
+      ) : null}
     </li>
   );
 };

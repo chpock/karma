@@ -17,13 +17,17 @@ Retention policy:
 
 1. TTL cleanup first (default 30 days from `last_seen_at`).
 2. apply max-record limit second (default 100000 alerts) if still over cap.
-3. limit eviction order is oldest by state-change age.
+3. prune unreferenced silence/job history under its independent 30-day TTL while
+   preserving current/referenced rows.
+4. limit eviction order is oldest by state-change age.
 
 Vacuum policy:
 
 - WAL mode,
 - incremental auto-vacuum,
 - scheduled incremental vacuum,
+- the housekeeping/vacuum cycle runs immediately at worker start and then at the
+  configured interval (default 24h),
 - full vacuum only as manual maintenance.
 
 ## Consequences

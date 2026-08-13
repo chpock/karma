@@ -36,6 +36,7 @@ beforeEach(() => {
         headers: {},
         corsCredentials: "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: "ha",
         clusterMembers: ["am1", "am2"],
@@ -48,6 +49,7 @@ beforeEach(() => {
         headers: {},
         corsCredentials: "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: "ha",
         clusterMembers: ["am1", "am2"],
@@ -60,6 +62,7 @@ beforeEach(() => {
         headers: {},
         corsCredentials: "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: "ha",
         clusterMembers: ["single"],
@@ -68,7 +71,7 @@ beforeEach(() => {
   });
 });
 
-describe("<SilenceSubmitController />", () => {
+describe("[legacy-only] <SilenceSubmitController />", () => {
   it("renders MultiClusterStatus when multiple clusters are used", () => {
     silenceFormStore.data.setRequestsByCluster({
       ha: NewClusterRequest("ha", ["am1", "am2"]),
@@ -113,7 +116,7 @@ describe("<SilenceSubmitController />", () => {
   });
 });
 
-describe("<MultiClusterStatus />", () => {
+describe("[legacy-only] <MultiClusterStatus />", () => {
   it("renders all passed SilenceSubmitProgress", () => {
     silenceFormStore.data.setRequestsByCluster({
       ha: NewClusterRequest("ha", ["am1", "am2"]),
@@ -185,7 +188,7 @@ describe("<MultiClusterStatus />", () => {
   });
 });
 
-describe("<SingleClusterStatus />", () => {
+describe("[legacy-only] <SingleClusterStatus />", () => {
   it("renders spinner for pending requests", () => {
     const single = NewClusterRequest("single", ["single"]);
     silenceFormStore.data.setRequestsByCluster({ single: single });

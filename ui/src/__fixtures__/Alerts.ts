@@ -47,6 +47,7 @@ const MockAlert = (
       inhibitedBy: [],
     },
   ],
+  suppressionCauses: [],
   receiver: "by-name",
 });
 
@@ -98,6 +99,7 @@ const MockSilence = (): APISilenceT => ({
   createdBy: "me@example.com",
   startsAt: "2000-01-01T00:00:00Z",
   endsAt: "2000-01-01T01:00:00Z",
+  isExpired: false,
   id: "04d37636-2350-4878-b382-e0b50353230f",
   ticketID: "",
   ticketURL: "",
@@ -120,6 +122,7 @@ const MockAlertmanager = (): APIAlertmanagerUpstreamT => ({
   },
   corsCredentials: "include",
   error: "",
+  warnings: [],
   version: "0.24.0",
   clusterMembers: ["default"],
 });

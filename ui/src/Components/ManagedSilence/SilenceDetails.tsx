@@ -2,8 +2,6 @@ import { FC, useState } from "react";
 
 import { observer } from "mobx-react-lite";
 
-import { parseISO } from "date-fns/parseISO";
-
 import copy from "copy-to-clipboard";
 
 import { CSSTransition } from "react-transition-group";
@@ -54,19 +52,22 @@ const SilenceDetails: FC<{
   alertStore: AlertStore;
   silenceFormStore: SilenceFormStore;
   silence: APISilenceT;
+  isExpired: boolean;
   cluster: string;
   onEditSilence: () => void;
+  isEditPending?: boolean;
   isUpper?: boolean;
 }> = observer(
   ({
     alertStore,
     silenceFormStore,
     silence,
+    isExpired,
     cluster,
     onEditSilence,
+    isEditPending = false,
     isUpper = false,
   }) => {
-    const isExpired = parseISO(silence.endsAt) < new Date();
     let expiresClass = "";
     let expiresLabel = "Expires";
     if (isExpired) {
@@ -167,7 +168,7 @@ const SilenceDetails: FC<{
             <div className="d-flex flex-fill flex-lg-column flex-row justify-content-around">
               <button
                 className="btn btn-primary btn-sm mb-lg-2 mb-0"
-                disabled={isReadOnly}
+                disabled={isReadOnly || isEditPending}
                 onClick={() => {
                   !isReadOnly && onEditSilence();
                 }}
@@ -176,7 +177,7 @@ const SilenceDetails: FC<{
                   className="me-1 d-none d-sm-inline-block"
                   icon={faEdit}
                 />
-                {isExpired ? "Recreate" : "Edit"}
+                {isEditPending ? "Checking..." : isExpired ? "Recreate" : "Edit"}
               </button>
               {!isExpired && (
                 <DeleteSilence

@@ -71,6 +71,7 @@ beforeEach(() => {
         uri: "https://am.example.com",
         publicURI: "https://am.example.com",
         error: "",
+        warnings: [],
         readonly: false,
         headers: {},
         corsCredentials: "include",

@@ -59,10 +59,6 @@ const App: FC<AppProps> = observer(({ defaultFilters, uiDefaults }) => {
       filters = p.params.q;
     }
     alertStore.filters.setFilters(filters);
-
-    if (p.params.m && silenceFormStore.data.fromBase64(p.params.m)) {
-      silenceFormStore.toggle.show();
-    }
   }, [alertStore, defaultFilters, settingsStore]);
 
   const onPopState = useCallback(

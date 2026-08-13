@@ -27,6 +27,7 @@ func (w *jsonWriter) str(s string)      { w.token(jsontext.String(s)) }
 func (w *jsonWriter) integer(v int)     { w.token(jsontext.Int(int64(v))) }
 func (w *jsonWriter) integer32(v int32) { w.token(jsontext.Int(int64(v))) }
 func (w *jsonWriter) boolean(v bool)    { w.token(jsontext.Bool(v)) }
+func (w *jsonWriter) null()             { w.token(jsontext.Null) }
 
 func (w *jsonWriter) time(t time.Time) {
 	if w.err == nil {

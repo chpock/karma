@@ -22,6 +22,7 @@ const makeErrors = () => {
         uri: "http://am1",
         publicURI: "http://am1",
         error: "error 1",
+        warnings: [],
         version: "0.24.0",
         readonly: false,
         corsCredentials: "include",
@@ -34,6 +35,7 @@ const makeErrors = () => {
         uri: "file:///mock",
         publicURI: "file:///mock",
         error: "",
+        warnings: [],
         version: "0.24.0",
         readonly: false,
         corsCredentials: "include",
@@ -46,6 +48,7 @@ const makeErrors = () => {
         uri: "http://am3",
         publicURI: "http://am3",
         error: "error 2",
+        warnings: [],
         version: "0.24.0",
         readonly: false,
         corsCredentials: "include",
@@ -82,6 +85,51 @@ describe("<AppToasts />", () => {
     expect(asFragment()).toMatchSnapshot();
   });
 
+  it("renders a non-fatal toast for an ignored silence rule", () => {
+    act(() => {
+      alertStore.data.setUpstreams({
+        counters: { total: 1, healthy: 1, failed: 0 },
+        instances: [
+          {
+            name: "am1",
+            cluster: "am1",
+            clusterMembers: ["am1"],
+            uri: "http://am1",
+            publicURI: "http://am1",
+            error: "",
+            warnings: [
+              {
+                entryIndex: 3,
+                silenceID: "silence-1",
+                status: "missing",
+                field: "status.state",
+                reasonCode: "missing_required_field",
+                message: "silence status.state is missing",
+              },
+            ],
+            version: "0.24.0",
+            readonly: false,
+            corsCredentials: "include",
+            headers: {},
+          },
+        ],
+        clusters: { am1: ["am1"] },
+      });
+    });
+
+    render(<AppToasts alertStore={alertStore} />);
+
+    expect(
+      screen.getByText("Alertmanager am1 ignored a silence rule"),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Entry 3 (silence silence-1), field status.state: silence status.state is missing",
+      ),
+    ).toBeVisible();
+    expect(alertStore.data.upstreamsWithErrors).toHaveLength(0);
+  });
+
   it("doesn't render upstream error toasts if not all instances are down", () => {
     // Verifies no error toasts when some instances are healthy
     act(() => {
@@ -95,6 +143,7 @@ describe("<AppToasts />", () => {
             uri: "http://am1",
             publicURI: "http://am1",
             error: "error 1",
+            warnings: [],
             version: "0.24.0",
             readonly: false,
             corsCredentials: "include",
@@ -107,6 +156,7 @@ describe("<AppToasts />", () => {
             uri: "file:///mock",
             publicURI: "file:///mock",
             error: "",
+            warnings: [],
             version: "0.24.0",
             readonly: false,
             corsCredentials: "include",
@@ -134,6 +184,7 @@ describe("<AppToasts />", () => {
             uri: "http://am1",
             publicURI: "http://am1",
             error: "error 1",
+            warnings: [],
             version: "0.24.0",
             readonly: false,
             corsCredentials: "include",
@@ -146,6 +197,7 @@ describe("<AppToasts />", () => {
             uri: "file:///mock",
             publicURI: "file:///mock",
             error: "error 2",
+            warnings: [],
             version: "0.24.0",
             readonly: false,
             corsCredentials: "include",
@@ -179,6 +231,7 @@ describe("<AppToasts />", () => {
             uri: "http://am1",
             publicURI: "http://am1",
             error: "",
+            warnings: [],
             version: "0.24.0",
             readonly: false,
             corsCredentials: "include",
@@ -191,6 +244,7 @@ describe("<AppToasts />", () => {
             uri: "file:///mock",
             publicURI: "file:///mock",
             error: "",
+            warnings: [],
             version: "0.24.0",
             readonly: false,
             corsCredentials: "include",
@@ -203,6 +257,7 @@ describe("<AppToasts />", () => {
             uri: "http://am3",
             publicURI: "http://am3",
             error: "",
+            warnings: [],
             version: "0.24.0",
             readonly: false,
             corsCredentials: "include",

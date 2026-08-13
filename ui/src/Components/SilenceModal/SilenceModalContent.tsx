@@ -9,11 +9,8 @@ import { faLock } from "@fortawesome/free-solid-svg-icons/faLock";
 import type { AlertStore } from "Stores/AlertStore";
 import type { SilenceFormStore } from "Stores/SilenceFormStore";
 import type { Settings } from "Stores/Settings";
-import { Tab } from "Components/Modal/Tab";
-import SilenceForm from "./SilenceForm";
-import { SilencePreview } from "./SilencePreview";
-import SilenceSubmitController from "./SilenceSubmit/SilenceSubmitController";
-import Browser from "./Browser";
+import type { SilenceEditorCloseReasonT } from "./index";
+import SilenceEditor from "./SilenceEditor";
 
 const ReadOnlyPlaceholder: FC = () => (
   <div className="px-2 py-5 bg-transparent">
@@ -29,91 +26,71 @@ const SilenceModalContent: FC<{
   silenceFormStore: SilenceFormStore;
   settingsStore: Settings;
   onHide: () => void;
-  previewOpen?: boolean;
+  onSubmitted: (target: string, silenceID: string) => void;
+  registerCloseGuard: (
+    guard: (reason: SilenceEditorCloseReasonT) => boolean,
+  ) => void;
 }> = ({
   alertStore,
   silenceFormStore,
   settingsStore,
   onHide,
-  previewOpen = false,
+  onSubmitted,
+  registerCloseGuard,
 }) => {
   return (
     <Observer>
-      {() => (
-        <>
-          <div className="modal-header py-2">
-            <nav className="nav nav-pills nav-justified w-100">
-              <Tab
-                title={
-                  silenceFormStore.data.currentStage === "form"
-                    ? silenceFormStore.data.silenceID === null
-                      ? "New silence"
-                      : "Editing silence"
-                    : silenceFormStore.data.currentStage === "preview"
-                      ? "Preview silenced alerts"
-                      : "Silence submitted"
-                }
-                active={silenceFormStore.tab.current === "editor"}
-                onClick={() => silenceFormStore.tab.setTab("editor")}
-              />
-              <Tab
-                title="Browse"
-                active={silenceFormStore.tab.current === "browser"}
-                onClick={() => silenceFormStore.tab.setTab("browser")}
-              />
+      {() => {
+        const editorKey = `${silenceFormStore.data.operation}:${silenceFormStore.data.silenceID ?? "new"}:${silenceFormStore.data.editorReplacementRevision}`;
+
+        return (
+          <>
+            <div className="modal-header py-2">
+              <h5 className="modal-title">
+                {silenceFormStore.data.silenceID === null
+                  ? "Create silence"
+                  : silenceFormStore.data.operation === "recreate"
+                    ? "Recreate silence"
+                    : "Edit silence"}
+              </h5>
               <button
                 type="button"
-                className="btn-close my-auto"
+                className="btn-close"
+                aria-label="Close silence editor"
                 onClick={onHide}
               ></button>
-            </nav>
-          </div>
-          <div
-            className={`modal-body ${
-              silenceFormStore.toggle.blurred ? "modal-content-blur" : ""
-            }`}
-          >
-            {silenceFormStore.tab.current === "editor" ? (
-              silenceFormStore.data.currentStage === "form" ? (
-                alertStore.data.upstreams.instances.length > 0 ? (
-                  Object.keys(alertStore.data.clustersWithoutReadOnly).length >
-                  0 ? (
-                    <SilenceForm
+            </div>
+            <div
+              className={`modal-body ${
+                silenceFormStore.toggle.blurred ? "modal-content-blur" : ""
+              }`}
+            >
+              {alertStore.data.upstreams.instances.length > 0 ? (
+                Object.keys(alertStore.data.clustersWithoutReadOnly).length >
+                0 ? (
+                  <div>
+                    <SilenceEditor
+                      key={editorKey}
                       alertStore={alertStore}
                       silenceFormStore={silenceFormStore}
                       settingsStore={settingsStore}
-                      previewOpen={previewOpen}
+                      onClose={onHide}
+                      onSubmitted={onSubmitted}
+                      registerCloseGuard={registerCloseGuard}
                     />
-                  ) : (
-                    <ReadOnlyPlaceholder />
-                  )
+                  </div>
                 ) : (
-                  <h1 className="text-center display-1 text-placeholder p-5 m-auto">
-                    <FontAwesomeIcon icon={faSpinner} size="lg" spin />
-                  </h1>
+                  <ReadOnlyPlaceholder />
                 )
-              ) : silenceFormStore.data.currentStage === "preview" ? (
-                <SilencePreview
-                  alertStore={alertStore}
-                  silenceFormStore={silenceFormStore}
-                />
               ) : (
-                <SilenceSubmitController
-                  alertStore={alertStore}
-                  silenceFormStore={silenceFormStore}
-                />
-              )
-            ) : null}
-            {silenceFormStore.tab.current === "browser" ? (
-              <Browser
-                alertStore={alertStore}
-                silenceFormStore={silenceFormStore}
-                settingsStore={settingsStore}
-              />
-            ) : null}
-          </div>
-        </>
-      )}
+                <h1 className="text-center display-1 text-placeholder p-5 m-auto">
+                  <FontAwesomeIcon icon={faSpinner} size="lg" spin />
+                </h1>
+              )}
+            </div>
+          </>
+        );
+      }}
     </Observer>
   );
 };

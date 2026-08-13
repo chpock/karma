@@ -9,7 +9,30 @@ Scope rule for this file:
 
 ## 1. New fork keys
 
-All new keys are under `alertLifecycle`.
+New keys are grouped by their owning fork subsystem.
+
+### `silenceEditor.maxPayloadBytes`
+
+- Type: `int64` bytes
+- Default: `0` (no additional Karma limit)
+- CLI flag: `--silenceEditor.maxPayloadBytes`
+- Environment variable: `SILENCEEDITOR_MAXPAYLOADBYTES`
+
+Meaning:
+
+- optional maximum size for a silence-editor submit request and for the fresh
+  singular silence response used by Edit/Recreate verification;
+- `0` lets Karma accept every payload size accepted by its HTTP server and by
+  Alertmanager;
+- a positive value should normally match Alertmanager's
+  `--silences.max-silence-size-bytes` setting.
+
+This limit does not apply to preview requests. Preview has its own fixed 64 KiB
+request limit because it never carries an existing Alertmanager silence payload.
+
+Validation:
+
+- must be `>= 0`.
 
 ### `alertLifecycle.enabled`
 
@@ -24,7 +47,11 @@ Meaning:
 
 Operational note:
 
-- if disabled, lifecycle persistence and related endpoints are inactive.
+- if disabled, lifecycle persistence, retained-alert merge, Resolve, and lifecycle
+  warning/stats behavior are inactive;
+- silence autocomplete may still use current live alerts, but automatic preview is
+  fail-closed without lifecycle storage. Keep this enabled for the complete compact
+  editor contract.
 
 ### `alertLifecycle.sqlite.path`
 
@@ -78,6 +105,27 @@ Validation:
 
 - must be `>= 1`.
 
+### `alertLifecycle.silenceHistory.retention.ttl`
+
+- Type: `duration`
+- Default: `720h` (30 days)
+- CLI flag: `--alertLifecycle.silenceHistory.retention.ttl`
+- Environment variable: `ALERTLIFECYCLE_SILENCEHISTORY_RETENTION_TTL`
+
+Meaning:
+
+- cleanup window for unreferenced closed silence revisions, episodes, retired
+  sources, and old completed recheck-job data;
+- current silence relations, queued/running/failed jobs, the latest completed job,
+  and history referenced by retained alerts or evidence are protected regardless of
+  age;
+- this setting is independent from alert retention because silence evidence may
+  have a different lifecycle from alert rows.
+
+Validation:
+
+- must be `> 0`.
+
 ### `alertLifecycle.housekeeping.incrementalVacuumInterval`
 
 - Type: `duration`
@@ -87,8 +135,10 @@ Validation:
 
 Meaning:
 
-- interval for periodic housekeeping cycle.
-- each cycle runs in this order: TTL cleanup -> maxAlerts cleanup -> incremental vacuum.
+- interval for the complete background housekeeping cycle;
+- one cycle runs immediately at worker startup and then at this interval;
+- each cycle runs alert TTL cleanup, maxAlerts cleanup, reference-safe silence/job
+  history cleanup, incremental vacuum, and one silence-recheck batch.
 
 Validation:
 
@@ -98,7 +148,7 @@ Validation:
 
 At current fork stage, there are no upstream configuration keys with fork-modified defaults or semantics.
 
-Only new fork keys were added under `alertLifecycle`.
+Fork keys are grouped under `alertLifecycle` and `silenceEditor`.
 
 ## 3. Example YAML
 
@@ -110,12 +160,21 @@ alertLifecycle:
   retention:
     ttl: 720h
     maxAlerts: 100000
+  silenceHistory:
+    retention:
+      ttl: 720h
   housekeeping:
     incrementalVacuumInterval: 24h
+
+silenceEditor:
+  # 0 means no additional Karma limit for submit/fresh-read payloads.
+  maxPayloadBytes: 0
 ```
 
 ## 4. Related docs
 
-- `fork-docs/SPEC/storage-schema.md`
-- `fork-docs/SPEC/retention-and-vacuum.md`
-- `fork-docs/SPEC/api-contracts.md`
+- [Storage schema](SPEC/storage-schema.md)
+- [Retention and vacuum](SPEC/retention-and-vacuum.md)
+- [API contracts](SPEC/api-contracts.md)
+- [User guide](README.md)
+- [Compact silence editor](SILENCE_EDITOR.md)

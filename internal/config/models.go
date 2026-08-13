@@ -118,13 +118,21 @@ type configSchema struct {
 			Path string
 		}
 		Retention struct {
-			TTL      time.Duration
+			TTL       time.Duration
 			MaxAlerts int `yaml:"maxAlerts" koanf:"maxAlerts"`
 		}
+		SilenceHistory struct {
+			Retention struct {
+				TTL time.Duration
+			}
+		} `yaml:"silenceHistory" koanf:"silenceHistory"`
 		Housekeeping struct {
 			IncrementalVacuumInterval time.Duration `yaml:"incrementalVacuumInterval" koanf:"incrementalVacuumInterval"`
 		}
 	} `yaml:"alertLifecycle" koanf:"alertLifecycle"`
+	SilenceEditor struct {
+		MaxPayloadBytes int64 `yaml:"maxPayloadBytes" koanf:"maxPayloadBytes"`
+	} `yaml:"silenceEditor" koanf:"silenceEditor"`
 	// nolint: maligned
 	Annotations struct {
 		Default struct {

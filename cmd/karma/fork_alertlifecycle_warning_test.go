@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/prymitive/karma/internal/config"
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
@@ -123,6 +124,38 @@ func TestAlertLifecycleWarningClearsAfterRegroupReachesExpectedState(t *testing.
 	}
 	if resp.RegroupStatus != "ready" {
 		t.Fatalf("expected regroupStatus=ready, got=%q", resp.RegroupStatus)
+	}
+}
+
+func TestAlertLifecycleWarningReportsSilenceHAInconsistency(t *testing.T) {
+	store := setupLifecycleStoreForResolveTest(t)
+	prevEnabled := config.Config.AlertLifecycle.Enabled
+	config.Config.AlertLifecycle.Enabled = true
+	t.Cleanup(func() { config.Config.AlertLifecycle.Enabled = prevEnabled })
+	now := mustParseTS(t, "2026-08-01T12:00:00Z")
+	_, err := store.ApplyPollCycle(alertlifecycle.PollCycleInput{
+		SuccessfulUpstreams: map[string]bool{"am-a": true, "am-b": true},
+		SilenceSources: []alertlifecycle.SourceSilenceState{
+			{SourceName: "am-a", ClusterID: "cluster-ha", SyncStatus: "success", Silences: []alertlifecycle.SourceSilenceSnapshot{{
+				SilenceID: "a", Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
+				Matchers: []alertlifecycle.SilenceMatcherSnapshot{{Name: "service", Value: "api", IsEqual: true}},
+			}}},
+			{SourceName: "am-b", ClusterID: "cluster-ha", SyncStatus: "success", Silences: []alertlifecycle.SourceSilenceSnapshot{{
+				SilenceID: "b", Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
+				Matchers: []alertlifecycle.SilenceMatcherSnapshot{{Name: "service", Value: "payments", IsEqual: true}},
+			}}},
+		},
+		Timestamp: now,
+	})
+	if err != nil {
+		t.Fatalf("seed HA inconsistency: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/alerts-history/warning", http.NoBody)
+	rr := httptest.NewRecorder()
+	alertLifecycleWarning(rr, req)
+	resp := decodeWarningResponse(t, rr)
+	if resp.DBExpectedState || len(resp.SilenceInconsistentClusters) != 1 || resp.SilenceInconsistentClusters[0] != "cluster-ha" {
+		t.Fatalf("expected persistent HA inconsistency warning, got=%+v", resp)
 	}
 }
 

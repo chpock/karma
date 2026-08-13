@@ -18,10 +18,7 @@ import fetchMock from "@fetch-mock/jest";
 
 import { mockMatchMedia } from "__fixtures__/matchMedia";
 import { EmptyAPIResponse } from "__fixtures__/Fetch";
-import { inReactiveContext } from "__fixtures__/MobX";
 import type { UIDefaults, ThemeT } from "Models/UI";
-import { SilenceFormStore, NewEmptyMatcher } from "Stores/SilenceFormStore";
-import { StringToOption } from "Common/Select";
 import { App } from "./App";
 
 declare let global: any;
@@ -184,76 +181,19 @@ describe("<App />", () => {
     window.dispatchEvent(event);
   });
 
-  it("populates silence from from 'm' query arg", async () => {
-    // Verifies silence form is populated from base64 encoded query arg
-    const m1 = NewEmptyMatcher();
-    m1.name = "foo";
-    m1.isRegex = true;
-    m1.values = [StringToOption("bar")];
-    const m2 = NewEmptyMatcher();
-    m2.name = "bar";
-    m2.isRegex = false;
-    m2.values = [StringToOption("foo"), StringToOption("baz")];
-    const store = new SilenceFormStore();
-    act(() => {
-      store.data.setMatchers([m1, m2]);
-      store.data.setComment("base64");
-    });
-    const m = inReactiveContext(() => store.data.toBase64);
-
-    // Use history.pushState instead of setting window.location to avoid jsdom navigation error
-    window.history.pushState({}, "App", `/?q=bar&m=${m}`);
-
-    await act(async () => {
-      render(<App defaultFilters={[]} uiDefaults={uiDefaults} />);
-    });
-  });
-
-  it("doesn't crash on invalid 'm' value", async () => {
-    // Verifies app handles invalid base64 silence data gracefully
+  it("ignores legacy 'm' query arg and does not open silence editor", async () => {
     const consoleSpy = jest
       .spyOn(console, "error")
       .mockImplementation(jest.fn());
 
-    global.window.location = {
-      href: "http://localhost/?q=bar&m=foo",
-      search: "?q=bar&m=foo",
-    };
+    window.history.pushState({}, "App", "/?q=bar&m=legacy-base64");
 
     await act(async () => {
       render(<App defaultFilters={[]} uiDefaults={uiDefaults} />);
     });
-    expect(consoleSpy).toHaveBeenCalledTimes(1);
-  });
 
-  it("doesn't crash on truncated 'm' value", async () => {
-    // Verifies app handles truncated base64 silence data gracefully
-    const consoleSpy = jest
-      .spyOn(console, "error")
-      .mockImplementation(jest.fn());
-
-    const m1 = NewEmptyMatcher();
-    m1.name = "foo";
-    m1.isRegex = true;
-    m1.values = [StringToOption("bar")];
-    const m2 = NewEmptyMatcher();
-    m2.name = "bar";
-    m2.isRegex = false;
-    m2.values = [StringToOption("foo"), StringToOption("baz")];
-    const store = new SilenceFormStore();
-    store.data.setMatchers([m1, m2]);
-    store.data.setComment("base64");
-    const m = inReactiveContext(() => store.data.toBase64);
-
-    global.window.location = {
-      href: `http://localhost/?q=bar&m=${m}`,
-      search: `?q=bar&m=${m.slice(0, m.length - 2)}`,
-    };
-
-    await act(async () => {
-      render(<App defaultFilters={[]} uiDefaults={uiDefaults} />);
-    });
-    expect(consoleSpy).toHaveBeenCalledTimes(1);
+    expect(window.location.search).toBe("?q=bar");
+    expect(consoleSpy).not.toHaveBeenCalled();
   });
 });
 

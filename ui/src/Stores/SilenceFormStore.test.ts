@@ -16,12 +16,75 @@ import {
   SilenceFormStore,
   NewEmptyMatcher,
   AlertmanagerClustersToOption,
+  MatcherToExpression,
 } from "./SilenceFormStore";
 
 let store: SilenceFormStore;
 
 beforeEach(() => {
   store = new SilenceFormStore();
+});
+
+describe("MatcherToExpression()", () => {
+  it("escapes generated multi-value regexp alternatives", () => {
+    const matcher = NewEmptyMatcher();
+    matcher.name = "service";
+    matcher.isRegex = true;
+    matcher.values = [StringToOption("api.1"), StringToOption("foo+bar")];
+
+    expect(MatcherToExpression(matcher)).toBe(
+      'service=~"(api\\\\.1|foo\\\\+bar)"',
+    );
+  });
+
+  it("preserves an intentionally authored regexp", () => {
+    const matcher = NewEmptyMatcher();
+    matcher.name = "service";
+    matcher.isRegex = true;
+    matcher.values = [
+      { ...StringToOption("api.+|payments"), wasCreated: true },
+    ];
+
+    expect(MatcherToExpression(matcher)).toBe('service=~"api.+|payments"');
+  });
+
+  it("preserves escapes in an intentionally authored regexp", () => {
+    const matcher = NewEmptyMatcher();
+    matcher.name = "service";
+    matcher.isRegex = true;
+    matcher.values = [{ ...StringToOption("\\d+\\s+api"), wasCreated: true }];
+
+    expect(MatcherToExpression(matcher)).toBe('service=~"\\\\d+\\\\s+api"');
+  });
+
+  it("escapes literal line feeds before writing into an HTML input", () => {
+    const matcher = NewEmptyMatcher();
+    matcher.name = "summary";
+    matcher.values = [StringToOption("line one\nline two")];
+
+    expect(MatcherToExpression(matcher)).toBe('summary="line one\\nline two"');
+  });
+});
+
+describe("editor replacement coordination", () => {
+  it("allows only the latest request to advance the editor revision", () => {
+    const store = new SilenceFormStore();
+    const first = store.data.beginEditorReplacement();
+    expect(store.data.editorSessionState).toBe("checking");
+    const second = store.data.beginEditorReplacement();
+
+    expect(first.signal.aborted).toBe(true);
+    expect(store.data.isEditorReplacementCurrent(first.generation)).toBe(false);
+    expect(store.data.completeEditorReplacement(first.generation)).toBe(false);
+    expect(store.data.completeEditorReplacement(second.generation)).toBe(true);
+    expect(store.data.editorSessionState).toBe("editing");
+    expect(store.data.editorReplacementRevision).toBe(1);
+
+    store.data.cancelEditorReplacement();
+    expect(store.data.isEditorReplacementCurrent(second.generation)).toBe(
+      false,
+    );
+  });
 });
 
 const MockGroup = () => {
@@ -540,14 +603,44 @@ describe("SilenceFormStore.data", () => {
   it("fillFormFromSilence() sets silenceID", () => {
     const alertmanager = MockAlertmanager();
     const silence = MockSilence();
-    store.data.fillFormFromSilence(alertmanager, silence);
+    store.data.fillFormFromSilence(alertmanager, silence, "edit");
     expect(store.data.silenceID).toBe(silence.id);
+  });
+
+  it("fillFormFromSilence() uses explicit operation", () => {
+    const alertmanager = MockAlertmanager();
+    const active = MockSilence();
+    active.startsAt = new Date(Date.now() - 60 * 1000).toISOString();
+    active.endsAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    store.data.fillFormFromSilence(alertmanager, active, "edit");
+    expect(store.data.operation).toBe("edit");
+
+    const expired = MockSilence();
+    expired.startsAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    expired.endsAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    store.data.fillFormFromSilence(alertmanager, expired, "recreate");
+    expect(store.data.operation).toBe("recreate");
+  });
+
+  it("fillFormFromSilence() operation does not depend on browser clock", () => {
+    const alertmanager = MockAlertmanager();
+    const silence = MockSilence();
+    silence.startsAt = "2026-01-01T00:00:00Z";
+    silence.endsAt = "2026-01-01T01:00:00Z";
+
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2099-01-01T00:00:00Z"));
+    store.data.fillFormFromSilence(alertmanager, silence, "edit");
+    expect(store.data.operation).toBe("edit");
+    store.data.fillFormFromSilence(alertmanager, silence, "recreate");
+    expect(store.data.operation).toBe("recreate");
+    jest.useRealTimers();
   });
 
   it("fillFormFromSilence() creates payload that matches silence data", () => {
     const alertmanager = MockAlertmanager();
     const silence = MockSilence();
-    store.data.fillFormFromSilence(alertmanager, silence);
+    store.data.fillFormFromSilence(alertmanager, silence, "edit");
 
     expect(store.data.alertmanagers).toHaveLength(1);
     expect(store.data.alertmanagers[0]).toMatchObject({
@@ -720,6 +813,18 @@ describe("SilenceFormStore.data", () => {
     {
       matcher: {
         name: "foo",
+        value: "\\d+\\s+api",
+        isRegex: true,
+        isEqual: true,
+      },
+      result: {
+        name: "foo",
+        values: [{ ...StringToOption("\\d+\\s+api"), wasCreated: true }],
+      },
+    },
+    {
+      matcher: {
+        name: "foo",
         value: "10\\.0\\.0\\.1|10\\.0\\.0\\.2",
         isRegex: true,
         isEqual: true,
@@ -811,7 +916,11 @@ describe("SilenceFormStore.data", () => {
       const alertmanager = MockAlertmanager();
       const silence = MockSilence();
       silence.matchers = [t.matcher];
-      silenceFormStorestore.data.fillFormFromSilence(alertmanager, silence);
+      silenceFormStorestore.data.fillFormFromSilence(
+        alertmanager,
+        silence,
+        "edit",
+      );
 
       expect(silenceFormStorestore.data.matchers).toHaveLength(1);
       expect(silenceFormStorestore.data.matchers).toContainEqual(
@@ -835,9 +944,13 @@ describe("SilenceFormStore.data", () => {
   });
 
   it("toAlertmanagerPayload doesn't contain id when store.data.silenceID is null", () => {
+    store.data.setEditorRouteMember("am-old");
+    store.data.setEditorRevisionToken("revision-old");
     store.data.setSilenceID(null);
     inReactiveContext(() => {
       expect(store.data.toAlertmanagerPayload.id).toBeUndefined();
+      expect(store.data.editorRouteMember).toBe("");
+      expect(store.data.editorRevisionToken).toBe("");
     });
   });
 

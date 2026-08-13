@@ -36,7 +36,6 @@ function FormatBackendURI(path: string): string {
 // and decodes it into a dict with some extra metadata
 interface QueryParamsT {
   q: string[];
-  m?: string;
 }
 interface DecodeLocationSearchReturnT {
   params: QueryParamsT;
@@ -50,10 +49,6 @@ function DecodeLocationSearch(
 
   if (searchString !== "") {
     const usp = new URLSearchParams(searchString.split("?")[1]);
-    const mValue = usp.get("m");
-    if (mValue !== null) {
-      params.m = mValue;
-    }
     const qValues = [...usp.getAll("q"), ...usp.getAll("q[]")];
     let parsedQ: string | string[] | undefined;
     if (qValues.length > 0) {
@@ -152,6 +147,7 @@ interface AlertStoreDataT {
   setReceivers: (r: string[]) => void;
   setColors: (c: APIAlertsResponseColorsT) => void;
   readonly upstreamsWithErrors: APIAlertmanagerUpstreamT[];
+  readonly upstreamsWithWarnings: APIAlertmanagerUpstreamT[];
 }
 
 interface AlertStoreInfoT {
@@ -387,6 +383,11 @@ class AlertStore {
             }
           }
           return unhealthy;
+        },
+        get upstreamsWithWarnings(): APIAlertmanagerUpstreamT[] {
+          return this.upstreams.instances.filter(
+            (upstream) => upstream.warnings.length > 0,
+          );
         },
       },
       {
@@ -752,7 +753,9 @@ class AlertStore {
     alertID: string,
     comment?: string,
   ): Promise<{ ok: boolean; error: string | null }> => {
-    const uri = FormatBackendURI(`alerts/${encodeURIComponent(alertID)}/resolve`);
+    const uri = FormatBackendURI(
+      `alerts/${encodeURIComponent(alertID)}/resolve`,
+    );
     const body = comment && comment.trim() !== "" ? { comment } : undefined;
 
     try {

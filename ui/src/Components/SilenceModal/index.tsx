@@ -1,9 +1,10 @@
-import React, { FC } from "react";
+import React, { FC, useCallback, useRef, useState } from "react";
 
 import { observer } from "mobx-react-lite";
 
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faBellSlash } from "@fortawesome/free-solid-svg-icons/faBellSlash";
+import { faCheck } from "@fortawesome/free-solid-svg-icons/faCheck";
 import { faSpinner } from "@fortawesome/free-solid-svg-icons/faSpinner";
 
 import type { AlertStore } from "Stores/AlertStore";
@@ -11,6 +12,10 @@ import type { SilenceFormStore } from "Stores/SilenceFormStore";
 import type { Settings } from "Stores/Settings";
 import { Modal } from "Components/Modal";
 import { TooltipWrapper } from "Components/TooltipWrapper";
+import { Toast, ToastContainer } from "Components/Toast";
+import { ToastMessage } from "Components/Toast/ToastMessages";
+
+export type SilenceEditorCloseReasonT = "close" | "replace";
 
 // https://github.com/facebook/react/issues/14603
 const SilenceModalContent = React.lazy(() =>
@@ -24,6 +29,43 @@ const SilenceModal: FC<{
   silenceFormStore: SilenceFormStore;
   settingsStore: Settings;
 }> = ({ alertStore, silenceFormStore, settingsStore }) => {
+  const [success, setSuccess] = useState<{
+    target: string;
+    silenceID: string;
+    nonce: number;
+  } | null>(null);
+  const successCounterRef = useRef(0);
+  const closeGuardRef = useRef<(reason: SilenceEditorCloseReasonT) => boolean>(
+    () => true,
+  );
+  const registerCloseGuard = useCallback(
+    (guard: (reason: SilenceEditorCloseReasonT) => boolean) => {
+      closeGuardRef.current = guard;
+    },
+    [],
+  );
+  const canNavigate = useCallback(
+    (reason: SilenceEditorCloseReasonT) => closeGuardRef.current(reason),
+    [],
+  );
+  const requestClose = useCallback(() => {
+    if (canNavigate("close")) {
+      silenceFormStore.data.cancelEditorReplacement();
+      silenceFormStore.data.transitionEditorSession("CLOSE");
+      silenceFormStore.toggle.hide();
+    }
+  }, [canNavigate, silenceFormStore]);
+  const toggleModal = useCallback(() => {
+    if (silenceFormStore.toggle.visible) {
+      requestClose();
+    } else {
+      setSuccess(null);
+      silenceFormStore.data.transitionEditorSession("BEGIN_CREATE");
+      silenceFormStore.tab.setTab("editor");
+      silenceFormStore.toggle.show();
+    }
+  }, [requestClose, silenceFormStore]);
+
   return (
     <>
       <li
@@ -32,21 +74,29 @@ const SilenceModal: FC<{
         } ml-auto`}
       >
         <TooltipWrapper title="New silence">
-          <span
+          <button
+            type="button"
             id="components-new-silence"
-            className="nav-link cursor-pointer"
-            onClick={silenceFormStore.toggle.toggle}
+            className="nav-link cursor-pointer border-0 bg-transparent"
+            aria-label="New silence"
+            onClick={toggleModal}
           >
             <FontAwesomeIcon icon={faBellSlash} className="fa-fw" />
-          </span>
+          </button>
         </TooltipWrapper>
       </li>
       <Modal
+        ariaLabel="Silence editor"
+        size="modal-xl"
         isOpen={silenceFormStore.toggle.visible}
-        toggleOpen={silenceFormStore.toggle.toggle}
+        toggleOpen={requestClose}
         onExited={() => {
+          closeGuardRef.current = () => true;
+          silenceFormStore.data.cancelEditorReplacement();
+          silenceFormStore.data.transitionEditorSession("CLOSE");
           silenceFormStore.data.resetProgress();
           silenceFormStore.data.setAutofillMatchers(true);
+          silenceFormStore.data.setSilenceID(null);
         }}
       >
         <React.Suspense
@@ -60,10 +110,34 @@ const SilenceModal: FC<{
             alertStore={alertStore}
             silenceFormStore={silenceFormStore}
             settingsStore={settingsStore}
-            onHide={silenceFormStore.toggle.hide}
+            onHide={requestClose}
+            onSubmitted={(target, silenceID) => {
+              successCounterRef.current++;
+              setSuccess({
+                target,
+                silenceID,
+                nonce: successCounterRef.current,
+              });
+            }}
+            registerCloseGuard={registerCloseGuard}
           />
         </React.Suspense>
       </Modal>
+      {success ? (
+        <ToastContainer key={success.nonce}>
+          <Toast
+            icon={faCheck}
+            iconClass="text-success"
+            message={
+              <ToastMessage
+                title={`Silence submitted to ${success.target}`}
+                message={`Silence ID: ${success.silenceID}`}
+              />
+            }
+            hasClose
+          />
+        </ToastContainer>
+      ) : null}
     </>
   );
 };

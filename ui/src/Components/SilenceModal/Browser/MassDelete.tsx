@@ -36,7 +36,15 @@ export const SelectableSilence: FC<{
   silence: APIManagedSilenceT;
   selected: boolean;
   onSelect: (c: string, s: string, v: boolean) => void;
-}> = ({ alertStore, silenceFormStore, silence, selected, onSelect }) => {
+  onEditSilence: () => boolean;
+}> = ({
+  alertStore,
+  silenceFormStore,
+  silence,
+  selected,
+  onSelect,
+  onEditSilence,
+}) => {
   return (
     <div className="d-flex">
       <div className="form-check my-auto">
@@ -56,8 +64,10 @@ export const SelectableSilence: FC<{
         alertCount={silence.alertCount}
         alertCountAlwaysVisible={true}
         silence={silence.silence}
+        isExpired={silence.isExpired}
         alertStore={alertStore}
         silenceFormStore={silenceFormStore}
+        onEditSilence={onEditSilence}
         isNested={true}
       />
     </div>

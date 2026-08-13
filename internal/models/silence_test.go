@@ -53,7 +53,34 @@ func TestSilenceIsMatch(t *testing.T) {
 					models.NewSilenceMatcher("job", "foo", false, false),
 				},
 			},
-			labels:  map[string]string{"job": "bar"},
+			labels:  map[string]string{},
+			isMatch: true,
+		},
+		{
+			silence: models.Silence{
+				Matchers: []models.SilenceMatcher{
+					models.NewSilenceMatcher("job", "", false, false),
+				},
+			},
+			labels:  map[string]string{},
+			isMatch: false,
+		},
+		{
+			silence: models.Silence{
+				Matchers: []models.SilenceMatcher{
+					models.NewSilenceMatcher("job", ".*", true, false),
+				},
+			},
+			labels:  map[string]string{},
+			isMatch: false,
+		},
+		{
+			silence: models.Silence{
+				Matchers: []models.SilenceMatcher{
+					models.NewSilenceMatcher("job", ".*", true, true),
+				},
+			},
+			labels:  map[string]string{},
 			isMatch: true,
 		},
 		{
@@ -126,5 +153,24 @@ func TestSilenceIsMatch(t *testing.T) {
 					isMatch, tc.isMatch, tc.silence.Matchers, tc.labels)
 			}
 		})
+	}
+}
+
+func TestIsKnownSilenceStatus(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{status: "pending", want: true},
+		{status: "active", want: true},
+		{status: "expired", want: true},
+		{status: "", want: false},
+		{status: "future-state", want: false},
+		{status: " active ", want: false},
+	}
+	for _, tc := range tests {
+		if got := models.IsKnownSilenceStatus(tc.status); got != tc.want {
+			t.Errorf("IsKnownSilenceStatus(%q)=%t, want %t", tc.status, got, tc.want)
+		}
 	}
 }

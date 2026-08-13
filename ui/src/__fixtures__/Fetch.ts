@@ -17,6 +17,7 @@ const EmptyAPIResponse = (): APIAlertsResponseT => ({
         uri: "http://localhost",
         publicURI: "http://localhost",
         error: "",
+        warnings: [],
         version: "0.24.0",
         readonly: false,
         corsCredentials: "include",

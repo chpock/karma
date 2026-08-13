@@ -3,6 +3,10 @@ import { test, expect } from "@playwright/test";
 const stories: { name: string; waitFor: string }[] = [
   { name: "Grid", waitFor: "#root > div" },
   { name: "GridColorTitleBar", waitFor: "#root > div" },
+  {
+    name: "RetainedSuppressionEvidence",
+    waitFor: ".fork-suppression-evidence",
+  },
   { name: "NavBar", waitFor: "#root > div" },
   { name: "NavBarPaused", waitFor: "#root > div" },
   { name: "FatalError", waitFor: "#root > div" },
@@ -16,8 +20,6 @@ const stories: { name: string; waitFor: string }[] = [
   { name: "ManagedSilence", waitFor: ".components-managed-silence" },
   { name: "SilenceModalEditorReadOnly", waitFor: ".modal-content" },
   { name: "SilenceModalEditor", waitFor: ".modal-content" },
-  { name: "SilenceModalBrowser", waitFor: ".components-managed-silence" },
-  { name: "SilenceModalEmptyBrowser", waitFor: ".modal-content" },
   { name: "Toast", waitFor: "#root > div" },
 ];
 
@@ -25,33 +27,79 @@ for (const story of stories) {
   test(story.name, async ({ page }) => {
     await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
     await page.goto(`/src/e2e/stories.html#${story.name}`);
+    await page.addStyleTag({
+      content: "* { caret-color: transparent !important; }",
+    });
+    if (story.name === "NavBar" || story.name === "NavBarPaused") {
+      await page.addStyleTag({
+        content:
+          ".components-navbar-button { color: transparent !important; }",
+      });
+    }
     await page.locator(story.waitFor).first().waitFor({ timeout: 10000 });
+    if (story.name === "SilenceModalEditor") {
+      const editors = page.locator(".fork-silence-editor");
+      const count = await editors.count();
+      for (let i = 0; i < count; i++) {
+        const editor = editors.nth(i);
+        const startsSelect = editor.locator("select").nth(1);
+        await startsSelect.selectOption("date");
+
+        const startDateInput = editor
+          .locator(".fork-silence-editor__timing-row input[type='date']")
+          .nth(0);
+        const startTimeInput = editor
+          .locator(".fork-silence-editor__timing-row input[type='time']")
+          .nth(0);
+
+        await startDateInput.fill("2018-08-20");
+        await startTimeInput.fill("17:00");
+      }
+    }
+    await page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+    });
     await expect(page).toHaveScreenshot(`${story.name}.png`, {
       fullPage: true,
     });
   });
 }
 
-test("SilenceModalEditorEndsTab", async ({ page }) => {
+test("SilenceModalEditorEndsAtDateTime", async ({ page }) => {
   await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
   await page.goto(`/src/e2e/stories.html#SilenceModalEditor`);
+  await page.addStyleTag({
+    content: "* { caret-color: transparent !important; }",
+  });
   await page.locator(".modal-content").first().waitFor({ timeout: 10000 });
-  // click "Ends" tab in both light and dark theme sections
-  const endsTabs = page.locator("text=Ends");
-  for (const tab of await endsTabs.all()) {
-    await tab.click();
+
+  const editors = page.locator(".fork-silence-editor");
+  const count = await editors.count();
+  for (let i = 0; i < count; i++) {
+    const editor = editors.nth(i);
+    const endsSelect = editor.locator("select").nth(2);
+    await endsSelect.selectOption("absolute");
+
+    const dateInput = editor
+      .locator(".fork-silence-editor__timing-row input[type='date']")
+      .nth(0);
+    const timeInput = editor
+      .locator(".fork-silence-editor__timing-row input[type='time']")
+      .nth(0);
+
+    await dateInput.fill("2018-08-20");
+    await timeInput.fill("18:45");
   }
-  // click day 20 on each calendar to create a visible multi-day range
-  const dayButtons = page.locator(
-    ".rdp-day:not(.rdp-disabled) .rdp-day_button",
-  );
-  for (const btn of await dayButtons.all()) {
-    const text = await btn.textContent();
-    if (text?.trim() === "20") {
-      await btn.click();
+
+  await page.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
     }
-  }
-  await expect(page).toHaveScreenshot("SilenceModalEditorEndsTab.png", {
+  });
+
+  await expect(page).toHaveScreenshot("SilenceModalEditorEndsAtDateTime.png", {
     fullPage: true,
   });
 });

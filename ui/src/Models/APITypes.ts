@@ -1,9 +1,5 @@
 export type AlertStateT =
-  | "unprocessed"
-  | "active"
-  | "suppressed"
-  | "inactive"
-  | "resolved";
+  "unprocessed" | "active" | "suppressed" | "inactive" | "resolved";
 
 interface LabelT {
   name: string;
@@ -17,6 +13,120 @@ export interface AlertmanagerSilenceMatcherT {
   value: string;
   isRegex: boolean;
   isEqual: boolean;
+}
+
+interface SilenceEditorPreviewMatcherT {
+  name: string;
+  value: string;
+  isRegex: boolean;
+  isEqual: boolean;
+}
+
+export interface SilenceEditorPreviewRequestT {
+  target: string;
+  matchers: SilenceEditorPreviewMatcherT[];
+  cursor?: string;
+  snapshot?: string;
+  limit?: number;
+}
+
+export interface SilenceEditorSubmitRequestT {
+  target: string;
+  operation: "create" | "edit" | "recreate";
+  originalSilenceID?: string;
+  routeMember?: string;
+  revisionToken?: string;
+  payload: AlertmanagerSilencePayloadT;
+}
+
+export interface SilenceEditorSubmitResponseT {
+  status: string;
+  target: string;
+  mode?: "proxy" | "direct";
+  silenceID: string;
+  submittedBy: string;
+  correlationID: string;
+  outcomeUnknown?: boolean;
+  requiresReopen?: boolean;
+  direct?: {
+    endpoint: string;
+    headers: Record<string, string>;
+    corsCredentials: RequestCredentials;
+    member: string;
+    payload: AlertmanagerSilencePayloadT;
+  };
+}
+
+export interface SilenceEditorStatusResponseT {
+  isExpired: boolean;
+  member: string;
+  revisionToken: string;
+  silence: AlertmanagerSilencePayloadT;
+}
+
+export interface SilenceEditorErrorResponseT {
+  error: string;
+  outcomeUnknown?: boolean;
+  requiresReopen?: boolean;
+}
+
+interface SilenceEditorMatchedLabelT {
+  name: string;
+  value: string;
+}
+
+export interface SilenceEditorPreviewAlertT {
+  id: string;
+  state: AlertStateT;
+  rawState: AlertStateT;
+  isLive: boolean;
+  isSuppressed: boolean;
+  isResolved: boolean;
+  startsAt: string;
+  lastSeenAt?: string;
+  labels: LabelsT;
+  matchedLabels: SilenceEditorMatchedLabelT[];
+  matchedLabelNames: string[];
+  missingLabelNames: string[];
+}
+
+export interface SilenceEditorPreviewResponseT {
+  status: string;
+  target: string;
+  total: number;
+  returned: number;
+  limit: number;
+  nextCursor?: string;
+  snapshot?: string;
+  excludedNoRawLabels: number;
+  alerts: SilenceEditorPreviewAlertT[];
+}
+
+interface SilenceEditorLabelNameT {
+  name: string;
+  values: number;
+}
+
+export interface SilenceEditorLabelNamesResponseT {
+  status: string;
+  target: string;
+  total: number;
+  truncated: boolean;
+  labels: SilenceEditorLabelNameT[];
+}
+
+interface SilenceEditorLabelValueT {
+  value: string;
+  hits: number;
+}
+
+export interface SilenceEditorLabelValuesResponseT {
+  status: string;
+  target: string;
+  name: string;
+  total: number;
+  truncated: boolean;
+  values: SilenceEditorLabelValueT[];
 }
 
 export interface AlertmanagerSilencePayloadT {
@@ -57,7 +167,20 @@ export interface APIAlertT {
   isLive?: boolean;
   isResolved?: boolean;
   alertmanager: APIAlertmanagerStateT[];
+  suppressionCauses: APIAlertSuppressionCauseT[];
   receiver: string;
+}
+
+export interface APIAlertSuppressionCauseT {
+  target: string;
+  source: string;
+  silenceID: string;
+  resolutionStatus: "known" | "unresolved";
+  startsAt: string | null;
+  endsAt: string | null;
+  createdBy: string;
+  comment: string;
+  matchers: AlertmanagerSilenceMatcherT[];
 }
 
 interface SuppressedBreakdownT {
@@ -103,6 +226,7 @@ export interface APISilenceT {
   matchers: AlertmanagerSilenceMatcherT[];
   startsAt: string;
   endsAt: string;
+  isExpired: boolean;
   createdAt: string;
   createdBy: string;
   comment: string;
@@ -135,6 +259,14 @@ export interface APIAlertmanagerUpstreamT {
   headers: { [key: string]: string };
   corsCredentials: "omit" | "same-origin" | "include";
   error: string;
+  warnings: {
+    entryIndex: number;
+    silenceID: string;
+    status: string;
+    field: string;
+    reasonCode: string;
+    message: string;
+  }[];
   version: string;
   clusterMembers: string[];
 }

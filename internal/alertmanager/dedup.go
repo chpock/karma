@@ -162,9 +162,10 @@ func DedupSilences() []models.ManagedSilence {
 	for cluster, silenceMap := range silenceByCluster {
 		s := make([]models.ManagedSilence, 0, len(silenceMap))
 		for _, silence := range silenceMap {
+			silence.IsExpired = silence.EndsAt.Before(now)
 			managedSilence := models.ManagedSilence{
 				Cluster:   cluster,
-				IsExpired: silence.EndsAt.Before(now),
+				IsExpired: silence.IsExpired,
 				Silence:   silence,
 			}
 			s = append(s, managedSilence)

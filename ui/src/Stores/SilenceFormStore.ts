@@ -17,6 +17,11 @@ import type {
 } from "Models/APITypes";
 import { StringToOption, OptionT, MultiValueOptionT } from "Common/Select";
 import { QueryOperators } from "Common/Query";
+import {
+  SilenceEditorSessionEventT,
+  SilenceEditorSessionStateT,
+  transitionSilenceEditorSession,
+} from "Stores/SilenceEditorSession";
 
 let idCounter = 0;
 const uniqueId = (): string => String(++idCounter);
@@ -67,6 +72,26 @@ const MatcherToOperator = (
   return matcher.isEqual === false
     ? QueryOperators.NotEqual
     : QueryOperators.Equal;
+};
+
+const MatcherToExpression = (
+  matcher: MatcherT | MatcherWithIDT | AlertmanagerSilenceMatcherT,
+): string => {
+  const operator = MatcherToOperator(matcher);
+  let value: string;
+  if ("values" in matcher) {
+    const values = matcher.values.map((v) =>
+      v.wasCreated || !matcher.isRegex ? v.value : EscapeRegex(v.value),
+    );
+    value = values.length > 1 ? `(${values.join("|")})` : values[0] || "";
+  } else {
+    value = matcher.value;
+  }
+  const escaped = value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("\n", "\\n")
+    .replaceAll('"', '\\"');
+  return `${matcher.name}${operator}"${escaped}"`;
 };
 
 const AlertmanagerClustersToOption = (clusterDict: {
@@ -253,10 +278,7 @@ const GenerateAlertmanagerSilenceData = (
 };
 
 const UnpackRegexMatcherValues = (isRegex: boolean, value: string) => {
-  let val: string = value;
-  if (isRegex) {
-    val = UnescapeRegex(val);
-  }
+  const val = isRegex ? UnescapeRegex(value) : value;
   if (isRegex && val.match(/^\(([a-zA-Z0-9_\-. ]+\|)+[a-zA-Z0-9_\-. ]+\)$/)) {
     return val
       .slice(1, -1)
@@ -268,12 +290,13 @@ const UnpackRegexMatcherValues = (isRegex: boolean, value: string) => {
   ) {
     return val.split("|").map((v) => StringToOption(v));
   } else {
-    return [{ ...StringToOption(val), wasCreated: true }];
+    return [{ ...StringToOption(value), wasCreated: true }];
   }
 };
 
 type SilenceFormTabT = "editor" | "browser";
 type SilenceFormStageT = "form" | "preview" | "submit";
+type SilenceEditorOperationT = "create" | "edit" | "recreate";
 
 interface SilenceFormStoreToggleT {
   visible: boolean;
@@ -296,6 +319,7 @@ interface DurationT {
 }
 
 interface SilenceFormStoreDataT {
+  operation: SilenceEditorOperationT;
   currentStage: SilenceFormStageT;
   wasValidated: boolean;
   silenceID: null | undefined | string;
@@ -308,6 +332,19 @@ interface SilenceFormStoreDataT {
   requestsByCluster: { [key: string]: ClusterRequestT };
   autofillMatchers: boolean;
   resetInputs: boolean;
+  editorReplacementRevision: number;
+  editorSessionState: SilenceEditorSessionStateT;
+  editorRouteMember: string;
+  editorRevisionToken: string;
+  beginEditorReplacement: () => {
+    generation: number;
+    signal: AbortSignal;
+  };
+  isEditorReplacementCurrent: (generation: number) => boolean;
+  completeEditorReplacement: (generation: number) => boolean;
+  failEditorReplacement: (generation: number) => boolean;
+  cancelEditorReplacement: () => void;
+  transitionEditorSession: (event: SilenceEditorSessionEventT) => void;
   readonly toBase64: string;
   fromBase64: (s: string) => boolean;
   readonly isValid: boolean;
@@ -315,6 +352,9 @@ interface SilenceFormStoreDataT {
   resetProgress: () => void;
   resetSilenceID: () => void;
   setSilenceID: (id: string | null) => void;
+  setOperation: (operation: SilenceEditorOperationT) => void;
+  setEditorRouteMember: (member: string) => void;
+  setEditorRevisionToken: (token: string) => void;
   setAlertmanagers: (val: MultiValueOptionT[]) => void;
   setAutofillMatchers: (v: boolean) => void;
   setResetInputs: (v: boolean) => void;
@@ -332,6 +372,7 @@ interface SilenceFormStoreDataT {
   fillFormFromSilence: (
     alertmanager: APIAlertmanagerUpstreamT,
     silence: AlertmanagerSilencePayloadT,
+    operation: SilenceEditorOperationT,
   ) => void;
   setAuthor: (a: string) => void;
   setComment: (c: string) => void;
@@ -358,6 +399,8 @@ class SilenceFormStore {
   data: SilenceFormStoreDataT;
 
   constructor() {
+    let editorReplacementGeneration = 0;
+    let editorReplacementController: AbortController | null = null;
     this.toggle = observable(
       {
         visible: false as boolean,
@@ -401,6 +444,7 @@ class SilenceFormStore {
     // this form from that alert so user can easily silence that alert
     this.data = observable(
       {
+        operation: "create" as SilenceEditorOperationT,
         currentStage: "form" as SilenceFormStageT,
         wasValidated: false as boolean,
         silenceID: null as null | undefined | string,
@@ -413,6 +457,66 @@ class SilenceFormStore {
         requestsByCluster: {} as { [key: string]: ClusterRequestT },
         autofillMatchers: true as boolean,
         resetInputs: true as boolean,
+        editorReplacementRevision: 0,
+        editorSessionState: "closed" as SilenceEditorSessionStateT,
+        editorRouteMember: "",
+        editorRevisionToken: "",
+
+        beginEditorReplacement(): { generation: number; signal: AbortSignal } {
+          editorReplacementController?.abort();
+          editorReplacementController = new AbortController();
+          editorReplacementGeneration += 1;
+          this.editorSessionState = transitionSilenceEditorSession(
+            this.editorSessionState,
+            "BEGIN_CHECK",
+          );
+          return {
+            generation: editorReplacementGeneration,
+            signal: editorReplacementController.signal,
+          };
+        },
+
+        isEditorReplacementCurrent(generation: number): boolean {
+          return generation === editorReplacementGeneration;
+        },
+
+        completeEditorReplacement(generation: number): boolean {
+          if (generation !== editorReplacementGeneration) {
+            return false;
+          }
+          this.editorReplacementRevision += 1;
+          editorReplacementController = null;
+          this.editorSessionState = transitionSilenceEditorSession(
+            this.editorSessionState,
+            "CHECK_SUCCESS",
+          );
+          return true;
+        },
+
+        failEditorReplacement(generation: number): boolean {
+          if (generation !== editorReplacementGeneration) {
+            return false;
+          }
+          this.editorSessionState = transitionSilenceEditorSession(
+            this.editorSessionState,
+            "CHECK_FAILURE",
+          );
+          editorReplacementController = null;
+          return true;
+        },
+
+        cancelEditorReplacement(): void {
+          editorReplacementController?.abort();
+          editorReplacementController = null;
+          editorReplacementGeneration += 1;
+        },
+
+        transitionEditorSession(event: SilenceEditorSessionEventT): void {
+          this.editorSessionState = transitionSilenceEditorSession(
+            this.editorSessionState,
+            event,
+          );
+        },
 
         get toBase64() {
           const json = JSON.stringify({
@@ -457,6 +561,7 @@ class SilenceFormStore {
             this.comment = parsed.c;
 
             this.silenceID = null;
+            this.operation = "create";
             this.autofillMatchers = false;
             this.resetInputs = false;
             return true;
@@ -494,10 +599,38 @@ class SilenceFormStore {
 
         resetSilenceID() {
           this.silenceID = null;
+          this.operation = "create";
+          this.editorRouteMember = "";
+          this.editorRevisionToken = "";
+          this.editorSessionState = transitionSilenceEditorSession(
+            this.editorSessionState,
+            "BEGIN_CREATE",
+          );
         },
 
         setSilenceID(id: string | null) {
           this.silenceID = id;
+          this.operation = id === null ? "create" : "edit";
+          if (id === null) {
+            this.editorRouteMember = "";
+            this.editorRevisionToken = "";
+          }
+        },
+
+        setOperation(operation: SilenceEditorOperationT) {
+          this.operation = operation;
+          if (operation === "create") {
+            this.editorRouteMember = "";
+            this.editorRevisionToken = "";
+          }
+        },
+
+        setEditorRouteMember(member: string) {
+          this.editorRouteMember = member;
+        },
+
+        setEditorRevisionToken(token: string) {
+          this.editorRevisionToken = token;
         },
 
         setAlertmanagers(val: MultiValueOptionT[]) {
@@ -549,6 +682,9 @@ class SilenceFormStore {
           // ensure that silenceID is nulled, since it's used to edit silences
           // and this is used to silence groups
           this.silenceID = null;
+          this.operation = "create";
+          this.editorRouteMember = "";
+          this.editorRevisionToken = "";
           // disable matcher autofill
           this.autofillMatchers = false;
           // disable alertmanager input reset
@@ -558,8 +694,11 @@ class SilenceFormStore {
         fillFormFromSilence(
           alertmanager: APIAlertmanagerUpstreamT,
           silence: AlertmanagerSilencePayloadT,
+          operation: SilenceEditorOperationT,
         ) {
           this.silenceID = silence.id;
+          const endsAt = parseISO(silence.endsAt);
+          this.operation = operation;
 
           this.alertmanagers = AlertmanagerClustersToOption({
             [alertmanager.cluster]: alertmanager.clusterMembers,
@@ -577,7 +716,7 @@ class SilenceFormStore {
           this.matchers = matchers;
 
           this.startsAt = parseISO(silence.startsAt);
-          this.endsAt = parseISO(silence.endsAt);
+          this.endsAt = endsAt;
           this.comment = silence.comment;
           this.author = silence.createdBy;
 
@@ -675,9 +814,15 @@ class SilenceFormStore {
         resetProgress: action.bound,
         resetSilenceID: action.bound,
         setSilenceID: action.bound,
+        setOperation: action.bound,
         setAlertmanagers: action.bound,
         setAutofillMatchers: action.bound,
         setResetInputs: action.bound,
+        beginEditorReplacement: action.bound,
+        completeEditorReplacement: action.bound,
+        failEditorReplacement: action.bound,
+        cancelEditorReplacement: action.bound,
+        transitionEditorSession: action.bound,
         setStage: action.bound,
         setMatchers: action.bound,
         addEmptyMatcher: action.bound,
@@ -714,4 +859,5 @@ export {
   GenerateAlertmanagerSilenceData,
   NewClusterRequest,
   MatcherToOperator,
+  MatcherToExpression,
 };

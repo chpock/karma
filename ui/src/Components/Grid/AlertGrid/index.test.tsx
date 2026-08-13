@@ -152,6 +152,7 @@ const MockGroupList = (
         uri: "http://am",
         publicURI: "http://am",
         error: "",
+        warnings: [],
         version: "0.24.0",
         headers: {},
         corsCredentials: "omit",

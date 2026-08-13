@@ -1,6 +1,6 @@
 // Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
-exports[`<SilencePreview /> matches snapshot 1`] = `
+exports[`[legacy-only] <SilencePreview /> matches snapshot 1`] = `
 <DocumentFragment>
   <div
     class="mb-3"

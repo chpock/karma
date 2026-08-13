@@ -1,0 +1,1503 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compact silence editor POC</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #eef1f5;
+      --panel: #ffffff;
+      --panel-soft: #f8f9fa;
+      --line: #dee2e6;
+      --line-strong: #ced4da;
+      --text: #212529;
+      --muted: #7b8a8b;
+      --primary: #455a64;
+      --primary-dark: #3b4247;
+      --primary-soft: #ecf0f1;
+      --focus: #95a5a6;
+      --success: #18bc9c;
+      --success-dark: #13967d;
+      --danger: #e74c3c;
+      --syntax-label: #2d5f73;
+      --syntax-operator: #9a4f20;
+      --syntax-negative: #b23a48;
+      --syntax-regexp: #7c3f91;
+      --syntax-quote: #b07a18;
+      --syntax-value: #34745a;
+      --syntax-regexp-meta: #b12f78;
+      --matched: #fff1bd;
+      --matched-border: #e0b63f;
+      --active: #d94d4d;
+      --inactive: #e97826;
+      --suppressed: #238b91;
+      --suppressed-past: #2c79ad;
+      --resolved: #33425f;
+      --unprocessed: #7d8694;
+      --radius: 6px;
+      --shadow: 0 22px 65px rgb(24 31 44 / 24%);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background: var(--page);
+      font-size: 14px;
+    }
+
+    button, input, select, textarea { font: inherit; }
+    button { cursor: pointer; }
+
+    .app-header {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 22px;
+      color: #fff;
+      background: #455a64;
+      box-shadow: 0 1px 0 rgb(255 255 255 / 8%);
+    }
+
+    .brand { font-weight: 700; letter-spacing: .02em; }
+    .app-actions { display: flex; gap: 8px; }
+
+    .app-button {
+      border: 1px solid #596477;
+      border-radius: 4px;
+      padding: 6px 10px;
+      color: #e9edf4;
+      background: #303a4a;
+    }
+
+    .app-button:hover { background: #3a4658; }
+
+    .background-grid {
+      max-width: 1120px;
+      margin: 26px auto;
+      padding: 0 20px;
+      opacity: .56;
+    }
+
+    .background-card {
+      margin-bottom: 12px;
+      border: 1px solid #d5dae2;
+      border-left: 5px solid #d94d4d;
+      border-radius: 5px;
+      padding: 16px;
+      background: #fff;
+    }
+
+    .background-line { height: 9px; margin: 7px 0; border-radius: 4px; background: #dce1e8; }
+    .background-line.short { width: 42%; }
+
+    .backdrop {
+      position: fixed;
+      inset: 48px 0 0;
+      display: grid;
+      place-items: start center;
+      overflow: auto;
+      padding: 24px;
+      background: rgb(20 27 38 / 55%);
+    }
+
+    .backdrop.hidden { display: none; }
+
+    .modal {
+      width: min(100%, 980px);
+      max-height: calc(100vh - 96px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid #bcc4cf;
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .modal-header {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 49px;
+      padding: 9px 14px 9px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .title-wrap { display: flex; align-items: baseline; gap: 9px; }
+    .modal-title { margin: 0; font-size: 18px; font-weight: 650; }
+    .mode-note { color: var(--muted); font-size: 12px; }
+
+    .icon-button {
+      width: 32px;
+      height: 32px;
+      border: 0;
+      border-radius: 4px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 22px;
+      line-height: 1;
+    }
+
+    .icon-button:hover { color: var(--text); background: var(--panel-soft); }
+
+    .modal-body {
+      min-height: 0;
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
+
+    .form-area { padding: 14px 18px 13px; }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: minmax(210px, 1fr) minmax(130px, .58fr) minmax(250px, 1.2fr);
+      gap: 12px 14px;
+      align-items: start;
+    }
+
+    .field { min-width: 0; }
+    .field.full { grid-column: 1 / -1; }
+
+    .label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 20px;
+      margin-bottom: 4px;
+    }
+
+    label, .field-label { font-size: 12px; font-weight: 650; color: #485467; }
+    .hint { color: var(--muted); font-size: 11px; font-weight: 400; }
+    .text-danger { color: var(--danger) !important; }
+
+    .control {
+      width: 100%;
+      min-height: 35px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      padding: 7px 9px;
+      color: var(--text);
+      background: #fff;
+      outline: none;
+    }
+
+    .control:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgb(40 121 208 / 14%); }
+    .control.invalid { border-color: var(--danger); background: #fff7f8; }
+    textarea.control { min-height: 66px; resize: vertical; line-height: 1.35; }
+
+    .matcher-flow {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .matcher-list { display: contents; }
+
+    .matcher-item {
+      position: relative;
+      max-width: 100%;
+      display: inline-flex;
+      align-items: stretch;
+    }
+
+    .matcher-editor {
+      position: relative;
+      width: var(--matcher-width, 190px);
+      min-width: 145px;
+      max-width: min(430px, calc(100vw - 92px));
+      height: 35px;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-right: 0;
+      border-radius: 5px 0 0 5px;
+      background: var(--panel);
+    }
+
+    .matcher-highlight {
+      position: absolute;
+      z-index: 0;
+      inset: 0 auto 0 0;
+      min-width: max-content;
+      padding: 6px 8px;
+      color: var(--text);
+      white-space: pre;
+      pointer-events: none;
+      font: 600 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .matcher-expression {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      padding: 6px 8px;
+      color: transparent;
+      caret-color: var(--text);
+      background: transparent;
+      outline: none;
+      cursor: text;
+      font: 600 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .matcher-expression::placeholder { color: var(--muted); opacity: 1; }
+    .matcher-expression::selection { color: transparent; background: rgb(69 90 100 / 22%); }
+
+    .matcher-item.editing { z-index: 4; }
+    .matcher-item.editing .matcher-editor {
+      border-color: var(--primary);
+      background: var(--primary-soft);
+      box-shadow: none;
+    }
+    .matcher-editor.invalid { border-color: var(--danger); background: #fff7f8; }
+    .matcher-editor.invalid .matcher-highlight { color: #8e2935; }
+    .matcher-editor.invalid .matcher-highlight span {
+      color: #8e2935;
+      text-decoration: none;
+    }
+
+    .syntax-label { color: var(--syntax-label); }
+    .syntax-operator { color: var(--syntax-operator); font-weight: 750; }
+    .syntax-operator.negative { color: var(--syntax-negative); }
+    .syntax-operator.regexp { color: var(--syntax-regexp); }
+    .syntax-quote { color: var(--syntax-quote); }
+    .syntax-value { color: var(--syntax-value); }
+    .syntax-value.regexp {
+      text-decoration: underline dotted var(--syntax-regexp);
+      text-underline-offset: 3px;
+      text-decoration-thickness: 1px;
+    }
+    .syntax-regexp-meta {
+      border-radius: 2px;
+      color: var(--syntax-regexp-meta);
+      background: rgb(177 47 120 / 8%);
+      font-weight: 800;
+      text-decoration: none;
+    }
+
+    .matcher-remove {
+      width: 31px;
+      border: 1px solid var(--danger);
+      border-radius: 0 5px 5px 0;
+      padding: 0;
+      color: var(--danger);
+      background: var(--panel);
+      font-size: 18px;
+    }
+
+    .matcher-remove:hover { color: #fff; background: var(--danger); }
+
+    .matcher-autocomplete {
+      position: absolute;
+      z-index: 6;
+      top: calc(100% + 5px);
+      left: 0;
+      width: min(310px, calc(100vw - 48px));
+      overflow: hidden;
+      border: 1px solid #aab7c7;
+      border-radius: 5px;
+      background: #fff;
+      box-shadow: 0 9px 24px rgb(24 35 50 / 20%);
+    }
+
+    .matcher-suggestion {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 0;
+      border-bottom: 1px solid #edf0f4;
+      padding: 7px 9px;
+      color: #263447;
+      background: #fff;
+      text-align: left;
+      font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .matcher-suggestion:last-child { border-bottom: 0; }
+    .matcher-suggestion:hover, .matcher-suggestion.active { color: #fff; background: var(--primary); }
+    .matcher-suggestion:hover .matcher-suggestion-count,
+    .matcher-suggestion.active .matcher-suggestion-count { color: #ecf0f1; }
+    .matcher-suggestion-count { color: var(--muted); font: 10px ui-sans-serif, system-ui, sans-serif; white-space: nowrap; }
+
+    .add-matcher {
+      min-height: 35px;
+      border: 1px solid var(--success);
+      border-radius: 4px;
+      padding: 5px 9px;
+      color: #fff;
+      background: var(--success);
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .add-matcher:hover { color: #fff; background: var(--success-dark); }
+    .validation { min-height: 16px; padding-top: 3px; color: var(--danger); font-size: 11px; }
+
+    .target-field, .timing-field { min-width: 0; }
+    .timing-field { position: relative; }
+
+    .timing-summary {
+      min-height: 29px;
+      padding-top: 4px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
+    .timing-summary strong { color: #52606d; font-weight: 650; }
+
+    .timing-edit {
+      display: none;
+      border: 0;
+      padding: 0;
+      color: var(--primary);
+      background: transparent;
+      font-size: 10px;
+      font-weight: 650;
+    }
+
+    .timing-edit.visible { display: inline; }
+    .timing-edit:hover { text-decoration: underline; }
+
+    .timing-popover {
+      position: absolute;
+      z-index: 8;
+      top: 62px;
+      left: 0;
+      width: min(350px, calc(100vw - 48px));
+      display: none;
+      border: 1px solid #aab7c7;
+      border-radius: var(--radius);
+      padding: 10px;
+      background: #fff;
+      box-shadow: 0 10px 28px rgb(24 35 50 / 22%);
+    }
+
+    .timing-popover.visible { display: block; }
+    .end-field .timing-popover { right: 0; left: auto; }
+
+    .timing-popover-title {
+      margin-bottom: 8px;
+      color: #485467;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .timing-popover-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .timing-popover-hint { margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .timing-popover-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+    .timing-done {
+      border: 1px solid var(--primary);
+      border-radius: 4px;
+      padding: 5px 10px;
+      color: #fff;
+      background: var(--primary);
+      font-size: 11px;
+      font-weight: 650;
+    }
+
+    .timing-done:hover { background: var(--primary-dark); }
+
+    .actions {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      padding-top: 1px;
+    }
+
+    .button {
+      min-height: 34px;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      padding: 7px 14px;
+      font-weight: 600;
+    }
+
+    .button-secondary { border-color: var(--line-strong); color: #485467; background: #fff; }
+    .button-secondary:hover { background: var(--panel-soft); }
+    .button-primary { color: #fff; background: var(--primary); }
+    .button-primary:hover { background: var(--primary-dark); }
+    .button-primary:disabled { cursor: not-allowed; opacity: .45; }
+
+    .preview-area {
+      border-top: 1px solid var(--line);
+      background: #f5f7fa;
+    }
+
+    .preview-header {
+      min-height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #eef2f6;
+    }
+
+    .preview-title { display: flex; align-items: center; gap: 8px; font-weight: 650; }
+    .count { border-radius: 10px; padding: 2px 7px; color: #fff; background: #657186; font-size: 11px; }
+    .refresh-state { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+
+    .spinner {
+      width: 12px;
+      height: 12px;
+      display: none;
+      border: 2px solid #b8c4d1;
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin .65s linear infinite;
+    }
+
+    .refreshing .spinner { display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .alert-list {
+      min-height: 150px;
+      max-height: 290px;
+      overflow: auto;
+      padding: 7px 10px 10px;
+    }
+
+    .alert-row {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr);
+      gap: 9px;
+      align-items: start;
+      margin-top: 6px;
+      border: 1px solid #d8dde5;
+      border-radius: 5px;
+      padding: 8px;
+      background: #fff;
+    }
+
+    .alert-meta { min-width: 0; }
+    .alert-name { margin-top: 5px; overflow: hidden; color: #526074; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+    .state {
+      display: inline-flex;
+      align-items: center;
+      max-width: 100%;
+      border-radius: 3px;
+      padding: 3px 6px;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+    }
+
+    .state.active { background: var(--active); }
+    .state.inactive { background: var(--inactive); }
+    .state.suppressed-current { background: var(--suppressed); }
+    .state.suppressed-past { background: var(--suppressed-past); }
+    .state.resolved { background: var(--resolved); }
+    .state.unprocessed { background: var(--unprocessed); }
+
+    .labels { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+
+    .alert-label {
+      border: 1px solid #ccd3dd;
+      border-radius: 3px;
+      padding: 3px 5px;
+      color: #455164;
+      background: #f5f7f9;
+      font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow-wrap: anywhere;
+    }
+
+    .alert-label.matched {
+      border-color: var(--matched-border);
+      color: #654d00;
+      background: var(--matched);
+      box-shadow: inset 0 -2px 0 #e8c34d;
+    }
+
+    .empty {
+      display: grid;
+      min-height: 145px;
+      place-items: center;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 5;
+      display: none;
+      border-radius: 5px;
+      padding: 10px 13px;
+      color: #fff;
+      background: #263345;
+      box-shadow: 0 8px 28px rgb(0 0 0 / 25%);
+    }
+
+    .toast.visible { display: block; }
+
+    @media (max-width: 720px) {
+      .app-header { padding: 0 10px; }
+      .app-button span { display: none; }
+      .backdrop { inset: 48px 0 0; padding: 0; place-items: stretch; }
+      .modal { width: 100%; max-height: calc(100vh - 48px); border: 0; border-radius: 0; }
+      .modal-header { padding-left: 12px; }
+      .form-area { padding: 12px; }
+      .form-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+      .target-field, .field.full, .actions { grid-column: 1 / -1; }
+      .timing-popover-grid { grid-template-columns: 1fr; }
+      .preview-header { padding: 8px 12px; }
+      .alert-list { max-height: none; padding: 6px; }
+      .alert-row { grid-template-columns: 1fr; gap: 6px; }
+      .alert-name { display: inline; margin-left: 6px; }
+      .actions { position: sticky; bottom: 0; padding: 8px 0 0; background: #fff; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">karma / alerts</div>
+    <div class="app-actions">
+      <button class="app-button" id="openCreate">+ <span>Create silence</span></button>
+      <button class="app-button" id="openEdit">Edit <span>example</span></button>
+    </div>
+  </header>
+
+  <main class="background-grid" aria-hidden="true">
+    <div class="background-card"><div class="background-line short"></div><div class="background-line"></div></div>
+    <div class="background-card"><div class="background-line short"></div><div class="background-line"></div></div>
+    <div class="background-card"><div class="background-line short"></div><div class="background-line"></div></div>
+  </main>
+
+  <div class="backdrop" id="backdrop">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+      <header class="modal-header">
+        <div class="title-wrap">
+          <h1 class="modal-title" id="dialogTitle">Create silence</h1>
+          <span class="mode-note" id="modeNote">New Alertmanager rule</span>
+        </div>
+        <button class="icon-button" id="closeButton" aria-label="Close dialog">&times;</button>
+      </header>
+
+      <div class="modal-body">
+        <form class="form-area" id="silenceForm">
+          <div class="form-grid">
+            <div class="field target-field">
+              <div class="label-row"><label for="alertmanager">Alertmanager</label></div>
+              <select class="control" id="alertmanager">
+                <option value="prod-eu">prod-eu</option>
+                <option value="prod-us">prod-us</option>
+                <option value="staging">staging</option>
+              </select>
+            </div>
+
+            <div class="field timing-field start-field">
+              <div class="label-row"><label for="startMode">Starts</label><button class="timing-edit" id="editStartTime" type="button">Edit date</button></div>
+              <select class="control" id="startMode">
+                <option value="now">Now</option>
+                <option value="date" id="startDateOption">At date/time...</option>
+              </select>
+              <div class="timing-summary" id="startSummary">Immediately</div>
+              <div class="timing-popover" id="startDetail">
+                <div class="timing-popover-title">Schedule start</div>
+                <div class="timing-popover-grid">
+                  <div>
+                    <label for="startDate">Start date</label>
+                    <input class="control" id="startDate" type="date">
+                  </div>
+                  <div>
+                    <label for="startTime">Start time</label>
+                    <input class="control" id="startTime" type="time">
+                  </div>
+                </div>
+                <div class="timing-popover-hint" id="startDetailSummary"></div>
+                <div class="timing-popover-actions"><button class="timing-done" type="button" data-close-timing>Done</button></div>
+              </div>
+            </div>
+
+            <div class="field timing-field end-field">
+              <div class="label-row"><label for="endMode">Ends</label><button class="timing-edit" id="editEndTime" type="button">Edit value</button></div>
+              <select class="control" id="endMode">
+                <optgroup label="Duration">
+                  <option value="duration:1h" selected>In 1 hour</option>
+                  <option value="duration:2h">In 2 hours</option>
+                  <option value="duration:6h">In 6 hours</option>
+                  <option value="duration:12h">In 12 hours</option>
+                  <option value="duration:24h">In 24 hours</option>
+                  <option value="duration:2d">In 2 days</option>
+                  <option value="duration:4d">In 4 days</option>
+                  <option value="duration:1w">In 1 week</option>
+                  <option value="duration:1mo">In 1 month</option>
+                  <option value="duration:1y">In 1 year</option>
+                  <option value="duration:100y">In 100 years</option>
+                </optgroup>
+                <optgroup label="Other">
+                  <option value="custom" id="customDurationOption">Custom duration...</option>
+                  <option value="date" id="endDateOption">At date/time...</option>
+                </optgroup>
+              </select>
+              <div class="timing-summary" id="endSummary"></div>
+              <div class="timing-popover" id="customDetail">
+                <div class="timing-popover-title">Custom duration</div>
+                <input class="control" id="customDuration" value="3d12h" spellcheck="false" placeholder="Examples: 90m, 3d12h, 1w, 1y">
+                <div class="timing-popover-hint" id="customDurationHint">Fixed compounds such as 1w2d6h, or a standalone calendar value such as 3mo or 1y.</div>
+                <div class="timing-popover-actions"><button class="timing-done" type="button" data-close-timing>Done</button></div>
+              </div>
+              <div class="timing-popover" id="endDetail">
+                <div class="timing-popover-title">Exact end</div>
+                <div class="timing-popover-grid">
+                  <div>
+                    <label for="endDate">End date</label>
+                    <input class="control" id="endDate" type="date">
+                  </div>
+                  <div>
+                    <label for="endTime">End time</label>
+                    <input class="control" id="endTime" type="time">
+                  </div>
+                </div>
+                <div class="timing-popover-hint" id="endDetailSummary"></div>
+                <div class="timing-popover-actions"><button class="timing-done" type="button" data-close-timing>Done</button></div>
+              </div>
+            </div>
+
+            <div class="field full">
+              <div class="label-row">
+                <span class="field-label">Matchers</span>
+                <span class="hint">All matcher expressions must match</span>
+              </div>
+              <div class="matcher-flow">
+                <div class="matcher-list" id="matcherRows"></div>
+                <button class="add-matcher" id="addMatcher" type="button">+ Add matcher</button>
+              </div>
+              <div class="validation" id="matcherValidation"></div>
+            </div>
+
+            <div class="field full">
+              <div class="label-row"><label for="author">Author</label><span class="hint">Remembered locally</span></div>
+              <input class="control" id="author" autocomplete="name" placeholder="name or email">
+            </div>
+
+            <div class="field full">
+              <div class="label-row"><label for="comment">Comment</label></div>
+              <textarea class="control" id="comment" placeholder="Why is this silence needed?"></textarea>
+            </div>
+
+            <div class="actions">
+              <button class="button button-secondary" id="cancelButton" type="button">Cancel</button>
+              <button class="button button-primary" id="submitButton" type="submit">Create silence</button>
+            </div>
+          </div>
+        </form>
+
+        <section class="preview-area" aria-live="polite">
+          <header class="preview-header">
+            <div class="preview-title">Affected alerts <span class="count" id="alertCount">0</span></div>
+            <div class="refresh-state" id="refreshState"><span class="spinner"></span><span id="refreshText">Up to date</span></div>
+          </header>
+          <div class="alert-list" id="alertList"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const sampleAlerts = [
+      { id: "a-101", target: "prod-eu", state: "active", labels: { alertname: "ApiLatencyHigh", environment: "production", service: "api", region: "eu-west-1", severity: "critical", instance: "api-17" } },
+      { id: "a-102", target: "prod-eu", state: "inactive", labels: { alertname: "ApiLatencyHigh", environment: "production", service: "api", region: "eu-west-1", severity: "warning", instance: "api-09" } },
+      { id: "a-103", target: "prod-eu", state: "suppressed-current", labels: { alertname: "PaymentsErrorRate", environment: "production", service: "payments", region: "us-east-1", severity: "critical", instance: "pay-03" } },
+      { id: "a-104", target: "prod-eu", state: "suppressed-past", labels: { alertname: "PaymentsQueueLag", environment: "production", service: "payments", region: "eu-central-1", severity: "warning", instance: "pay-11" } },
+      { id: "a-105", target: "prod-eu", state: "resolved", labels: { alertname: "ApiPodCrashLoop", environment: "production", service: "api", region: "us-east-2", severity: "critical", instance: "api-04" } },
+      { id: "a-106", target: "prod-eu", state: "unprocessed", labels: { alertname: "ApiCertificateExpiry", environment: "production", service: "api", region: "ap-south-1", severity: "warning", instance: "gateway" } },
+      { id: "a-107", target: "staging", state: "active", labels: { alertname: "DatabaseConnections", environment: "staging", service: "database", region: "eu-west-1", severity: "warning", instance: "db-02", team: "platform" } },
+      { id: "a-108", target: "prod-us", state: "active", labels: { alertname: "WorkerBacklog", environment: "production", service: "worker", region: "us-east-1", severity: "critical", instance: "worker-08", team: "batch" } }
+    ];
+
+    function alertsForSelectedTarget() {
+      const target = el("alertmanager")?.value || "prod-eu";
+      return sampleAlerts.filter((alert) => alert.target === target);
+    }
+
+    function knownLabelsForSelectedTarget() {
+      const valuesByLabel = new Map();
+      alertsForSelectedTarget().forEach((alert) => Object.entries(alert.labels).forEach(([name, value]) => {
+        if (!valuesByLabel.has(name)) valuesByLabel.set(name, new Set());
+        valuesByLabel.get(name).add(value);
+      }));
+      return Array.from(valuesByLabel, ([name, values]) => ({ name, values: Array.from(values).sort() })).sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    const stateLabels = {
+      "active": "active",
+      "inactive": "inactive",
+      "suppressed-current": "suppressed / live",
+      "suppressed-past": "suppressed / non-live",
+      "resolved": "resolved",
+      "unprocessed": "unprocessed"
+    };
+
+    const matcherPattern = /^([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(=~|!~|!=|=)\s*"((?:\\.|[^"])*)"$/;
+    const matcherSyntaxPattern = /^(\s*)([a-zA-Z_:][a-zA-Z0-9_:]*)(\s*)(=~|!~|!=|=)(\s*)(")((?:\\.|[^"])*)(")(\s*)$/;
+    let matchers = [];
+    let mode = "create";
+    let startMode = "now";
+    let endMode = "duration:1h";
+    let timingNow = new Date();
+    let editingIndex = null;
+    let editingOriginal = "";
+    let activeSuggestionIndex = 0;
+    let refreshTimer;
+    let toastTimer;
+
+    const el = (id) => document.getElementById(id);
+
+    function newMatcher(expression = "") {
+      return { expression };
+    }
+
+    function parseMatcher(matcher) {
+      const result = matcher.expression.trim().match(matcherPattern);
+      if (!result) return null;
+      const parsed = { name: result[1], operator: result[2], value: result[3] };
+      if (parsed.operator === "=~" || parsed.operator === "!~") {
+        try {
+          new RegExp(parsed.value);
+        } catch (_) {
+          return null;
+        }
+      }
+      return parsed;
+    }
+
+    function matcherIsValid(matcher) {
+      return parseMatcher(matcher) !== null;
+    }
+
+    function matcherMatchesValue(matcher, actual) {
+      if (matcher.operator === "=") return actual === matcher.value;
+      if (matcher.operator === "!=") return actual !== matcher.value;
+      const result = new RegExp(matcher.value).test(actual);
+      return matcher.operator === "=~" ? result : !result;
+    }
+
+    function matcherSetIsValid() {
+      if (!matchers.length || !matchers.every(matcherIsValid)) return false;
+      return matchers.some((matcher) => !matcherMatchesValue(parseMatcher(matcher), ""));
+    }
+
+    function updateMatcherWidth(input) {
+      const characters = Math.max(16, Math.min(52, input.value.length + 5));
+      const editor = input.closest(".matcher-editor");
+      if (editor) editor.style.setProperty("--matcher-width", `${characters}ch`);
+    }
+
+    function appendSyntaxPart(root, text, className) {
+      if (!text) return;
+      const part = document.createElement("span");
+      part.className = className;
+      part.textContent = text;
+      root.append(part);
+    }
+
+    function appendRegexpValue(root, value) {
+      const container = document.createElement("span");
+      container.className = "syntax-value regexp";
+      let literal = "";
+      let inCharacterClass = false;
+
+      const flushLiteral = () => {
+        if (!literal) return;
+        appendSyntaxPart(container, literal, "syntax-regexp-literal");
+        literal = "";
+      };
+      const appendMeta = (text) => {
+        flushLiteral();
+        appendSyntaxPart(container, text, "syntax-regexp-meta");
+      };
+
+      for (let index = 0; index < value.length;) {
+        const character = value[index];
+        if (character === "\\") {
+          let end = Math.min(index + 2, value.length);
+          const escaped = value[index + 1];
+          if ((escaped === "p" || escaped === "P" || escaped === "x") && value[end] === "{") {
+            const closingBrace = value.indexOf("}", end + 1);
+            if (closingBrace !== -1) end = closingBrace + 1;
+          } else if (escaped && /[0-9]/.test(escaped)) {
+            while (end < value.length && end < index + 4 && /[0-9]/.test(value[end])) end += 1;
+          }
+          appendMeta(value.slice(index, end));
+          index = end;
+          continue;
+        }
+
+        if (character === "{") {
+          const closingBrace = value.indexOf("}", index + 1);
+          const quantifier = closingBrace === -1 ? "" : value.slice(index + 1, closingBrace);
+          if (closingBrace !== -1 && /^\d+(,\d*)?$/.test(quantifier)) {
+            appendMeta(value.slice(index, closingBrace + 1));
+            index = closingBrace + 1;
+            continue;
+          }
+        }
+
+        if (character === "[") {
+          appendMeta(character);
+          inCharacterClass = true;
+        } else if (character === "]") {
+          appendMeta(character);
+          inCharacterClass = false;
+        } else if (".^$*+?()|{}".includes(character)) {
+          appendMeta(character);
+        } else if (inCharacterClass && (character === "-" || character === ":")) {
+          appendMeta(character);
+        } else {
+          literal += character;
+        }
+        index += 1;
+      }
+
+      flushLiteral();
+      root.append(container);
+    }
+
+    function renderMatcherSyntax(root, matcher) {
+      root.replaceChildren();
+      if (!matcherIsValid(matcher)) {
+        root.textContent = matcher.expression;
+        return;
+      }
+      const parts = matcher.expression.match(matcherSyntaxPattern);
+      if (!parts) {
+        root.textContent = matcher.expression;
+        return;
+      }
+
+      const operator = parts[4];
+      const isRegexp = operator.includes("~");
+      const isNegative = operator.startsWith("!");
+      root.append(document.createTextNode(parts[1]));
+      appendSyntaxPart(root, parts[2], "syntax-label");
+      root.append(document.createTextNode(parts[3]));
+      appendSyntaxPart(root, operator, `syntax-operator${isRegexp ? " regexp" : ""}${isNegative ? " negative" : ""}`);
+      root.append(document.createTextNode(parts[5]));
+      appendSyntaxPart(root, parts[6], "syntax-quote");
+      if (isRegexp) appendRegexpValue(root, parts[7]);
+      else appendSyntaxPart(root, parts[7], "syntax-value");
+      appendSyntaxPart(root, parts[8], "syntax-quote");
+      root.append(document.createTextNode(parts[9]));
+    }
+
+    function updateMatcherValidation() {
+      if (!matchers.length) {
+        el("matcherValidation").textContent = "Add at least one matcher.";
+      } else if (!matchers.every(matcherIsValid)) {
+        el("matcherValidation").textContent = 'Use one complete expression per field, for example service="api" or service=~"api|web".';
+      } else if (!matcherSetIsValid()) {
+        el("matcherValidation").textContent = "At least one matcher must not match the empty string.";
+      } else {
+        el("matcherValidation").textContent = "";
+      }
+    }
+
+    function labelPrefix(expression) {
+      const prefix = expression.trim();
+      return /^[a-zA-Z_:][a-zA-Z0-9_:]*$/.test(prefix) || prefix === "" ? prefix.toLowerCase() : null;
+    }
+
+    function labelSuggestions(expression) {
+      const prefix = labelPrefix(expression);
+      if (prefix === null) return [];
+      return knownLabelsForSelectedTarget().filter((label) => label.name.toLowerCase().startsWith(prefix)).slice(0, 6);
+    }
+
+    function autocompleteState(index, input) {
+      const expression = matchers[index].expression;
+      const valueMatch = expression.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)=""$/);
+      const caretInsideEmptyValue = valueMatch && input.selectionStart === expression.length - 1 && input.selectionEnd === expression.length - 1;
+      if (caretInsideEmptyValue) {
+        const label = knownLabelsForSelectedTarget().find((knownLabel) => knownLabel.name === valueMatch[1]);
+        if (label) {
+          return {
+            kind: "value",
+            label: label.name,
+            entries: label.values.slice(0, 8).map((value) => ({ text: value, meta: "known value" })),
+          };
+        }
+      }
+
+      return {
+        kind: "label",
+        label: null,
+        entries: labelSuggestions(expression).map((label) => ({ text: label.name, meta: `${label.values.length} values` })),
+      };
+    }
+
+    function focusMatcher(index, caretPosition) {
+      requestAnimationFrame(() => {
+        const input = el("matcherRows").querySelectorAll("input")[index];
+        if (!input) return;
+        input.focus();
+        const caret = caretPosition ?? input.value.length;
+        input.setSelectionRange(caret, caret);
+        const item = input.closest(".matcher-item");
+        if (item) renderAutocomplete(item, index, input);
+      });
+    }
+
+    function beginMatcherEdit(index) {
+      if (editingIndex === index) return;
+      if (editingIndex !== null && !matcherIsValid(matchers[editingIndex])) {
+        focusMatcher(editingIndex);
+        return;
+      }
+      editingIndex = index;
+      editingOriginal = matchers[index].expression;
+      activeSuggestionIndex = 0;
+      renderMatchers();
+      focusMatcher(index);
+    }
+
+    function commitMatcherEdit(index) {
+      if (!matcherIsValid(matchers[index])) return;
+      editingIndex = null;
+      editingOriginal = "";
+      activeSuggestionIndex = 0;
+      renderMatchers();
+      schedulePreview();
+      validateForm();
+    }
+
+    function cancelMatcherEdit(index) {
+      if (editingOriginal === "") matchers.splice(index, 1);
+      else matchers[index].expression = editingOriginal;
+      editingIndex = null;
+      editingOriginal = "";
+      activeSuggestionIndex = 0;
+      renderMatchers();
+      schedulePreview();
+      validateForm();
+    }
+
+    function selectLabelSuggestion(index, labelName) {
+      matchers[index].expression = `${labelName}=""`;
+      activeSuggestionIndex = 0;
+      renderMatchers();
+      schedulePreview();
+      validateForm();
+      focusMatcher(index, matchers[index].expression.length - 1);
+    }
+
+    function selectValueSuggestion(index, labelName, value) {
+      const escapedValue = value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+      matchers[index].expression = `${labelName}="${escapedValue}"`;
+      activeSuggestionIndex = 0;
+      renderMatchers();
+      schedulePreview();
+      validateForm();
+      focusMatcher(index, matchers[index].expression.length - 1);
+    }
+
+    function selectAutocompleteEntry(index, state, entry) {
+      if (state.kind === "value") selectValueSuggestion(index, state.label, entry.text);
+      else selectLabelSuggestion(index, entry.text);
+    }
+
+    function renderAutocomplete(item, index, input) {
+      item.querySelector(".matcher-autocomplete")?.remove();
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-controls");
+      if (editingIndex !== index) return;
+      const state = autocompleteState(index, input);
+      if (!state.entries.length) return;
+      activeSuggestionIndex = Math.min(activeSuggestionIndex, state.entries.length - 1);
+      const dropdown = document.createElement("div");
+      dropdown.className = "matcher-autocomplete";
+      dropdown.setAttribute("role", "listbox");
+      dropdown.setAttribute("aria-label", state.kind === "value" ? `Known values for ${state.label}` : "Known alert labels");
+      state.entries.forEach((entry, suggestionIndex) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `matcher-suggestion${suggestionIndex === activeSuggestionIndex ? " active" : ""}`;
+        button.setAttribute("role", "option");
+        button.setAttribute("aria-selected", String(suggestionIndex === activeSuggestionIndex));
+        const name = document.createElement("span");
+        name.textContent = entry.text;
+        const count = document.createElement("span");
+        count.className = "matcher-suggestion-count";
+        count.textContent = entry.meta;
+        button.append(name, count);
+        button.addEventListener("mousedown", (event) => event.preventDefault());
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          selectAutocompleteEntry(index, state, entry);
+        });
+        dropdown.append(button);
+      });
+      item.append(dropdown);
+      input.setAttribute("aria-expanded", "true");
+      input.setAttribute("aria-controls", `matcher-suggestions-${index}`);
+      dropdown.id = `matcher-suggestions-${index}`;
+    }
+
+    function renderMatchers() {
+      const root = el("matcherRows");
+      root.replaceChildren();
+      matchers.forEach((matcher, index) => {
+        const item = document.createElement("div");
+        const isEditing = editingIndex === index;
+        item.className = `matcher-item${isEditing ? " editing" : ""}`;
+        const editor = document.createElement("div");
+        editor.className = `matcher-editor${matcherIsValid(matcher) ? "" : " invalid"}`;
+        const highlight = document.createElement("div");
+        highlight.className = "matcher-highlight";
+        highlight.setAttribute("aria-hidden", "true");
+        renderMatcherSyntax(highlight, matcher);
+        const input = document.createElement("input");
+        input.className = "matcher-expression";
+        input.value = matcher.expression;
+        input.title = matcher.expression;
+        input.placeholder = 'label="value"';
+        input.spellcheck = false;
+        input.autocomplete = "off";
+        input.readOnly = !isEditing;
+        input.setAttribute("aria-label", `Matcher ${index + 1} expression, ${isEditing ? "editing" : "resting"}`);
+        input.setAttribute("aria-expanded", "false");
+        input.addEventListener("focus", () => {
+          if (editingIndex !== index) beginMatcherEdit(index);
+        });
+        input.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (editingIndex !== index) beginMatcherEdit(index);
+          else renderAutocomplete(item, index, input);
+        });
+        input.addEventListener("input", (event) => {
+          matcher.expression = event.currentTarget.value;
+          event.currentTarget.title = matcher.expression;
+          editor.classList.toggle("invalid", !matcherIsValid(matcher));
+          renderMatcherSyntax(highlight, matcher);
+          updateMatcherWidth(event.currentTarget);
+          updateMatcherValidation();
+          schedulePreview();
+          validateForm();
+          activeSuggestionIndex = 0;
+          renderAutocomplete(item, index, event.currentTarget);
+        });
+        input.addEventListener("scroll", () => {
+          highlight.style.transform = `translateX(${-input.scrollLeft}px)`;
+        });
+        input.addEventListener("keyup", (event) => {
+          if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+            activeSuggestionIndex = 0;
+            renderAutocomplete(item, index, input);
+          }
+        });
+        input.addEventListener("keydown", (event) => {
+          const state = autocompleteState(index, input);
+          if (event.key === "ArrowDown" && state.entries.length) {
+            event.preventDefault();
+            activeSuggestionIndex = (activeSuggestionIndex + 1) % state.entries.length;
+            renderAutocomplete(item, index, input);
+          } else if (event.key === "ArrowUp" && state.entries.length) {
+            event.preventDefault();
+            activeSuggestionIndex = (activeSuggestionIndex - 1 + state.entries.length) % state.entries.length;
+            renderAutocomplete(item, index, input);
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            if (state.entries.length) selectAutocompleteEntry(index, state, state.entries[activeSuggestionIndex]);
+            else commitMatcherEdit(index);
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            cancelMatcherEdit(index);
+          }
+        });
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "matcher-remove";
+        remove.setAttribute("aria-label", `Remove matcher ${index + 1}`);
+        remove.title = "Remove matcher";
+        remove.textContent = "x";
+        remove.addEventListener("click", (event) => {
+          event.stopPropagation();
+          matchers.splice(index, 1);
+          if (editingIndex === index) editingIndex = null;
+          else if (editingIndex !== null && editingIndex > index) editingIndex -= 1;
+          renderMatchers();
+          schedulePreview();
+          validateForm();
+        });
+
+        editor.append(highlight, input);
+        item.append(editor, remove);
+        root.append(item);
+        updateMatcherWidth(input);
+        renderAutocomplete(item, index, input);
+      });
+      updateMatcherValidation();
+    }
+
+    function addMatcher() {
+      matchers.push(newMatcher());
+      editingIndex = matchers.length - 1;
+      editingOriginal = "";
+      activeSuggestionIndex = 0;
+      renderMatchers();
+      schedulePreview();
+      validateForm();
+      focusMatcher(editingIndex);
+    }
+
+    function matcherMatches(matcher, labels) {
+      const actual = labels[matcher.name] || "";
+      return matcherMatchesValue(matcher, actual);
+    }
+
+    function renderAlerts() {
+      const list = el("alertList");
+      const parsedMatchers = matchers.map(parseMatcher);
+      const validMatchers = parsedMatchers.filter((matcher) => matcher !== null);
+      const allMatchersValid = validMatchers.length === matchers.length;
+      const matching = alertsForSelectedTarget().filter((alert) => validMatchers.length > 0 && allMatchersValid && validMatchers.every((matcher) => matcherMatches(matcher, alert.labels)));
+      list.replaceChildren();
+      el("alertCount").textContent = String(matching.length);
+
+      if (!matching.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.innerHTML = !matchers.length
+          ? "<div><strong>Add a matcher to preview affected alerts</strong></div>"
+          : !allMatchersValid
+            ? "<div><strong>Complete every matcher expression</strong><br><small>Preview waits until all fields are valid.</small></div>"
+            : "<div><strong>No affected alerts</strong><br><small>Change or remove a matcher to broaden the preview.</small></div>";
+        list.append(empty);
+        return;
+      }
+
+      const matcherNames = new Set(validMatchers.map((matcher) => matcher.name));
+      matching.forEach((alert) => {
+        const row = document.createElement("article");
+        row.className = "alert-row";
+        const meta = document.createElement("div");
+        meta.className = "alert-meta";
+        const state = document.createElement("span");
+        state.className = `state ${alert.state}`;
+        state.textContent = stateLabels[alert.state];
+        const name = document.createElement("div");
+        name.className = "alert-name";
+        name.textContent = `${alert.labels.alertname} / ${alert.id}`;
+        meta.append(state, name);
+
+        const labels = document.createElement("div");
+        labels.className = "labels";
+        Object.entries(alert.labels).forEach(([key, value]) => {
+          const label = document.createElement("span");
+          label.className = `alert-label${matcherNames.has(key) ? " matched" : ""}`;
+          label.textContent = `${key}=${value}`;
+          if (matcherNames.has(key)) label.title = "Label participates in silence matching";
+          labels.append(label);
+        });
+        row.append(meta, labels);
+        list.append(row);
+      });
+    }
+
+    function schedulePreview() {
+      clearTimeout(refreshTimer);
+      el("refreshState").classList.add("refreshing");
+      el("refreshText").textContent = "Refreshing...";
+      refreshTimer = setTimeout(() => {
+        renderAlerts();
+        el("refreshState").classList.remove("refreshing");
+        el("refreshText").textContent = "Up to date";
+      }, 380);
+    }
+
+    function parseFixedDuration(value) {
+      const match = value.match(/^(?:([1-9]\d*)w)?(?:([1-9]\d*)d)?(?:([1-9]\d*)h)?(?:([1-9]\d*)m)?(?:([1-9]\d*)s)?(?:([1-9]\d*)ms)?$/);
+      if (!match || match.slice(1).every((part) => part === undefined)) return null;
+      const multipliers = [604800000, 86400000, 3600000, 60000, 1000, 1];
+      let total = 0;
+      for (let index = 0; index < multipliers.length; index += 1) {
+        if (match[index + 1] === undefined) continue;
+        const amount = Number(match[index + 1]);
+        if (!Number.isSafeInteger(amount)) return null;
+        total += amount * multipliers[index];
+      }
+      return Number.isSafeInteger(total) && total > 0 ? total : null;
+    }
+
+    function addCalendarDuration(start, value) {
+      const match = value.match(/^([1-9]\d*)(mo|y)$/);
+      if (!match) return null;
+      const amount = Number(match[1]);
+      if (!Number.isSafeInteger(amount)) return null;
+      const result = new Date(start);
+      const originalDay = result.getDate();
+      result.setDate(1);
+      if (match[2] === "mo") result.setMonth(result.getMonth() + amount);
+      else result.setFullYear(result.getFullYear() + amount);
+      const lastDay = new Date(result.getFullYear(), result.getMonth() + 1, 0).getDate();
+      result.setDate(Math.min(originalDay, lastDay));
+      return result;
+    }
+
+    function addDuration(start, value) {
+      const calendar = addCalendarDuration(start, value);
+      if (calendar) return calendar;
+      const milliseconds = parseFixedDuration(value);
+      return milliseconds ? new Date(start.getTime() + milliseconds) : null;
+    }
+
+    function padTimePart(value) {
+      return String(value).padStart(2, "0");
+    }
+
+    function setLocalDateTime(dateInputID, timeInputID, value) {
+      el(dateInputID).value = `${value.getFullYear()}-${padTimePart(value.getMonth() + 1)}-${padTimePart(value.getDate())}`;
+      el(timeInputID).value = `${padTimePart(value.getHours())}:${padTimePart(value.getMinutes())}`;
+    }
+
+    function readLocalDateTime(dateInputID, timeInputID) {
+      const date = el(dateInputID).value;
+      const time = el(timeInputID).value;
+      if (!date || !time) return null;
+      const value = new Date(`${date}T${time}`);
+      return Number.isNaN(value.getTime()) ? null : value;
+    }
+
+    function formatLocalTimestamp(value) {
+      return value.toLocaleString([], {
+        year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+      });
+    }
+
+    function formatUTCTimestamp(value) {
+      return value.toLocaleString([], {
+        year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC", timeZoneName: "short",
+      });
+    }
+
+    function formatCompactTimestamp(value) {
+      return value.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+
+    function calculateStart(referenceTime = timingNow) {
+      return startMode === "now" ? new Date(referenceTime) : readLocalDateTime("startDate", "startTime");
+    }
+
+    function calculateEnd(referenceTime = timingNow) {
+      if (endMode === "date") return readLocalDateTime("endDate", "endTime");
+      const start = calculateStart(referenceTime);
+      if (!start) return null;
+      const duration = endMode === "custom" ? el("customDuration").value.trim() : endMode.replace("duration:", "");
+      const anchor = new Date(Math.max(start.getTime(), referenceTime.getTime()));
+      return addDuration(anchor, duration);
+    }
+
+    function setTimestampSummary(element, value, leadingText = "") {
+      if (!value) {
+        element.innerHTML = '<strong class="text-danger">Invalid date/time</strong>';
+        return;
+      }
+      element.innerHTML = `<strong>${leadingText}${formatLocalTimestamp(value)}</strong><br>${formatUTCTimestamp(value)}`;
+    }
+
+    function closeTimingPopovers() {
+      document.querySelectorAll(".timing-popover.visible").forEach((popover) => popover.classList.remove("visible"));
+    }
+
+    function openTimingPopover(id) {
+      closeTimingPopovers();
+      el(id).classList.add("visible");
+    }
+
+    function renderTiming() {
+      const start = calculateStart();
+      const end = calculateEnd();
+      el("startMode").value = startMode;
+      el("endMode").value = endMode;
+      el("editStartTime").classList.toggle("visible", startMode === "date");
+      el("editEndTime").classList.toggle("visible", endMode === "custom" || endMode === "date");
+
+      if (startMode === "now") {
+        el("startSummary").innerHTML = `<strong>At submission</strong><br>Estimate: ${formatUTCTimestamp(timingNow)}`;
+        el("startDateOption").textContent = "At date/time...";
+      } else {
+        setTimestampSummary(el("startSummary"), start);
+        setTimestampSummary(el("startDetailSummary"), start);
+        if (start) el("startDateOption").textContent = `At ${formatCompactTimestamp(start)}`;
+      }
+
+      if (endMode === "custom") {
+        el("customDurationOption").textContent = `Custom: ${el("customDuration").value || "..."}`;
+        const customIsValid = addDuration(new Date(0), el("customDuration").value.trim()) !== null;
+        el("customDuration").classList.toggle("invalid", !customIsValid);
+        el("customDurationHint").classList.toggle("text-danger", !customIsValid);
+        el("customDurationHint").textContent = customIsValid
+          ? "Fixed compounds such as 1w2d6h, or a standalone calendar value such as 3mo or 1y."
+          : "Use descending unique units, for example 1w2d6h30m, or standalone 3mo/1y.";
+      } else {
+        el("customDurationOption").textContent = "Custom duration...";
+        el("customDuration").classList.remove("invalid");
+        el("customDurationHint").classList.remove("text-danger");
+      }
+      if (endMode === "date" && end) el("endDateOption").textContent = `At ${formatCompactTimestamp(end)}`;
+      else el("endDateOption").textContent = "At date/time...";
+
+      if (start && end && end <= start) {
+        el("endSummary").innerHTML = '<strong class="text-danger">End must be after start</strong>';
+        el("endDetailSummary").innerHTML = '<strong class="text-danger">End must be after start</strong>';
+      } else if (end && end <= timingNow) {
+        el("endSummary").innerHTML = '<strong class="text-danger">End must be in the future</strong>';
+        el("endDetailSummary").innerHTML = '<strong class="text-danger">End must be in the future</strong>';
+      } else {
+        setTimestampSummary(el("endSummary"), end);
+        setTimestampSummary(el("endDetailSummary"), end);
+      }
+    }
+
+    function validateForm() {
+      const start = calculateStart();
+      const end = calculateEnd();
+      const timingValid = start !== null && end !== null && end > start && end > timingNow;
+      el("submitButton").disabled = !timingValid || !matcherSetIsValid() || !el("author").value.trim() || !el("comment").value.trim();
+    }
+
+    function setDefaults(nextMode) {
+      mode = nextMode;
+      const editing = mode === "edit";
+      el("dialogTitle").textContent = editing ? "Edit silence" : "Create silence";
+      el("modeNote").textContent = editing ? "Silence 7f3a9c2d" : "New Alertmanager rule";
+      el("submitButton").textContent = editing ? "Update silence" : "Create silence";
+      el("alertmanager").value = "prod-eu";
+      el("alertmanager").disabled = editing;
+      matchers = editing
+        ? [newMatcher('environment="production"'), newMatcher('service=~"api|payments"'), newMatcher('severity="critical"')]
+        : [newMatcher('environment="production"'), newMatcher('service=~"api|payments"')];
+      editingIndex = null;
+      editingOriginal = "";
+      activeSuggestionIndex = 0;
+      timingNow = new Date();
+      startMode = editing ? "date" : "now";
+      endMode = editing ? "date" : "duration:1h";
+      const scheduledStart = editing ? new Date(timingNow.getTime() - 2 * 3600000) : new Date(timingNow.getTime() + 24 * 3600000);
+      const scheduledEnd = editing ? new Date(timingNow.getTime() + 12 * 3600000) : new Date(timingNow.getTime() + 3600000);
+      setLocalDateTime("startDate", "startTime", scheduledStart);
+      setLocalDateTime("endDate", "endTime", scheduledEnd);
+      el("customDuration").value = "3d12h";
+      el("author").value = editing ? "oncall@example.com" : (localStorage.getItem("karma-poc-silence-author-v1") || "");
+      el("comment").value = editing ? "Maintenance window for API and payments rollout." : "";
+      closeTimingPopovers();
+      renderMatchers();
+      renderTiming();
+      schedulePreview();
+      validateForm();
+    }
+
+    function openDialog(nextMode) {
+      setDefaults(nextMode);
+      el("backdrop").classList.remove("hidden");
+      setTimeout(() => el("alertmanager").focus(), 0);
+    }
+
+    function closeDialog() {
+      el("backdrop").classList.add("hidden");
+    }
+
+    function showToast(message) {
+      clearTimeout(toastTimer);
+      el("toast").textContent = message;
+      el("toast").classList.add("visible");
+      toastTimer = setTimeout(() => el("toast").classList.remove("visible"), 2600);
+    }
+
+    el("addMatcher").addEventListener("click", addMatcher);
+    el("alertmanager").addEventListener("change", () => {
+      renderMatchers();
+      schedulePreview();
+    });
+    el("author").addEventListener("input", validateForm);
+    el("comment").addEventListener("input", validateForm);
+    el("startMode").addEventListener("change", (event) => {
+      startMode = event.currentTarget.value;
+      if (startMode === "date") openTimingPopover("startDetail");
+      else closeTimingPopovers();
+      renderTiming();
+      validateForm();
+    });
+    el("startMode").addEventListener("click", () => {
+      if (startMode === "date") openTimingPopover("startDetail");
+    });
+    el("editStartTime").addEventListener("click", () => openTimingPopover("startDetail"));
+    el("endMode").addEventListener("change", (event) => {
+      endMode = event.currentTarget.value;
+      if (endMode === "custom") openTimingPopover("customDetail");
+      else if (endMode === "date") openTimingPopover("endDetail");
+      else closeTimingPopovers();
+      renderTiming();
+      validateForm();
+    });
+    el("endMode").addEventListener("click", () => {
+      if (endMode === "custom") openTimingPopover("customDetail");
+      else if (endMode === "date") openTimingPopover("endDetail");
+    });
+    el("editEndTime").addEventListener("click", () => {
+      if (endMode === "custom") openTimingPopover("customDetail");
+      else if (endMode === "date") openTimingPopover("endDetail");
+    });
+    ["startDate", "startTime", "endDate", "endTime", "customDuration"].forEach((id) => {
+      el(id).addEventListener("input", () => {
+        renderTiming();
+        validateForm();
+      });
+    });
+    document.querySelectorAll("[data-close-timing]").forEach((button) => button.addEventListener("click", closeTimingPopovers));
+    el("cancelButton").addEventListener("click", closeDialog);
+    el("closeButton").addEventListener("click", closeDialog);
+    el("openCreate").addEventListener("click", () => openDialog("create"));
+    el("openEdit").addEventListener("click", () => openDialog("edit"));
+    el("silenceForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      timingNow = new Date();
+      renderTiming();
+      validateForm();
+      if (el("submitButton").disabled) return;
+      localStorage.setItem("karma-poc-silence-author-v1", el("author").value.trim());
+      showToast(mode === "edit" ? "POC: silence would be updated" : "POC: silence would be created");
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".timing-field")) closeTimingPopovers();
+      if (editingIndex === null) return;
+      const index = editingIndex;
+      const item = el("matcherRows").querySelectorAll(".matcher-item")[index];
+      if (item && !item.contains(event.target)) commitMatcherEdit(index);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !el("backdrop").classList.contains("hidden")) closeDialog();
+    });
+
+    openDialog("create");
+  </script>
+</body>
+</html>

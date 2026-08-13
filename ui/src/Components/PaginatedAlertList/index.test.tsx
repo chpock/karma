@@ -23,6 +23,7 @@ beforeEach(() => {
         publicURI: "http://localhost:9093",
         readonly: false,
         error: "",
+        warnings: [],
         version: "0.24.0",
         headers: {},
         corsCredentials: "include",

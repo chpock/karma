@@ -46,6 +46,7 @@ beforeEach(() => {
         publicURI: "http://example.com",
         readonly: false,
         error: "",
+        warnings: [],
         version: "0.24.0",
         headers: {},
         corsCredentials: "include",
@@ -88,6 +89,7 @@ const renderBrowser = () => {
         alertStore={alertStore}
         silenceFormStore={silenceFormStore}
         settingsStore={settingsStore}
+        onEditSilence={() => true}
       />
     </ThemeContext>,
   );
@@ -737,6 +739,7 @@ describe("<SilenceDelete />", () => {
           publicURI: "http://example.com",
           readonly: false,
           error: "",
+          warnings: [],
           version: "0.24.0",
           headers: {},
           corsCredentials: "include",
@@ -749,6 +752,7 @@ describe("<SilenceDelete />", () => {
           publicURI: "http://example.com",
           readonly: false,
           error: "",
+          warnings: [],
           version: "0.24.0",
           headers: {},
           corsCredentials: "include",
@@ -761,6 +765,7 @@ describe("<SilenceDelete />", () => {
           publicURI: "http://example.com",
           readonly: false,
           error: "",
+          warnings: [],
           version: "0.24.0",
           headers: {},
           corsCredentials: "include",
@@ -773,6 +778,7 @@ describe("<SilenceDelete />", () => {
           publicURI: "http://example.com",
           readonly: false,
           error: "",
+          warnings: [],
           version: "0.24.0",
           headers: {},
           corsCredentials: "include",
@@ -897,6 +903,7 @@ describe("<SilenceDelete />", () => {
           publicURI: "http://example.com",
           readonly: false,
           error: "",
+          warnings: [],
           version: "0.24.0",
           headers: {},
           corsCredentials: "include",

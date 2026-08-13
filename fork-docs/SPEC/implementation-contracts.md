@@ -6,11 +6,12 @@ Keep fork behavior isolated while integrating the refactored state model end-to-
 
 ## 2. Minimal upstream touchpoints
 
-Only these upstream-owned files are integration hooks:
+The persistent lifecycle subsystem uses these primary upstream-owned integration
+hooks:
 
 - `cmd/karma/main.go`
   - lifecycle bootstrap/shutdown hooks
-  - fork routes (`/alerts/{id}/resolve`, `/alerts-history/stats`, `/alerts-history/warning`)
+  - fork routes (Resolve, lifecycle stats/warning, and `/silence-editor/*`)
 - `cmd/karma/timer.go`
   - post-poll lifecycle cycle hook
 - `cmd/karma/views.go`
@@ -28,7 +29,8 @@ All lifecycle logic remains in fork files/modules.
 ## 4. Filter and projection contract
 
 - `@state` must operate on projected state (`alert.State`), not AM-only states.
-- `@is_live` is lifecycle-aware and falls back to AM presence for legacy alerts without lifecycle fields.
+- `@is_live` is lifecycle-aware and falls back to current Alertmanager presence for
+  live API objects without persisted lifecycle dimensions.
 - `@state` is not flagged as Alertmanager-only filter anymore.
 
 ## 5. Resolve contract
@@ -37,9 +39,16 @@ All lifecycle logic remains in fork files/modules.
 - Non-live + already resolved is `200` no-op (`applied=false`).
 - Live alerts return conflict.
 
-## 6. Event logging contract
+## 6. Event and runtime logging contracts
 
-Every logical mutation writes exactly one `alert_events` row with full old/new tuple and reason metadata.
+Every logical alert mutation writes exactly one `alert_events` row with full old/new
+tuple and reason metadata.
+
+Application runtime logging is a separate operator-facing contract. It covers
+operation routing, timing, queue execution, warnings, failures, and user actions and
+is defined in `runtime-logging-contract.md`. A SQLite event row does not satisfy the
+runtime logging contract, and a runtime log record does not replace durable event
+history.
 
 ## 7. Testing contract
 
@@ -50,6 +59,8 @@ Required checks for this model:
 - model snapshot tests (`internal/models`)
 - lifecycle integration tests (`cmd/karma` focused tests)
 - UI TypeScript build
+- root `make lint`, production Vite build, and focused compact/retained-editor tests
+- Playwright visual coverage when modal layout or interaction changes
 
 ## 8. Write and transaction contract
 
@@ -59,7 +70,8 @@ Required checks for this model:
 - A failed source refresh updates health only and preserves the last successful source set and fingerprint.
 - SQLite busy timeout is 5 seconds as a defensive boundary for brief external/process-independent locks.
 
-## 9. Docs and migration contract
+## 9. Docs and schema contract
 
 - Schema and API/UI contracts must be synced in `fork-docs/SPEC/`.
-- Any future schema bump remains subject to `fork-docs/SPEC/db-migrations.md` + dedicated migration note.
+- The preview runtime supports only fresh schema v1. Any other database layout is
+  rejected without modification.

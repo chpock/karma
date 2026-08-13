@@ -14,12 +14,13 @@ func TestMustCompileAnchored(t *testing.T) {
 	}
 
 	testCases := []testCaseT{
-		{in: "foo", out: "^foo$"},
-		{in: "^foo", out: "^foo$"},
-		{in: "foo$", out: "^foo$"},
-		{in: "^foo$", out: "^foo$"},
-		{in: "^^foo$", out: "^^foo$"},
-		{in: "foo$$", out: "^foo$$"},
+		{in: "foo", out: "^(?:foo)$"},
+		{in: "^foo", out: "^(?:^foo)$"},
+		{in: "foo$", out: "^(?:foo$)$"},
+		{in: "^foo$", out: "^(?:^foo$)$"},
+		{in: "^^foo$", out: "^(?:^^foo$)$"},
+		{in: "foo$$", out: "^(?:foo$$)$"},
+		{in: `price\$`, out: `^(?:price\$)$`},
 	}
 
 	for _, testCase := range testCases {
@@ -40,12 +41,13 @@ func TestCompileAnchored(t *testing.T) {
 	}
 
 	testCases := []testCaseT{
-		{in: "foo", out: "^foo$"},
-		{in: "^foo", out: "^foo$"},
-		{in: "foo$", out: "^foo$"},
-		{in: "^foo$", out: "^foo$"},
-		{in: "^^foo$", out: "^^foo$"},
-		{in: "foo$$", out: "^foo$$"},
+		{in: "foo", out: "^(?:foo)$"},
+		{in: "^foo", out: "^(?:^foo)$"},
+		{in: "foo$", out: "^(?:foo$)$"},
+		{in: "^foo$", out: "^(?:^foo$)$"},
+		{in: "^^foo$", out: "^(?:^^foo$)$"},
+		{in: "foo$$", out: "^(?:foo$$)$"},
+		{in: `price\$`, out: `^(?:price\$)$`},
 		{in: ".******", out: "", error: true},
 	}
 
@@ -62,5 +64,35 @@ func TestCompileAnchored(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCompileAnchoredAlternationIsFullyAnchored(t *testing.T) {
+	r, err := regex.CompileAnchored("api|payments")
+	if err != nil {
+		t.Fatalf("expected regex compile success: %v", err)
+	}
+	for _, value := range []string{"api", "payments"} {
+		if !r.MatchString(value) {
+			t.Fatalf("expected %q to match", value)
+		}
+	}
+	for _, value := range []string{"api-v2", "legacy-payments"} {
+		if r.MatchString(value) {
+			t.Fatalf("expected %q not to match", value)
+		}
+	}
+}
+
+func TestCompileAnchoredEscapedTrailingDollar(t *testing.T) {
+	r, err := regex.CompileAnchored(`price\$`)
+	if err != nil {
+		t.Fatalf("expected regex compile success: %v", err)
+	}
+	if !r.MatchString("price$") {
+		t.Fatalf("expected literal trailing dollar to match")
+	}
+	if r.MatchString("price") {
+		t.Fatalf("expected missing dollar not to match")
 	}
 }

@@ -1,6 +1,6 @@
 import { FC, memo } from "react";
 
-import type { APISilenceT } from "Models/APITypes";
+import type { APIManagedSilenceT } from "Models/APITypes";
 import type { AlertStore } from "Stores/AlertStore";
 import type { SilenceFormStore } from "Stores/SilenceFormStore";
 import { ManagedSilence } from "Components/ManagedSilence";
@@ -19,15 +19,20 @@ const GetSilenceFromStore = (
   alertStore: AlertStore,
   cluster: string,
   silenceID: string,
-): APISilenceT | null => {
+): APIManagedSilenceT | null => {
   const amSilences = alertStore.data.silences[cluster];
   if (!amSilences) return null;
 
   // next check if alertmanager has our silence ID
-  const silence = amSilences[silenceID];
-  if (!silence) return null;
+  const found = amSilences[silenceID];
+  if (!found) return null;
 
-  return silence;
+  return {
+    cluster,
+    alertCount: 0,
+    isExpired: found.isExpired,
+    silence: found,
+  };
 };
 
 const RenderSilence: FC<{
@@ -55,7 +60,8 @@ const RenderSilence: FC<{
         cluster={cluster}
         alertCount={0}
         alertCountAlwaysVisible={false}
-        silence={silence}
+        silence={silence.silence}
+        isExpired={silence.isExpired}
         alertStore={alertStore}
         silenceFormStore={silenceFormStore}
         onDidUpdate={afterUpdate}

@@ -15,6 +15,7 @@ Adopt tuple-based lifecycle model:
 
 - `raw_state` (`active|suppressed|unprocessed`) - upstream fact,
 - `is_live` - live presence flag,
+- `is_suppressed` - normalized suppression fact,
 - `is_resolved` - manual operator flag.
 
 User-facing `state` is a deterministic projection of this tuple.
@@ -32,5 +33,7 @@ If resolved alert reappears live (`is_live=true`), resolved flag is cleared by p
 
 - Clear separation of upstream state fact vs lifecycle semantics.
 - Suppressed alerts can remain suppressed even when non-live (no forced suppressed->inactive mapping).
+- Silence recheck can establish suppression without overwriting upstream-owned
+  `raw_state`; live reappearance recalculates suppression from the new upstream fact.
 - Better retrospective traceability through tuple-aware event history.
 - Requires additive API/UI fields (`rawState`, `isLive`, `isResolved`) and filter extension (`@is_live`).

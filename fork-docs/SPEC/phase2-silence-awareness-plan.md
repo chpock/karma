@@ -2,15 +2,19 @@
 
 ## 1. Purpose of this document
 
-This document is a working plan for Phase 2.
+This document records the requirements, findings, decisions, and rationale that
+produced the implemented silence-aware lifecycle.
 
-Planning order is strict:
+The original planning order was:
 
 1. collect requirements and target outcomes,
 2. derive required data inputs,
 3. design DB schema/storage contracts.
 
-The document now contains reviewed requirements, data inputs, and decided architecture contracts. Exact SQLite DDL and migration details live in `phase2-silence-awareness-schema.md`. Phase 2 is implemented in code (`internal/fork/alertlifecycle`) and this plan remains the design rationale record.
+The document contains reviewed requirements, data inputs, and decided architecture
+contracts. Exact SQLite DDL lives in `phase2-silence-awareness-schema.md`. The
+feature is implemented in `internal/fork/alertlifecycle`; this document remains the
+design rationale record.
 
 ## 2. Why Phase 2 is needed
 
@@ -18,7 +22,9 @@ Primary goal of Phase 2 (original requirement):
 
 - when silence rules change, the system must re-check stored `inactive` alerts and decide whether some of them should now become `suppressed`.
 
-Current Phase 1 behavior has no silence-driven reclassification layer, so newly created/updated silences cannot affect already-stored inactive alerts.
+Before Phase 2, newly created/updated silences could not affect already-stored
+inactive alerts. The implemented recheck worker now provides that behavior under the
+reliability rules below.
 
 Secondary goal:
 
@@ -34,7 +40,8 @@ Secondary goal:
 
 ### 3.2 Domain outcomes
 
-1. No semantic regression of Phase 1 tuple model (`raw_state`, `is_live`, `is_resolved`).
+1. Extend the earlier tuple with normalized `is_suppressed` without changing the
+   ownership of `raw_state`, `is_live`, or `is_resolved`.
 2. Silence-aware logic is additive and deterministic.
 3. No state inference when upstream silence data is incomplete/unreliable.
 
@@ -165,7 +172,7 @@ For each inactive alert candidate we need:
 1. alert identity (`alert_id`)
 2. labels used for silence matching (already in lifecycle store)
 3. relevant upstream set for this alert
-4. current tuple fields (`state`, `raw_state`, `is_live`, `is_resolved`)
+4. current dimensions (`state`, `raw_state`, `is_live`, `is_suppressed`, `is_resolved`)
 
 Why this is required:
 
@@ -238,10 +245,11 @@ Step 2 is complete when we agree on:
 
 After checklist approval, we move to step 3 (DB schema and indexes).
 
-## 9. Storage and schema design (step 3, under review)
+## 9. Storage and schema design history
 
-The first schema draft was independently reviewed and is **not approved for implementation**.
-The review found domain-model issues that must be resolved before final DDL.
+The first schema draft was rejected by review. The findings below explain why the
+implemented schema differs from that draft; they are historical rationale, not the
+current runtime contract.
 
 ## 10. Review findings
 
@@ -281,7 +289,7 @@ Required correction:
 
 The exact label set that produced the stored alert identity must be used. If future identity logic allows one alert identity to carry different labels per upstream, matching labels must be normalized into a per-upstream child table rather than another JSON column rewrite.
 
-The capture point and legacy-row behavior are decided in D9.
+The capture point and missing-label behavior are decided in D9.
 
 ### F3. Mutable current snapshot + immutable revisions creates two sources of truth (high)
 
@@ -363,18 +371,18 @@ Required correction:
 
 ## 11. Corrected domain model direction
 
-### 11.1 Alert state extension
+### 11.1 Alert state extension (implemented)
 
-Proposed additions to `alert_states`:
+Implemented additions to `alert_states`:
 
 1. `is_suppressed INTEGER NOT NULL DEFAULT 0`
-2. `match_labels_json TEXT` (nullable only for legacy rows whose original labels are unavailable)
+2. `match_labels_json TEXT` (nullable only when original labels are unavailable)
 3. `relevant_sources_json TEXT NOT NULL` (upstream name + cluster identity captured with the alert)
 4. `suppression_observed_at TEXT` (nullable local time when current suppression episode was first observed/established)
 
 No generic row-version/trigger column is used; D14 defines semantic CAS using existing lifecycle fields.
 
-Proposed additions to `alert_events`:
+Implemented additions to `alert_events`:
 
 1. `old_is_suppressed INTEGER` (nullable)
 2. `new_is_suppressed INTEGER NOT NULL`
@@ -393,7 +401,7 @@ Every authoritative change to the live `SilencedBy` cause set appends a history 
 
 ### 11.3 Required poll integration DTO
 
-The v4 `LiveAlertSnapshot` is not sufficient for Phase 2. The v5 snapshot contract must add:
+The lifecycle `LiveAlertSnapshot` contract includes:
 
 ```text
 MatchLabelsJSON string
@@ -409,7 +417,7 @@ Integration rules:
 - full revision payloads are resolved through the same pinned silence sync snapshot; missing payload produces D16 unresolved cause member,
 - source/silence snapshot rows are persisted before alert cause-history rows in the same poll transaction,
 - live alert update remains valid even when one cause reference is unresolved, while Phase 2 promotion requires complete revisions,
-- v5 transition code writes `is_suppressed` on every insert/update/disappearance/reappearance and must satisfy the schema projection CHECK.
+- transition code writes `is_suppressed` on every insert/update/disappearance/reappearance and must satisfy the schema projection CHECK.
 
 Required integration tests:
 
@@ -418,11 +426,13 @@ Required integration tests:
 - one/many/missing live `SilencedBy` payloads create known/partial cause sets correctly,
 - live suppressed -> non-live preserves `is_suppressed=true`,
 - fresh live active/unprocessed reappearance clears `is_suppressed`,
-- all live and non-live update paths satisfy the v5 projection CHECK.
+- all live and non-live update paths satisfy the projection CHECK.
 
 ## 12. Reviewed normalized schema
 
-Exact DDL, constraints, indexes, queries, cleanup rules, and v4 -> v5 migration order are specified in `phase2-silence-awareness-schema.md`. This section describes table ownership and domain intent.
+Exact DDL, constraints, indexes, queries, and cleanup rules are specified in
+`phase2-silence-awareness-schema.md`. This section describes table ownership and
+domain intent.
 
 ### 12.1 `alertmanager_sources`
 
@@ -443,7 +453,7 @@ confirmed end; a reappearance after confirmed absence creates the next episode.
 ### 12.4 `silence_revisions`
 
 Immutable source content within an episode: canonical matchers, declared time
-window, author/comment/annotations, source update time, raw payload, and separate
+window, author/comment/annotations, source update time, and separate
 content/evaluation fingerprints. Observation/ticket bookkeeping is non-semantic.
 
 ### 12.5 `alertmanager_source_silences`
@@ -669,12 +679,51 @@ Rationale:
 
 Decision:
 
+#### AN INVALID SILENCE ENTRY DOES NOT EXIST FOR KARMA
+
+Karma treats every object in a syntactically valid Alertmanager silence-response
+array as an independent untrusted entry. Each entry is decoded and validated before
+it reaches the Alertmanager model, matching, lifecycle reconciliation, recheck
+evaluation, or storage.
+
+An invalid individual entry produces a warning and is skipped. Other valid entries
+from the same response continue normally, and the source remains successfully
+synchronized. Karma never infers, substitutes, retains, or processes an invalid
+field value. This includes a missing identity or required field, unsupported state,
+wrong JSON type, malformed date, invalid time range, malformed matcher or regular
+expression, unsafe matcher set, and duplicate valid ID.
+
+The skipped entry is absent from the current successful source snapshot. If Karma
+knew the rule from an earlier successful snapshot, normal confirmed-absence
+handling removes its current source relation. Its open episode closes as
+`absent_confirmed` after every configured HA member confirms the absence. A later
+valid response is a new appearance and starts a new episode.
+
+Unknown additional JSON fields and absent optional metadata (`updatedAt`,
+`annotations`, `createdAt`) are accepted for forward/backward compatibility. Only
+a syntactically malformed top-level response, where reliable entry boundaries
+cannot be established, fails the whole source refresh and preserves the last
+confirmed snapshot.
+
 - extend the typed Alertmanager silence mapper/model to collect `status.state`, `updatedAt`, and `annotations`,
 - source `status.state` from a successful response is authoritative (`pending|active|expired`),
+- if one silence response object is invalid, ignore only that entry as though it
+  was absent from the response; continue processing all valid entries from the same
+  Alertmanager response,
+- record each ignored rule as a structured non-fatal warning containing the
+  Alertmanager instance, silence ID, received status, and reason; log it at warning
+  level and expose it through the existing notification UI,
+- do not mark the Alertmanager unhealthy for an ignored rule; replace the complete
+  warning set on every successful silence poll so a later valid response clears the
+  warning,
+- apply the same complete response validation when reading an existing rule for
+  edit/recreate, while leaving outgoing create/update request payload parsing
+  separate because request payloads do not contain response-only fields,
 - do not synthesize or expose `createdAt`; Alertmanager API v2 does not provide it,
 - store local `first_observed_at` / `last_observed_at` separately from nullable `source_updated_at`,
-- preserve normalized raw source payload in `raw_rule_payload_json` for forward compatibility,
-- unknown/missing source status makes that source snapshot incomplete and blocks Phase 2 transitions,
+- unknown/missing **source synchronization status** makes the complete source
+  snapshot unreliable and blocks silence-driven transitions; this is distinct
+  from one malformed rule in an otherwise successful source response,
 - missing `updatedAt` is stored as NULL and does not block matching,
 - missing annotations are normalized to an empty object.
 
@@ -688,7 +737,7 @@ Rationale:
 
 - D3 requires Alertmanager-reported state rather than locally inferred temporal state,
 - upstream `updatedAt` and local observation time describe different facts and must not be conflated,
-- typed fields provide validation while raw payload avoids future information loss,
+- typed fields provide validation for the data the lifecycle feature uses,
 - nullable handling remains honest for malformed or non-standard upstream responses.
 
 ### D7. Alertmanager HA disagreement (decided)
@@ -731,7 +780,7 @@ Consequences:
 
 The intermediate `is_suppression_retained` / `suppression_retained_at` proposal was accepted while the new field was modeled only as a non-live overlay. D13 replaces that model with a normalized suppression axis and is the current contract.
 
-### D9. Raw matching-label capture and legacy rows (decided)
+### D9. Raw matching-label capture (decided)
 
 Decision:
 
@@ -743,14 +792,13 @@ Decision:
 - never reconstruct matching labels from display-oriented `labels_json`, group labels, or fingerprint,
 - canonical raw labels for the same fingerprint must agree; disagreement makes that alert unevaluable and surfaces integrity warning.
 
-Legacy-row contract:
+Missing-label contract:
 
-- existing rows without original labels store `match_labels_json=NULL`,
+- rows without original labels store `match_labels_json=NULL`,
 - NULL rows do not participate in Phase 2 matching or reclassification,
 - no transformed-label fallback is allowed,
 - a later live reappearance fills original labels and makes the row evaluable,
-- stats expose `missingMatchLabels`, and persistent warning reports incomplete Phase 2 coverage,
-- operators may rebuild a preview DB to obtain immediate complete coverage, but rebuild is not automatic.
+- preview reports the excluded count rather than guessing.
 
 Rationale:
 
@@ -768,7 +816,8 @@ Decision:
 - a newer poll never cancels or truncates an older queued context,
 - enqueued intermediate contexts are not coalesced away because D1 makes every observed matching silence relevant to persistent non-live suppression,
 - unchanged/non-promotion-capable contexts do not create full recheck jobs,
-- jobs run in background batches of 1000 with persistent cursor/progress, no startup blocking, and no artificial throttle,
+- jobs run in background batches of 1000 with immutable candidate membership and
+  persisted per-candidate progress, no startup blocking, and no artificial throttle,
 - crash/restart resumes the same job idempotently,
 - a failed predecessor blocks later jobs and keeps persistent warning,
 - per-alert eligibility is revalidated immediately before conditional update,
@@ -827,7 +876,6 @@ Storage/time contract:
 
 - keep nullable `source_updated_at` and separate local `first_observed_at` / `last_observed_at`,
 - if `updatedAt` is missing, content changes still create revisions and no timestamp is synthesized,
-- preserve `raw_rule_payload_json` without observation-only status,
 - store observed status in current `alertmanager_source_silences` and copy it into immutable job-rule rows when a recheck is enqueued.
 
 Rationale:
@@ -885,12 +933,6 @@ Ownership:
 - `is_suppressed` is the normalized lifecycle suppression fact,
 - `alert_suppression_cause_history` and its members own rule provenance,
 - missing silence evidence never causes the UI to invent a rule (raw suppression can be inhibition-derived).
-
-Migration/backfill:
-
-- existing live rows derive `is_suppressed` from `raw_state`,
-- existing non-live rows projected as suppressed are backfilled with `is_suppressed=true`,
-- if the beginning of a legacy suppression episode cannot be derived from events, `suppression_observed_at` remains NULL rather than using an invented timestamp.
 
 Rationale:
 
@@ -981,7 +1023,7 @@ Set-based history:
 No-silence provenance:
 
 - a live suppressed alert with empty `SilencedBy` receives a `cause_status=none` record (for example inhibition-only),
-- legacy/incomplete provenance uses `cause_status=unknown`,
+- provenance whose source cannot identify silence IDs uses `cause_status=unknown`,
 - neither case invents a silence rule,
 - a parent history record can therefore have zero members.
 
@@ -1025,7 +1067,7 @@ Status/invariant model:
 known   -> one or more members; every member has an exact revision
 partial -> one or more members; at least one revision is unresolved
 none    -> authoritative SilencedBy set is empty; zero members
-unknown -> legacy provenance cannot identify silence IDs; zero members
+unknown -> source provenance cannot identify silence IDs; zero members
 ```
 
 HA/source behavior:
@@ -1132,7 +1174,8 @@ Rationale:
 - D11 was designed when evidence consisted of many independent match episodes,
 - D15 replaced those episodes with one complete set parent, making current cardinality one event -> zero/one cause set,
 - a join row and relation enum would be speculative overhead,
-- if a future feature truly introduces many-to-many event context, a join table can be added and backfilled additively from `transition_event_id`.
+- if a future feature truly introduces many-to-many event context, its storage
+  contract must be designed with that feature.
 
 Transaction/FK contract:
 
@@ -1164,13 +1207,13 @@ Rationale:
 
 Decision:
 
-- schema v5 does not add an unused lease table, writer epoch, or fencing columns,
+- schema v1 does not add an unused lease table, writer epoch, or fencing columns,
 - current SQLite mode remains explicitly single replica,
 - every Alertmanager-derived mutation is routed through one reconciler boundary,
 - fetch happens outside the DB transaction; persistence is a short atomic transaction,
 - jobs/cursors/pinned inputs live entirely in DB rather than process memory,
 - manual resolve remains a conditional transaction available from any future API replica,
-- future remote-RDBMS support adds DB-backed lease/fencing as an additive infrastructure migration,
+- future remote-RDBMS support may add DB-backed lease/fencing infrastructure,
 - one database/schema represents one logical karma deployment; independent deployments use separate databases/schemas.
 
 Future protocol:
@@ -1189,12 +1232,12 @@ Rationale:
 
 ## 17. Step 3 acceptance checklist
 
-Schema stage is complete only when:
+Schema-stage completion required:
 
 1. D1-D22 are decided (D13 supersedes D8; D20 supersedes D11 linkage shape),
 2. normalized suppression and append-only causal history remain separate concepts in schema/API,
-3. raw matching-label capture point and legacy NULL behavior are selected,
+3. raw matching-label capture point and missing-label behavior are selected,
 4. current source set plus immutable per-job input model is accepted,
-5. exact DDL, FKs, indexes, retention, and schema-version migration record are written and reviewed.
+5. exact schema v1 DDL, FKs, indexes, and retention rules are written and reviewed.
 
-All five conditions are now satisfied. Implementation has not started.
+All five conditions are satisfied and implemented in fresh schema v1.

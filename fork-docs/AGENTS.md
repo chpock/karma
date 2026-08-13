@@ -54,6 +54,43 @@ For non-trivial fork features:
 - Avoid touching unrelated tests only for style/cleanup.
 - Add focused tests near changed behavior.
 
+### Required verification commands
+
+Run verification from the repository root unless a command explicitly changes
+directory:
+
+```bash
+# Mandatory after every code change. This runs Go lint/format analysis and then
+# the UI ESLint, TypeScript, Stylelint, and Knip gates.
+make lint
+
+# Mandatory after Go changes.
+go test ./... -timeout 600s
+
+# Mandatory after UI changes.
+npm --prefix ui test -- --runInBand <affected test files>
+npm --prefix ui run build
+
+# Mandatory patch-integrity checks before reporting completion.
+git diff --check
+```
+
+Additional rules:
+
+- `make lint` means the root command executed in the repository root. Do not
+  report `make -C ui lint` or `make lint` executed inside `ui/` as the root lint
+  gate.
+- Run root `make lint` after the final code edit, not only before or midway
+  through a task.
+- A lint failure in changed or accumulated fork code is unfinished work. Fix it
+  before starting another feature; do not dismiss it as unrelated without an
+  explicit user decision.
+- After silence-editor backend or frontend changes, also run the focused backend,
+  compact-editor, retained legacy-editor, and lifecycle tests documented by the
+  feature specification.
+- Browser/visual tests must use local mocks or fixtures only. Agents must not
+  access real Alertmanager instances, databases, or other real services.
+
 ## 7. Scope guardrails for this fork phase
 
 Current lifecycle feature scope includes:
@@ -61,8 +98,11 @@ Current lifecycle feature scope includes:
 - persistent alert lifecycle storage,
 - `inactive` and manual `resolved` handling,
 - history tracking,
+- silence-aware inactive-to-suppressed reclassification and causal evidence,
 - retention/vacuum operations,
-- minimal UI support in existing grid/filter workflows.
+- compact create/edit/recreate silence editor with automatic preview,
+- structured runtime logging,
+- UI support in existing grid/filter workflows.
 
 Out of scope for current phase (unless explicitly requested):
 
@@ -81,3 +121,26 @@ For branch-level auto-publish on `karma-history`:
 Reason:
 
 - arm64 cross-build through QEMU can stall in Go build stage and make branch CI unstable.
+
+## 9. Docker bind-mount user mapping (local development)
+
+When running Docker containers with a bind-mounted project workspace,
+always run the container as the host user:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -v <host_path>:<container_path> ...
+```
+
+Reason:
+
+- running as container `root` creates root-owned files in the mounted tree,
+- root-owned artifacts (for example `ui/node_modules/.vite-temp`) later break
+  local commands with permission errors (`EACCES`),
+- this applies to Playwright/image update runs and any build/test tooling
+  executed inside containers.
+
+Never run a host-side UI command concurrently with a container command that runs
+`npm ci` against the same bind-mounted `ui/` directory. `npm ci` replaces
+`ui/node_modules`; a concurrent host build/lint/test can observe a half-installed
+tree and fail with missing binaries. Run the Docker command first, then host-side
+verification sequentially.

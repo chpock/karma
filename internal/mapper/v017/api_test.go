@@ -3,6 +3,7 @@ package v017
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,8 @@ import (
 
 	json "github.com/go-json-experiment/json"
 	"github.com/go-json-experiment/json/jsontext"
+
+	"github.com/prymitive/karma/internal/models"
 )
 
 func TestDateTimeUnmarshalJSONFromValid(t *testing.T) {
@@ -304,7 +307,7 @@ func TestSilencesInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	u, _ := url.Parse(srv.URL)
-	_, err := silences(srv.Client(), u, 5*time.Second)
+	_, _, err := silences(srv.Client(), u, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -315,8 +318,10 @@ func TestSilencesValid(t *testing.T) {
 	// including matcher with explicit isEqual=false
 	payload := `[{
 		"id": "silence-1",
+		"status": {"state": "active"},
 		"startsAt": "2025-03-10T12:00:00.000Z",
 		"endsAt": "2025-03-11T12:00:00.000Z",
+		"updatedAt": "2025-03-10T13:00:00.000Z",
 		"createdBy": "user@example.com",
 		"comment": "test silence",
 		"matchers": [
@@ -331,12 +336,15 @@ func TestSilencesValid(t *testing.T) {
 	defer srv.Close()
 
 	u, _ := url.Parse(srv.URL)
-	result, err := silences(srv.Client(), u, 5*time.Second)
+	result, warnings, err := silences(srv.Client(), u, 5*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(result) != 1 {
 		t.Fatalf("got %d silences, want 1", len(result))
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings=%+v, want none", warnings)
 	}
 	if result[0].ID != "silence-1" {
 		t.Errorf("ID = %q, want %q", result[0].ID, "silence-1")
@@ -346,6 +354,283 @@ func TestSilencesValid(t *testing.T) {
 	}
 	if len(result[0].Matchers) != 2 {
 		t.Fatalf("got %d matchers, want 2", len(result[0].Matchers))
+	}
+}
+
+func TestSilencesSkipsMissingAndUnsupportedStatus(t *testing.T) {
+	payload := `[
+  {
+    "id":"valid",
+    "status":{"state":"active"},
+    "startsAt":"2025-03-10T12:00:00Z",
+    "endsAt":"2025-03-11T12:00:00Z",
+	"updatedAt":"2025-03-10T13:00:00Z",
+    "createdBy":"user@example.com",
+    "comment":"valid",
+    "matchers":[{"name":"service","value":"api","isRegex":false,"isEqual":true}]
+  },
+  {
+    "id":"missing-status",
+    "startsAt":"2025-03-10T12:00:00Z",
+    "endsAt":"2025-03-11T12:00:00Z",
+	"updatedAt":"2025-03-10T13:00:00Z",
+    "createdBy":"user@example.com",
+    "comment":"invalid",
+    "matchers":[]
+  },
+  {
+    "id":"unknown-status",
+    "status":{"state":"future-state"},
+    "startsAt":"2025-03-10T12:00:00Z",
+    "endsAt":"2025-03-11T12:00:00Z",
+	"updatedAt":"2025-03-10T13:00:00Z",
+    "createdBy":"user@example.com",
+    "comment":"invalid",
+    "matchers":[]
+  }
+]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	result, warnings, err := silences(srv.Client(), u, 5*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result) != 1 || result[0].ID != "valid" {
+		t.Fatalf("silences=%+v, want only valid", result)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings=%+v, want two", warnings)
+	}
+	if warnings[0].SilenceID != "missing-status" || warnings[0].Status != "missing" {
+		t.Fatalf("missing warning=%+v", warnings[0])
+	}
+	if warnings[1].SilenceID != "unknown-status" || warnings[1].Status != "future-state" {
+		t.Fatalf("unknown warning=%+v", warnings[1])
+	}
+}
+
+func TestSilencesSkipsInvalidEntriesIndependently(t *testing.T) {
+	valid := func(id string) string {
+		return fmt.Sprintf(`{
+  "id":%q,
+  "status":{"state":"active"},
+  "startsAt":"2025-03-10T12:00:00Z",
+  "endsAt":"2025-03-11T12:00:00Z",
+  "updatedAt":"2025-03-10T13:00:00Z",
+  "createdBy":"user@example.com",
+  "comment":"maintenance",
+  "matchers":[{"name":"service","value":"api","isRegex":false,"isEqual":true}]
+}`, id)
+	}
+	tests := []struct {
+		name       string
+		entry      string
+		field      string
+		reasonCode string
+	}{
+		{name: "non object", entry: `42`, field: "$", reasonCode: "wrong_type"},
+		{name: "wrong field type", entry: `{"id":"bad","status":{"state":"active"},"startsAt":42,"endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "startsAt", reasonCode: "wrong_type"},
+		{name: "missing id", entry: `{"status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "id", reasonCode: "missing_required_field"},
+		{name: "empty id", entry: `{"id":" ","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "id", reasonCode: "empty_required_field"},
+		{name: "missing status", entry: `{"id":"bad","startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "status.state", reasonCode: "missing_required_field"},
+		{name: "unknown status", entry: `{"id":"bad","status":{"state":"future"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "status.state", reasonCode: "unsupported_value"},
+		{name: "invalid updated at", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"not-a-date","createdBy":"user","comment":"x","matchers":[]}`, field: "updatedAt", reasonCode: "invalid_format"},
+		{name: "missing start", entry: `{"id":"bad","status":{"state":"active"},"endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "startsAt", reasonCode: "missing_required_field"},
+		{name: "missing end", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "endsAt", reasonCode: "missing_required_field"},
+		{name: "reversed interval", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-11T12:00:00Z","endsAt":"2025-03-10T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "endsAt", reasonCode: "invalid_time_range"},
+		{name: "missing author", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","comment":"x","matchers":[]}`, field: "createdBy", reasonCode: "missing_required_field"},
+		{name: "missing comment", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","matchers":[]}`, field: "comment", reasonCode: "missing_required_field"},
+		{name: "missing matchers", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x"}`, field: "matchers", reasonCode: "missing_required_field"},
+		{name: "empty matchers", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[]}`, field: "matchers", reasonCode: "empty_matcher_set"},
+		{name: "missing matcher name", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"value":"api","isRegex":false}]}`, field: "matchers[0].name", reasonCode: "missing_required_field"},
+		{name: "invalid matcher name", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"bad.name","value":"api","isRegex":false}]}`, field: "matchers[0].name", reasonCode: "invalid_matcher_name"},
+		{name: "missing matcher value", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","isRegex":false}]}`, field: "matchers[0].value", reasonCode: "missing_required_field"},
+		{name: "missing regex flag", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api"}]}`, field: "matchers[0].isRegex", reasonCode: "missing_required_field"},
+		{name: "invalid regex", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"[","isRegex":true}]}`, field: "matchers[0].value", reasonCode: "invalid_regex"},
+		{name: "matches empty", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":".*","isRegex":true}]}`, field: "matchers", reasonCode: "matches_empty"},
+		{name: "invalid annotations", entry: `{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}],"annotations":{"ticket":42}}`, field: "annotations.ticket", reasonCode: "wrong_type"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := "[" + valid("before") + "," + tc.entry + "," + valid("after") + "]"
+			result, warnings, err := collectSilencesPayload(t, payload)
+			if err != nil {
+				t.Fatalf("mixed response failed: %v", err)
+			}
+			if len(result) != 2 || result[0].ID != "before" || result[1].ID != "after" {
+				t.Fatalf("valid entries were not preserved: %+v", result)
+			}
+			if len(warnings) != 1 {
+				t.Fatalf("warnings=%+v, want one", warnings)
+			}
+			if warnings[0].EntryIndex != 1 || warnings[0].Field != tc.field || warnings[0].ReasonCode != tc.reasonCode {
+				t.Fatalf("warning=%+v, want index=1 field=%q reason=%q", warnings[0], tc.field, tc.reasonCode)
+			}
+		})
+	}
+}
+
+func TestSilencesSkipsDuplicateValidIDs(t *testing.T) {
+	payload := `[
+{"id":"before","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]},
+{"id":"duplicate","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]},
+{"id":"duplicate","status":{"state":"pending"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T14:00:00Z","createdBy":"user","comment":"y","matchers":[{"name":"service","value":"web","isRegex":false}]},
+{"id":"after","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]}
+]`
+	result, warnings, err := collectSilencesPayload(t, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 2 || result[0].ID != "before" || result[1].ID != "after" {
+		t.Fatalf("result=%+v, want before and after", result)
+	}
+	if len(warnings) != 2 || warnings[0].ReasonCode != "duplicate_id" || warnings[1].ReasonCode != "duplicate_id" {
+		t.Fatalf("warnings=%+v, want both duplicate entries rejected", warnings)
+	}
+}
+
+func TestSilencesAcceptsUnknownExtraFields(t *testing.T) {
+	payload := `[{"id":"valid","status":{"state":"active","futureStatusField":true},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false,"futureMatcherField":42}],"futureTopLevelField":{"nested":true}}]`
+	result, warnings, err := collectSilencesPayload(t, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 1 || result[0].ID != "valid" || len(warnings) != 0 {
+		t.Fatalf("result=%+v warnings=%+v, want one valid entry", result, warnings)
+	}
+}
+
+func TestSilencesAcceptsMissingOptionalFields(t *testing.T) {
+	payload := `[{"id":"valid","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]}]`
+	result, warnings, err := collectSilencesPayload(t, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 1 || result[0].ID != "valid" || result[0].UpdatedAt != nil || len(warnings) != 0 {
+		t.Fatalf("result=%+v warnings=%+v, want one valid entry with optional fields absent", result, warnings)
+	}
+}
+
+func TestSilencesMalformedArrayFailsWholeRefresh(t *testing.T) {
+	payload := `[{"id":"valid","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","updatedAt":"2025-03-10T13:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]}, {"id":]`
+	result, warnings, err := collectSilencesPayload(t, payload)
+	if err == nil {
+		t.Fatalf("result=%+v warnings=%+v, want malformed array error", result, warnings)
+	}
+}
+
+func TestSilencesWarningSelectionIsDeterministic(t *testing.T) {
+	payload := `[{"id":42,"status":false,"startsAt":1,"endsAt":2,"updatedAt":3,"createdBy":4,"comment":5,"matchers":6}]`
+	for run := range 100 {
+		_, warnings, err := collectSilencesPayload(t, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(warnings) != 1 || warnings[0].Field != "id" || warnings[0].ReasonCode != "wrong_type" {
+			t.Fatalf("run %d warning=%+v, want deterministic id wrong_type", run, warnings)
+		}
+	}
+}
+
+func TestSilencesDuplicateMemberNamesAreIsolatedToEntry(t *testing.T) {
+	payload := `[
+{"id":"before","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]},
+{"id":"invalid","id":"ambiguous","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]},
+{"id":"after","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]}
+]`
+	result, warnings, err := collectSilencesPayload(t, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 2 || result[0].ID != "before" || result[1].ID != "after" {
+		t.Fatalf("result=%+v, want valid neighbors", result)
+	}
+	if len(warnings) != 1 || warnings[0].EntryIndex != 1 || warnings[0].ReasonCode != "duplicate_field" {
+		t.Fatalf("warnings=%+v, want duplicate-field warning for entry 1", warnings)
+	}
+}
+
+func TestSilencesInvalidUTF8IsIsolatedToEntry(t *testing.T) {
+	before := `{"id":"before","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]}`
+	after := `{"id":"after","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","createdBy":"user","comment":"x","matchers":[{"name":"service","value":"api","isRegex":false}]}`
+	payload := append([]byte("["+before+`,{"id":"bad","status":{"state":"active"},"startsAt":"2025-03-10T12:00:00Z","endsAt":"2025-03-11T12:00:00Z","createdBy":"user","comment":"`), 0xff)
+	payload = append(payload, []byte(`","matchers":[{"name":"service","value":"api","isRegex":false}]},`+after+"]")...)
+	result, warnings, err := collectSilencesBytes(t, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 2 || len(warnings) != 1 || warnings[0].EntryIndex != 1 || warnings[0].ReasonCode != "invalid_utf8" {
+		t.Fatalf("result=%+v warnings=%+v, want invalid UTF-8 entry isolated", result, warnings)
+	}
+}
+
+func collectSilencesPayload(t *testing.T, payload string) ([]models.Silence, []models.SilenceWarning, error) {
+	return collectSilencesBytes(t, []byte(payload))
+}
+
+func collectSilencesBytes(t *testing.T, payload []byte) ([]models.Silence, []models.SilenceWarning, error) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return silences(srv.Client(), u, 5*time.Second)
+}
+
+func TestUnmarshalSilencePreservesRevisionFields(t *testing.T) {
+	payload := []byte(`{
+  "id":"silence-1",
+  "startsAt":"2025-03-10T12:00:00.000Z",
+  "endsAt":"2025-03-11T12:00:00.000Z",
+  "createdAt":"2025-03-10T10:00:00.000Z",
+  "updatedAt":"2025-03-10T11:00:00.000Z",
+  "createdBy":"user@example.com",
+  "comment":"maintenance",
+  "status":{"state":"active"},
+  "annotations":{"ticket":"OPS-1"},
+  "matchers":[{"name":"service","value":"api","isRegex":false,"isEqual":true}]
+}`)
+	silence, err := unmarshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if silence.UpdatedAt == nil || silence.UpdatedAt.UTC().Format(time.RFC3339) != "2025-03-10T11:00:00Z" {
+		t.Fatalf("updatedAt not preserved: %+v", silence.UpdatedAt)
+	}
+	if silence.StatusState != "active" {
+		t.Fatalf("status=%q want active", silence.StatusState)
+	}
+	if len(silence.Annotations) != 1 || silence.Annotations[0].Name != "ticket" || silence.Annotations[0].Value != "OPS-1" {
+		t.Fatalf("annotations not preserved: %+v", silence.Annotations)
+	}
+}
+
+func TestUnmarshalSilenceStatusBoundary(t *testing.T) {
+	payload := []byte(`{
+  "id":"silence-1",
+  "startsAt":"2025-03-10T12:00:00Z",
+  "endsAt":"2025-03-11T12:00:00Z",
+  "createdBy":"user@example.com",
+  "comment":"maintenance",
+  "matchers":[]
+}`)
+
+	if _, err := unmarshal(payload); err != nil {
+		t.Fatalf("outgoing request payload without status rejected: %v", err)
+	}
+	if _, err := unmarshalResponse(payload); err == nil {
+		t.Fatal("existing silence response without status was accepted")
 	}
 }
 
@@ -370,7 +655,7 @@ func TestSilencesApiGetError(t *testing.T) {
 	u, _ := url.Parse(srv.URL)
 	srv.Close()
 
-	result, err := silences(srv.Client(), u, 5*time.Second)
+	result, _, err := silences(srv.Client(), u, 5*time.Second)
 	if err == nil {
 		t.Fatal("expected error for closed server, got nil")
 	}

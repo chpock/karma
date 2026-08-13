@@ -89,7 +89,7 @@ Operationally:
 
 Fork logic lives in dedicated modules.
 
-Upstream-owned integration hooks remain narrow:
+Persistent lifecycle integration hooks in upstream-owned files remain narrow:
 
 - `cmd/karma/main.go` (bootstrap + routes),
 - `cmd/karma/timer.go` (post-poll hook),
@@ -103,3 +103,23 @@ Fork exposes lifecycle operational state through:
 - `/alerts-history/warning` (persistent warning contract for DB expected-state).
 
 This avoids manual DB inspection for normal operations.
+
+Runtime execution is additionally logged as structured `component`/`event` records.
+The levels, required fields, noise rules, and redaction contract are defined in
+`SPEC/runtime-logging-contract.md`. Durable `alert_events` and runtime logs are
+separate: neither replaces the other.
+
+## 10. Silence editor boundary
+
+The compact editor is the only production silence form. It selects one logical
+Alertmanager target, evaluates an automatic target-scoped preview, and submits one
+create, edit, or recreate operation.
+
+- Edit/Recreate read one deterministic physical member immediately before opening
+  and again before mutation. An opaque revision token prevents known stale writes.
+- One mutating POST is attempted per user action; Karma never retries another HA
+  member after an ambiguous write.
+- `proxy:true` is server-routed. `proxy:false` is browser-routed and therefore has
+  only browser-console terminal audit after Karma issues the descriptor.
+- The old editor and old silence Browser remain in source control but are not
+  reachable from production UI.

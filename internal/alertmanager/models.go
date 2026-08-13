@@ -15,6 +15,7 @@ import (
 
 	"github.com/prymitive/karma/internal/config"
 	"github.com/prymitive/karma/internal/filters"
+	runtimeLog "github.com/prymitive/karma/internal/log"
 	"github.com/prymitive/karma/internal/mapper"
 	"github.com/prymitive/karma/internal/models"
 	"github.com/prymitive/karma/internal/transform"
@@ -58,6 +59,7 @@ type Alertmanager struct {
 	Name             string `json:"name"`
 	lastError        string
 	lastVersionProbe string
+	silenceWarnings  []models.SilenceWarning
 	// CORS credentials
 	CORSCredentials string `json:"corsCredentials"`
 	// fields for storing pulled data
@@ -102,6 +104,7 @@ func (am *Alertmanager) clearData() {
 	am.lock.Lock()
 	am.alertGroups = []models.AlertGroup{}
 	am.silences = map[string]models.Silence{}
+	am.silenceWarnings = []models.SilenceWarning{}
 	am.colors = models.LabelsColorMap{}
 	am.autocomplete = []models.Autocomplete{}
 	am.knownLabels = []string{}
@@ -114,12 +117,21 @@ func (am *Alertmanager) pullSilences(version string) error {
 		return err
 	}
 
-	var silences []models.Silence
-
 	start := time.Now()
-	silences, err = mapper.Collect(am.URI, am.HTTPHeaders, am.RequestTimeout, am.HTTPTransport)
+	silences, warnings, err := mapper.Collect(am.URI, am.HTTPHeaders, am.RequestTimeout, am.HTTPTransport)
 	if err != nil {
 		return err
+	}
+	for _, warning := range warnings {
+		runtimeLog.Warn(
+			"silence_reconciliation", "invalid_rule_ignored", "Ignored invalid silence rule",
+			slog.String("alertmanager", am.Name),
+			slog.Int("entry_index", warning.EntryIndex),
+			slog.String("silence_id", warning.SilenceID),
+			slog.String("status", warning.Status),
+			slog.String("field", warning.Field),
+			slog.String("reason_code", warning.ReasonCode),
+		)
 	}
 	slog.Info(
 		"Got silences",
@@ -137,6 +149,7 @@ func (am *Alertmanager) pullSilences(version string) error {
 
 	am.lock.Lock()
 	am.silences = silenceMap
+	am.silenceWarnings = append([]models.SilenceWarning(nil), warnings...)
 	am.lock.Unlock()
 
 	return nil
@@ -474,6 +487,14 @@ func (am *Alertmanager) getLastError() string {
 
 func (am *Alertmanager) Error() string {
 	return am.getLastError()
+}
+
+// SilenceWarnings returns non-fatal warnings from the latest silence poll.
+func (am *Alertmanager) SilenceWarnings() []models.SilenceWarning {
+	am.lock.RLock()
+	defer am.lock.RUnlock()
+
+	return append([]models.SilenceWarning(nil), am.silenceWarnings...)
 }
 
 // SanitizedURI returns a copy of Alertmanager.URI with password replaced by

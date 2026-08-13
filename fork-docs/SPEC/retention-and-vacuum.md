@@ -4,8 +4,10 @@
 
 Fork default settings:
 
-- TTL: 30 days
+- Alert TTL: 30 days
 - Max stored alerts in `alert_states`: 100000
+- Unreferenced silence-history TTL: 30 days
+- Housekeeping interval: 24 hours
 
 TTL window uses `last_seen_at` semantics.
 
@@ -15,6 +17,8 @@ Cleanup order is strict:
 
 1. TTL cleanup
 2. Limit cleanup (only if count still exceeds max)
+3. Reference-safe silence/job history cleanup
+4. Incremental vacuum after the deletion transaction commits
 
 ## 3. TTL cleanup policy
 
@@ -47,9 +51,9 @@ SQLite policy in this phase:
 - `auto_vacuum=INCREMENTAL`
 - periodic `PRAGMA incremental_vacuum`
 
-Recommended periodic schedule:
-
-- every 6h or 24h depending write volume.
+The configured `alertLifecycle.housekeeping.incrementalVacuumInterval` is the
+cadence for the complete housekeeping cycle. One cycle runs immediately when the
+worker starts and then at the configured interval (default 24h).
 
 `VACUUM` full rewrite is not routine; reserve for manual maintenance windows.
 
@@ -61,6 +65,7 @@ Expose at least:
 - counts for `alert_states` and `alert_events`.
 - last housekeeping timestamp.
 - last incremental vacuum timestamp.
+- silence-history TTL and recheck queue diagnostics.
 
 ## 7. Failure behavior
 

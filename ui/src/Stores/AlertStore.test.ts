@@ -38,6 +38,7 @@ describe("AlertStore.data", () => {
           headers: { foo: "bar" },
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["default", "readonly"],
@@ -50,6 +51,7 @@ describe("AlertStore.data", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["default", "readonly"],
@@ -75,6 +77,7 @@ describe("AlertStore.data", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["ro1", "ro2"],
@@ -87,6 +90,7 @@ describe("AlertStore.data", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["ro1", "ro2"],
@@ -112,6 +116,7 @@ describe("AlertStore.data", () => {
           headers: { foo: "bar" },
           corsCredentials: "include",
           error: "bad",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["am1", "am2"],
@@ -124,6 +129,7 @@ describe("AlertStore.data", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["am1", "am2"],
@@ -151,6 +157,7 @@ describe("AlertStore.data", () => {
           headers: { foo: "bar" },
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["am1", "am2", "am3"],
@@ -163,6 +170,7 @@ describe("AlertStore.data", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["am1", "am2", "am3"],
@@ -175,6 +183,7 @@ describe("AlertStore.data", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["am1", "am2", "am3"],
@@ -478,6 +487,13 @@ describe("DecodeLocationSearch", () => {
 
   it("multi value q[]=foo&q[]=&q[]=foo search param is decoded correctly", () => {
     expect(DecodeLocationSearch("?q[]=foo&q[]=&q[]=foo")).toMatchObject({
+      defaultsUsed: false,
+      params: { q: ["foo"] },
+    });
+  });
+
+  it("ignores legacy m query param", () => {
+    expect(DecodeLocationSearch("?q=foo&m=legacy")).toMatchObject({
       defaultsUsed: false,
       params: { q: ["foo"] },
     });

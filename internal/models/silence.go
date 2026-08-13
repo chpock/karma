@@ -9,6 +9,51 @@ import (
 	"github.com/prymitive/karma/internal/regex"
 )
 
+// SilenceWarning describes one silence rule ignored because its API data is not
+// safe to interpret.
+type SilenceWarning struct {
+	EntryIndex int    `json:"entryIndex"`
+	SilenceID  string `json:"silenceID"`
+	Status     string `json:"status"`
+	Field      string `json:"field"`
+	ReasonCode string `json:"reasonCode"`
+	Message    string `json:"message"`
+}
+
+// IsKnownSilenceStatus reports whether Alertmanager's status.state can be used
+// by Karma without inference.
+func IsKnownSilenceStatus(status string) bool {
+	switch status {
+	case "pending", "active", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func (w SilenceWarning) MarshalJSONTo(enc *jsontext.Encoder) error {
+	writer := jsonWriter{enc: enc}
+	w.marshalTo(&writer)
+	return writer.err
+}
+
+func (w *SilenceWarning) marshalTo(writer *jsonWriter) {
+	writer.beginObject()
+	writer.key("entryIndex")
+	writer.integer(w.EntryIndex)
+	writer.key("silenceID")
+	writer.str(w.SilenceID)
+	writer.key("status")
+	writer.str(w.Status)
+	writer.key("field")
+	writer.str(w.Field)
+	writer.key("reasonCode")
+	writer.str(w.ReasonCode)
+	writer.key("message")
+	writer.str(w.Message)
+	writer.endObject()
+}
+
 type SilenceMatcher struct {
 	re      *regexp.Regexp
 	Name    string `json:"name"`
@@ -18,6 +63,16 @@ type SilenceMatcher struct {
 }
 
 func NewSilenceMatcher(name, value string, isRegexp, isEqual bool) SilenceMatcher {
+	sm, err := NewSilenceMatcherChecked(name, value, isRegexp, isEqual)
+	if err != nil {
+		panic(err)
+	}
+	return sm
+}
+
+// NewSilenceMatcherChecked constructs a matcher from untrusted input without
+// panicking on an invalid regular expression.
+func NewSilenceMatcherChecked(name, value string, isRegexp, isEqual bool) (SilenceMatcher, error) {
 	sm := SilenceMatcher{
 		Name:    name,
 		Value:   value,
@@ -25,9 +80,13 @@ func NewSilenceMatcher(name, value string, isRegexp, isEqual bool) SilenceMatche
 		IsEqual: isEqual,
 	}
 	if sm.IsRegex {
-		sm.re = regex.MustCompileAnchored(sm.Value)
+		compiled, err := regex.CompileAnchored(sm.Value)
+		if err != nil {
+			return SilenceMatcher{}, err
+		}
+		sm.re = compiled
 	}
-	return sm
+	return sm, nil
 }
 
 func (sm SilenceMatcher) MarshalJSONTo(enc *jsontext.Encoder) error {
@@ -52,7 +111,7 @@ func (sm *SilenceMatcher) marshalTo(w *jsonWriter) {
 func (sm SilenceMatcher) IsMatch(labels map[string]string) bool {
 	v, ok := labels[sm.Name]
 	if !ok {
-		return !sm.IsEqual
+		v = ""
 	}
 
 	if sm.IsRegex {
@@ -68,6 +127,7 @@ func (sm SilenceMatcher) IsMatch(labels map[string]string) bool {
 type Silence struct {
 	StartsAt  time.Time        `json:"startsAt"`
 	EndsAt    time.Time        `json:"endsAt"`
+	IsExpired bool             `json:"isExpired"`
 	CreatedAt time.Time        `json:"createdAt"`
 	ID        string           `json:"id"`
 	CreatedBy string           `json:"createdBy"`
@@ -93,6 +153,8 @@ func (s *Silence) marshalTo(w *jsonWriter) {
 	w.time(s.StartsAt)
 	w.key("endsAt")
 	w.time(s.EndsAt)
+	w.key("isExpired")
+	w.boolean(s.IsExpired)
 	w.key("createdAt")
 	w.time(s.CreatedAt)
 	w.key("id")

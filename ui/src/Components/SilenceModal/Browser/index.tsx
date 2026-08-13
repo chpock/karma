@@ -69,7 +69,8 @@ const Browser: FC<{
   alertStore: AlertStore;
   silenceFormStore: SilenceFormStore;
   settingsStore: Settings;
-}> = ({ alertStore, silenceFormStore, settingsStore }) => {
+  onEditSilence: () => boolean;
+}> = ({ alertStore, silenceFormStore, settingsStore, onEditSilence }) => {
   const maxPerPage = IsMobile() ? 4 : 6;
   const [sortReverse, setSortReverse] = useState<boolean>(false);
   const [showExpired, setShowExpired] = useState<boolean>(false);
@@ -201,6 +202,7 @@ const Browser: FC<{
                 silence={silence}
                 alertStore={alertStore}
                 silenceFormStore={silenceFormStore}
+                onEditSilence={onEditSilence}
                 selected={selected
                   .map((s) => s.id)
                   .includes(silence.silence.id)}

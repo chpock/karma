@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"sort"
@@ -11,22 +12,27 @@ import (
 	"github.com/prymitive/karma/internal/alertmanager"
 	"github.com/prymitive/karma/internal/filters"
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
+	runtimeLog "github.com/prymitive/karma/internal/log"
 	"github.com/prymitive/karma/internal/models"
 )
 
-func dedupedAlertsWithLifecycle(matchFilters []filters.Filter) []models.AlertGroup {
+func dedupedAlertsWithLifecycleContext(ctx context.Context, matchFilters []filters.Filter) []models.AlertGroup {
 	deduped := alertmanager.DedupAlerts()
-	return mergeLifecycleStoredAlerts(deduped, shouldIncludeResolved(matchFilters))
+	return mergeLifecycleStoredAlertsContext(ctx, deduped, shouldIncludeResolved(matchFilters))
 }
 
 func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) []models.AlertGroup {
+	return mergeLifecycleStoredAlertsContext(context.Background(), live, includeResolved)
+}
+
+func mergeLifecycleStoredAlertsContext(ctx context.Context, live []models.AlertGroup, includeResolved bool) []models.AlertGroup {
 	if lifecycleStore == nil {
 		return live
 	}
 
 	stored, err := lifecycleStore.ListCurrentAlertsForMerge(includeResolved)
 	if err != nil {
-		slog.Error("Failed to query lifecycle alerts for merge", slog.Any("error", err))
+		runtimeLog.ErrorContext(ctx, "alert_lifecycle", "merge_query_failed", "Failed to query lifecycle alerts for merge", slog.Any("error", err))
 		return live
 	}
 	if len(stored) == 0 {
@@ -42,11 +48,11 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 	}
 
 	for _, current := range stored {
-		alert, ok := lifecycleCurrentToModelAlert(current)
+		alert, ok := lifecycleCurrentToModelAlert(ctx, current)
 		if !ok {
 			continue
 		}
-		groupLabels, ok := lifecycleCurrentGroupLabels(current)
+		groupLabels, ok := lifecycleCurrentGroupLabels(ctx, current)
 		if !ok {
 			continue
 		}
@@ -108,22 +114,22 @@ func mergeLifecycleStoredAlerts(live []models.AlertGroup, includeResolved bool) 
 	return live
 }
 
-func lifecycleCurrentToModelAlert(current alertlifecycle.AlertCurrent) (models.Alert, bool) {
+func lifecycleCurrentToModelAlert(ctx context.Context, current alertlifecycle.AlertCurrent) (models.Alert, bool) {
 	labelsMap := map[string]string{}
 	if err := json.Unmarshal([]byte(current.LabelsJSON), &labelsMap); err != nil {
-		slog.Error("Failed to unmarshal lifecycle labels", slog.String("alertID", current.AlertID), slog.Any("error", err))
+		runtimeLog.ErrorContext(ctx, "alert_lifecycle", "merge_decode_failed", "Failed to unmarshal lifecycle labels", slog.String("alert_id", current.AlertID), slog.String("field", "labels"), slog.Any("error", err))
 		return models.Alert{}, false
 	}
 
 	annotationsMap := map[string]string{}
 	if err := json.Unmarshal([]byte(current.AnnotationsJSON), &annotationsMap); err != nil {
-		slog.Error("Failed to unmarshal lifecycle annotations", slog.String("alertID", current.AlertID), slog.Any("error", err))
+		runtimeLog.ErrorContext(ctx, "alert_lifecycle", "merge_decode_failed", "Failed to unmarshal lifecycle annotations", slog.String("alert_id", current.AlertID), slog.String("field", "annotations"), slog.Any("error", err))
 		return models.Alert{}, false
 	}
 
 	alertState, ok := models.AlertStateFromString(string(current.State))
 	if !ok {
-		slog.Error("Failed to map lifecycle state to alert model", slog.String("state", string(current.State)))
+		runtimeLog.ErrorContext(ctx, "alert_lifecycle", "merge_state_invalid", "Failed to map lifecycle state to alert model", slog.String("state", string(current.State)))
 		return models.Alert{}, false
 	}
 
@@ -140,15 +146,38 @@ func lifecycleCurrentToModelAlert(current alertlifecycle.AlertCurrent) (models.A
 		HasIsLive:    true,
 		IsResolved:   current.IsResolved,
 	}
+	for _, cause := range current.SuppressionCauses {
+		matchers := make([]models.SuppressionCauseMatcher, 0, len(cause.Matchers))
+		for _, matcher := range cause.Matchers {
+			matchers = append(matchers, models.SuppressionCauseMatcher{
+				Name: matcher.Name, Value: matcher.Value,
+				IsRegex: matcher.IsRegex, IsEqual: matcher.IsEqual,
+			})
+		}
+		alert.SuppressionCauses = append(alert.SuppressionCauses, models.SuppressionCause{
+			Target:           cause.ClusterID,
+			Source:           cause.SourceName,
+			SilenceID:        cause.SilenceID,
+			ResolutionStatus: cause.ResolutionStatus,
+			StartsAt:         cause.StartsAt,
+			EndsAt:           cause.EndsAt,
+			CreatedBy:        cause.CreatedBy,
+			Comment:          cause.Comment,
+			Matchers:         matchers,
+		})
+	}
 	alert.UpdateFingerprints()
+	// Display labels may be filtered by labels.keep/strip. The lifecycle key is
+	// the source alert identity captured before those presentation transforms.
+	alert.LabelsFP = current.AlertID
 
 	return alert, true
 }
 
-func lifecycleCurrentGroupLabels(current alertlifecycle.AlertCurrent) (promlabels.Labels, bool) {
+func lifecycleCurrentGroupLabels(ctx context.Context, current alertlifecycle.AlertCurrent) (promlabels.Labels, bool) {
 	labelsMap := map[string]string{}
 	if err := json.Unmarshal([]byte(current.GroupLabelsJSON), &labelsMap); err != nil {
-		slog.Error("Failed to unmarshal lifecycle group labels", slog.String("alertID", current.AlertID), slog.Any("error", err))
+		runtimeLog.ErrorContext(ctx, "alert_lifecycle", "merge_decode_failed", "Failed to unmarshal lifecycle group labels", slog.String("alert_id", current.AlertID), slog.String("field", "group_labels"), slog.Any("error", err))
 		return promlabels.Labels{}, false
 	}
 

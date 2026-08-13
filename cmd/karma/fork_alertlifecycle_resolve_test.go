@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,31 @@ import (
 
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
 )
+
+func TestResolveAlertLogsStructuredSuccessWithoutComment(t *testing.T) {
+	store := setupLifecycleStoreForResolveTest(t)
+	seedInactiveAlert(t, store, "id-handler-log")
+
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	req := httptest.NewRequest(http.MethodPost, "/alerts/id-handler-log/resolve", bytes.NewReader([]byte(`{"comment":"secret resolve comment"}`)))
+	req = withRouteParam(req, "id", "id-handler-log")
+	rr := httptest.NewRecorder()
+	resolveAlert(rr, req)
+
+	logged := output.String()
+	for _, expected := range []string{`"level":"INFO"`, `"component":"alert_lifecycle"`, `"event":"resolve_applied"`, `"alert_id":"id-handler-log"`, `"new_state":"resolved"`} {
+		if !strings.Contains(logged, expected) {
+			t.Fatalf("missing log field %s in %s", expected, logged)
+		}
+	}
+	if strings.Contains(logged, "secret resolve comment") {
+		t.Fatalf("resolve comment leaked into log: %s", logged)
+	}
+}
 
 func TestResolveAlertHandlerSuccess(t *testing.T) {
 	store := setupLifecycleStoreForResolveTest(t)

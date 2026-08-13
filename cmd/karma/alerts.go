@@ -100,6 +100,7 @@ func getUpstreams() models.AlertmanagerAPISummary {
 			Headers:         map[string]string{},
 			CORSCredentials: upstream.CORSCredentials,
 			Error:           upstream.Error(),
+			Warnings:        upstream.SilenceWarnings(),
 			Version:         upstream.Version(),
 			Cluster:         upstream.Cluster,
 			ClusterMembers:  members,
@@ -385,7 +386,8 @@ func filterAlerts(dedupedAlerts []models.AlertGroup, fl []filters.Filter) (filte
 					alert.Alertmanager = ams
 				}
 			}
-			if len(alert.Alertmanager) == 0 && alert.State != models.AlertStateInactive && alert.State != models.AlertStateResolved && !(alert.State == models.AlertStateSuppressed && alert.HasIsLive && !alert.IsLive) {
+			isStoredSuppressed := alert.State == models.AlertStateSuppressed && alert.HasIsLive && !alert.IsLive
+			if len(alert.Alertmanager) == 0 && alert.State != models.AlertStateInactive && alert.State != models.AlertStateResolved && !isStoredSuppressed {
 				continue
 			}
 

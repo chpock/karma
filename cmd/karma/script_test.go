@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,12 +27,31 @@ import (
 
 func TestMain(m *testing.M) {
 	testscript.Main(m, map[string]func(){
-		"karma": main,
+		"karma": testscriptKarmaMain,
 	})
 	err := abide.Cleanup()
 	if err != nil {
 		fmt.Printf("abide.Cleanup() error: %v\n", err)
 	}
+}
+
+func testscriptKarmaMain() {
+	checkConfig := false
+	for _, arg := range os.Args[1:] {
+		if arg == "--check-config" {
+			checkConfig = true
+			break
+		}
+	}
+
+	if !checkConfig {
+		_ = os.Setenv("ALERTLIFECYCLE_ENABLED", "false")
+		if os.Getenv("ALERTLIFECYCLE_SQLITE_PATH") == "" {
+			_ = os.Setenv("ALERTLIFECYCLE_SQLITE_PATH", filepath.Join(".", "alert-lifecycle.sqlite"))
+		}
+	}
+
+	main()
 }
 
 func TestScripts(t *testing.T) {
@@ -44,6 +64,7 @@ func TestScripts(t *testing.T) {
 		},
 		Setup: func(env *testscript.Env) error {
 			env.Values["mocks"] = &httpMocks{responses: map[string][]httpMock{}}
+			env.Setenv("ALERTLIFECYCLE_SQLITE_PATH", "alert-lifecycle.sqlite")
 			return nil
 		},
 	})

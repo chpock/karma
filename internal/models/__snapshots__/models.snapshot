@@ -123,7 +123,8 @@
           "inhibitedBy": null,
           "state": "suppressed"
         }
-      ]
+      ],
+      "suppressionCauses": []
     },
     {
       "startsAt": "0001-01-01T00:00:00Z",
@@ -171,7 +172,8 @@
           "inhibitedBy": null,
           "state": "active"
         }
-      ]
+      ],
+      "suppressionCauses": []
     },
     {
       "startsAt": "0001-01-01T00:00:00Z",
@@ -223,7 +225,8 @@
           "inhibitedBy": null,
           "state": "suppressed"
         }
-      ]
+      ],
+      "suppressionCauses": []
     }
   ],
   "totalAlerts": 3

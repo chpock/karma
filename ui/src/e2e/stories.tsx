@@ -18,7 +18,7 @@ import { Settings } from "Stores/Settings";
 import { SilenceFormStore } from "Stores/SilenceFormStore";
 
 import { MockGrid, MockGroup } from "__fixtures__/Stories";
-import { MockSilence } from "__fixtures__/Alerts";
+import { MockAlert, MockAlertGroup, MockSilence } from "__fixtures__/Alerts";
 
 import { FatalError } from "Components/Grid/FatalError";
 import { UpgradeNeeded } from "Components/Grid/UpgradeNeeded";
@@ -26,6 +26,7 @@ import { ReloadNeeded } from "Components/Grid/ReloadNeeded";
 import { EmptyGrid } from "Components/Grid/EmptyGrid";
 import { NoUpstream } from "Components/Grid/NoUpstream";
 import Grid from "Components/Grid";
+import AlertCard from "Components/Grid/AlertGrid/AlertGroup/Alert";
 import NavBar from "Components/NavBar";
 import { InternalError } from "ErrorBoundary";
 import { MainModalContent } from "Components/MainModal/MainModalContent";
@@ -45,39 +46,6 @@ const jsonResponse = (data: unknown): Response =>
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
-
-const mockSilenceEntry = (index: number) => {
-  const s = MockSilence();
-  s.startsAt = "2018-08-14T16:00:00Z";
-  // vary endsAt to cover all progress bar colors on page 1 (indices 1-6):
-  //  1: expired (endsAt before 17:00) -> bg-danger, no progress bar
-  //  2: >90% elapsed (endsAt 17:03)   -> bg-danger progress bar
-  //  3: >75% elapsed (endsAt 17:15)   -> bg-warning progress bar
-  //  4+: <=75% elapsed (endsAt 18:xx) -> bg-success progress bar
-  if (index === 1) {
-    s.endsAt = "2018-08-14T16:50:00Z";
-  } else if (index === 2) {
-    s.endsAt = "2018-08-14T17:03:00Z";
-  } else if (index === 3) {
-    s.endsAt = "2018-08-14T17:15:00Z";
-  } else {
-    s.endsAt = `2018-08-14T18:${index < 10 ? "0" + index : index}:00Z`;
-  }
-  s.matchers.push({
-    name: "thisIsAveryLongNameToTestMatcherWrapping",
-    value: "valueIsAlsoAbitLong",
-    isRegex: false,
-    isEqual: true,
-  });
-  s.matchers.push({
-    name: "alertname",
-    value: "(foo1|foo2|foo3|foo4)",
-    isRegex: true,
-    isEqual: true,
-  });
-  s.id = `silence${index}`;
-  return { cluster: "am", alertCount: (index - 1) * 9, silence: s };
-};
 
 const countersData = {
   total: 90,
@@ -165,6 +133,120 @@ window.fetch = async (
         : input.url;
   const story = window.location.hash.replace("#", "").split("?")[0];
 
+  if (url.includes("/silence-editor/labels")) {
+    return jsonResponse({
+      status: "success",
+      target: "am",
+      total: 4,
+      truncated: false,
+      labels: [
+        { name: "alertname", values: 6 },
+        { name: "cluster", values: 2 },
+        { name: "instance", values: 5 },
+        { name: "service", values: 3 },
+      ],
+    });
+  }
+
+  if (url.includes("/silence-editor/values")) {
+    const u = new URL(url, window.location.origin);
+    const labelName = u.searchParams.get("name") || "";
+    const values =
+      labelName === "service"
+        ? [
+            { value: "api", hits: 11 },
+            { value: "payments", hits: 7 },
+            { value: "search", hits: 3 },
+          ]
+        : [
+            { value: "prod", hits: 14 },
+            { value: "staging", hits: 5 },
+          ];
+    return jsonResponse({
+      status: "success",
+      target: "am",
+      name: labelName,
+      total: values.length,
+      truncated: false,
+      values,
+    });
+  }
+
+  if (url.includes("/silence-editor/preview")) {
+    return jsonResponse({
+      status: "success",
+      target: "am",
+      total: 3,
+      returned: 3,
+      limit: 100,
+      excludedNoRawLabels: 0,
+      alerts: [
+        {
+          id: "preview-a",
+          state: "active",
+          rawState: "active",
+          isLive: true,
+          isSuppressed: false,
+          isResolved: false,
+          startsAt: "2018-08-14T15:30:00Z",
+          labels: [
+            { name: "alertname", value: "Host_Down" },
+            { name: "service", value: "api" },
+          ],
+          matchedLabels: [
+            { name: "alertname", value: "Host_Down" },
+            { name: "service", value: "api" },
+          ],
+          matchedLabelNames: ["alertname", "service"],
+          missingLabelNames: [],
+        },
+        {
+          id: "preview-b",
+          state: "suppressed",
+          rawState: "suppressed",
+          isLive: true,
+          isSuppressed: true,
+          isResolved: false,
+          startsAt: "2018-08-14T14:05:00Z",
+          labels: [
+            { name: "alertname", value: "API_5xx" },
+            { name: "service", value: "payments" },
+          ],
+          matchedLabels: [{ name: "service", value: "payments" }],
+          matchedLabelNames: ["service"],
+          missingLabelNames: ["cluster"],
+        },
+        {
+          id: "preview-c",
+          state: "inactive",
+          rawState: "active",
+          isLive: false,
+          isSuppressed: false,
+          isResolved: false,
+          startsAt: "2018-08-13T09:00:00Z",
+          lastSeenAt: "2018-08-14T16:58:00Z",
+          labels: [
+            { name: "alertname", value: "Disk_Full" },
+            { name: "instance", value: "db01" },
+          ],
+          matchedLabels: [{ name: "instance", value: "db01" }],
+          matchedLabelNames: ["instance"],
+          missingLabelNames: [],
+        },
+      ],
+    });
+  }
+
+  if (url.includes("/silence-editor/submit")) {
+    return jsonResponse({
+      status: "success",
+      target: "am",
+      mode: "proxy",
+      submittedBy: "storybook",
+      silenceID: "silence-storybook",
+    });
+  }
+
   if (url.includes("labelNames.json"))
     return jsonResponse(["cluster", "job", "instance"]);
   if (url.includes("labelValues.json"))
@@ -179,15 +261,7 @@ window.fetch = async (
     return jsonResponse({ total: 0, counters: [] });
   }
 
-  if (url.includes("silences.json")) {
-    if (story === "SilenceModalBrowser") {
-      const silences = Array.from({ length: 18 }, (_, i) =>
-        mockSilenceEntry(i + 1),
-      );
-      return jsonResponse(silences);
-    }
-    return jsonResponse([]);
-  }
+  if (url.includes("silences.json")) return jsonResponse([]);
 
   return originalFetch(input, init);
 };
@@ -219,6 +293,7 @@ const makeAlertStore = (): AlertStore => {
         publicURI: "http://example.com",
         readonly: false,
         error: "",
+        warnings: [],
         version: "0.24.0",
         headers: {},
         corsCredentials: "include",
@@ -243,6 +318,7 @@ const makeReadOnlyAlertStore = (): AlertStore => {
         headers: {},
         corsCredentials: "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: "ro",
         clusterMembers: ["readonly"],
@@ -307,6 +383,84 @@ const gridColorTitleBarStory = (): React.ReactNode => {
   );
 };
 
+const retainedSuppressionEvidenceStory = (): React.ReactNode => {
+  const alertStore = makeAlertStore();
+  const silenceFormStore = new SilenceFormStore();
+  const alert = MockAlert(
+    [
+      {
+        name: "summary",
+        value: "Past alert retained by lifecycle history",
+        visible: true,
+        isLink: false,
+        isAction: false,
+      },
+    ],
+    [
+      { name: "alertname", value: "APIHighErrorRate" },
+      { name: "service", value: "payments" },
+    ],
+    "suppressed",
+  );
+  alert.isLive = false;
+  alert.alertmanager = [];
+  alert.suppressionCauses = [
+    {
+      target: "production",
+      source: "alertmanager-a",
+      silenceID: "maintenance-2025-08-14",
+      resolutionStatus: "known",
+      startsAt: "2018-08-14T16:00:00Z",
+      endsAt: "2018-08-14T20:00:00Z",
+      createdBy: "operator@example.com",
+      comment: "Planned payment service maintenance",
+      matchers: [
+        {
+          name: "service",
+          value: "payments",
+          isRegex: false,
+          isEqual: true,
+        },
+      ],
+    },
+    {
+      target: "production",
+      source: "alertmanager-b",
+      silenceID: "replication-lag-rule",
+      resolutionStatus: "unresolved",
+      startsAt: null,
+      endsAt: null,
+      createdBy: "",
+      comment: "",
+      matchers: [],
+    },
+  ];
+  const group = MockAlertGroup(
+    [{ name: "team", value: "payments" }],
+    [alert],
+    [],
+    [],
+    {},
+  );
+
+  return (
+    <div className="p-3" style={{ maxWidth: "760px" }}>
+      <ul className="list-group">
+        <AlertCard
+          group={group}
+          alert={alert}
+          showReceiver={true}
+          showOnlyExpandedAnnotations={false}
+          afterUpdate={() => {}}
+          alertStore={alertStore}
+          silenceFormStore={silenceFormStore}
+          setIsMenuOpen={() => {}}
+        />
+      </ul>
+    </div>
+  );
+};
+
 const navBarStory = (): React.ReactNode => {
   const alertStore = new AlertStore([]);
   const settingsStore = new Settings(null);
@@ -321,6 +475,7 @@ const navBarStory = (): React.ReactNode => {
         uri: "https://am.example.com",
         publicURI: "https://am.example.com",
         error: "",
+        warnings: [],
         readonly: false,
         headers: {},
         corsCredentials: "include",
@@ -355,6 +510,7 @@ const navBarPausedStory = (): React.ReactNode => {
         uri: "https://am.example.com",
         publicURI: "https://am.example.com",
         error: "",
+        warnings: [],
         readonly: false,
         headers: {},
         corsCredentials: "include",
@@ -451,6 +607,7 @@ const managedSilenceStory = (): React.ReactNode => {
           alertCount={123}
           alertCountAlwaysVisible={true}
           silence={silence}
+          isExpired={false}
           alertStore={alertStore}
           silenceFormStore={silenceFormStore}
           onDidUpdate={() => {}}
@@ -460,6 +617,7 @@ const managedSilenceStory = (): React.ReactNode => {
           alertCount={123}
           alertCountAlwaysVisible={true}
           silence={silence}
+          isExpired={false}
           alertStore={alertStore}
           silenceFormStore={silenceFormStore}
           onDidUpdate={() => {}}
@@ -470,6 +628,7 @@ const managedSilenceStory = (): React.ReactNode => {
           alertCount={123}
           alertCountAlwaysVisible={true}
           silence={silence}
+          isExpired={false}
           alertStore={alertStoreReadOnly}
           silenceFormStore={silenceFormStore}
           onDidUpdate={() => {}}
@@ -480,6 +639,7 @@ const managedSilenceStory = (): React.ReactNode => {
           alertCount={123}
           alertCountAlwaysVisible={true}
           silence={expiredSilence}
+          isExpired={true}
           alertStore={alertStore}
           silenceFormStore={silenceFormStore}
           onDidUpdate={() => {}}
@@ -489,6 +649,7 @@ const managedSilenceStory = (): React.ReactNode => {
           alertCount={123}
           alertCountAlwaysVisible={true}
           silence={expiredSilence}
+          isExpired={true}
           alertStore={alertStore}
           silenceFormStore={silenceFormStore}
           onDidUpdate={() => {}}
@@ -499,6 +660,7 @@ const managedSilenceStory = (): React.ReactNode => {
           alertCount={123}
           alertCountAlwaysVisible={true}
           silence={expiredSilence}
+          isExpired={true}
           alertStore={alertStoreReadOnly}
           silenceFormStore={silenceFormStore}
           onDidUpdate={() => {}}
@@ -513,6 +675,23 @@ const silenceModalEditorReadOnlyStory = (): React.ReactNode => {
   const alertStore = makeReadOnlyAlertStore();
   const settingsStore = new Settings(null);
   const silenceFormStore = new SilenceFormStore();
+  silenceFormStore.data.setAuthor("readonly@example.com");
+  silenceFormStore.data.setComment("Read-only compact silence editor story");
+  silenceFormStore.data.setMatchers([
+    {
+      id: "0",
+      isRegex: false,
+      isEqual: true,
+      name: "alertname",
+      values: [
+        {
+          value: "Host_Down",
+          label: "Host_Down",
+          wasCreated: false,
+        },
+      ],
+    },
+  ]);
   silenceFormStore.tab.setTab("editor");
   return (
     <Modal>
@@ -521,6 +700,8 @@ const silenceModalEditorReadOnlyStory = (): React.ReactNode => {
         silenceFormStore={silenceFormStore}
         settingsStore={settingsStore}
         onHide={() => {}}
+        onSubmitted={() => {}}
+        registerCloseGuard={() => {}}
       />
     </Modal>
   );
@@ -532,7 +713,35 @@ const silenceModalEditorStory = (): React.ReactNode => {
   const silenceFormStore = new SilenceFormStore();
 
   silenceFormStore.data.setAuthor("me@example.com");
-  silenceFormStore.data.setComment("This is a test silence");
+  silenceFormStore.data.setComment("This is a compact silence editor story");
+  silenceFormStore.data.setMatchers([
+    {
+      id: "0",
+      isRegex: true,
+      isEqual: true,
+      name: "service",
+      values: [
+        {
+          value: "api|payments",
+          label: "api|payments",
+          wasCreated: false,
+        },
+      ],
+    },
+    {
+      id: "1",
+      isRegex: false,
+      isEqual: true,
+      name: "cluster",
+      values: [
+        {
+          value: "prod",
+          label: "prod",
+          wasCreated: false,
+        },
+      ],
+    },
+  ]);
   silenceFormStore.data.setStart(new Date("2018-08-14T17:36:40Z"));
   silenceFormStore.data.setEnd(addDays(new Date("2018-08-14T19:00:00Z"), 5));
   silenceFormStore.tab.setTab("editor");
@@ -544,41 +753,8 @@ const silenceModalEditorStory = (): React.ReactNode => {
         silenceFormStore={silenceFormStore}
         settingsStore={settingsStore}
         onHide={() => {}}
-        previewOpen={true}
-      />
-    </Modal>
-  );
-};
-
-const silenceModalBrowserStory = (): React.ReactNode => {
-  const alertStore = makeAlertStore();
-  const settingsStore = new Settings(null);
-  const silenceFormStore = new SilenceFormStore();
-  silenceFormStore.tab.setTab("browser");
-  return (
-    <Modal>
-      <SilenceModalContent
-        alertStore={alertStore}
-        silenceFormStore={silenceFormStore}
-        settingsStore={settingsStore}
-        onHide={() => {}}
-      />
-    </Modal>
-  );
-};
-
-const silenceModalEmptyBrowserStory = (): React.ReactNode => {
-  const alertStore = makeAlertStore();
-  const settingsStore = new Settings(null);
-  const silenceFormStore = new SilenceFormStore();
-  silenceFormStore.tab.setTab("browser");
-  return (
-    <Modal>
-      <SilenceModalContent
-        alertStore={alertStore}
-        silenceFormStore={silenceFormStore}
-        settingsStore={settingsStore}
-        onHide={() => {}}
+        onSubmitted={() => {}}
+        registerCloseGuard={() => {}}
       />
     </Modal>
   );
@@ -613,6 +789,7 @@ const toastStory = (): React.ReactNode => {
 const stories: StoryMap = {
   Grid: gridStory,
   GridColorTitleBar: gridColorTitleBarStory,
+  RetainedSuppressionEvidence: retainedSuppressionEvidenceStory,
   NavBar: navBarStory,
   NavBarPaused: navBarPausedStory,
   FatalError: fatalErrorStory,
@@ -626,8 +803,6 @@ const stories: StoryMap = {
   ManagedSilence: managedSilenceStory,
   SilenceModalEditorReadOnly: silenceModalEditorReadOnlyStory,
   SilenceModalEditor: silenceModalEditorStory,
-  SilenceModalBrowser: silenceModalBrowserStory,
-  SilenceModalEmptyBrowser: silenceModalEmptyBrowserStory,
   Toast: toastStory,
 };
 

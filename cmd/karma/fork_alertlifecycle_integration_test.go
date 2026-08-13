@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -8,6 +9,62 @@ import (
 	"github.com/prymitive/karma/internal/fork/alertlifecycle"
 	"github.com/prymitive/karma/internal/models"
 )
+
+func TestLifecycleMergePreservesStoredAlertIdentityForResolve(t *testing.T) {
+	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/lifecycle.sqlite"})
+	if err != nil {
+		t.Fatalf("OpenStore() returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	previousStore := lifecycleStore
+	lifecycleStore = store
+	t.Cleanup(func() { lifecycleStore = previousStore })
+
+	current := alertlifecycle.AlertCurrent{
+		AlertID:           "persisted-source-alert-id",
+		State:             alertlifecycle.StateInactive,
+		RawState:          alertlifecycle.StateActive,
+		Receiver:          "team-a",
+		GroupID:           "group-filtered-labels",
+		GroupLabelsJSON:   `{"alertname":"DiskFull"}`,
+		LabelsJSON:        `{"alertname":"DiskFull"}`,
+		AnnotationsJSON:   `{"summary":"Disk full"}`,
+		StartsAt:          mustParseTS(t, "2026-08-01T10:00:00Z"),
+		RelevantUpstreams: `["am-a"]`,
+	}
+	if err = store.UpsertCurrentAlert(current); err != nil {
+		t.Fatalf("UpsertCurrentAlert() returned error: %v", err)
+	}
+
+	merged := mergeLifecycleStoredAlerts([]models.AlertGroup{}, false)
+	if len(merged) != 1 || len(merged[0].Alerts) != 1 {
+		t.Fatalf("merged groups=%d alerts=%d, want one reconstructed alert", len(merged), len(merged[0].Alerts))
+	}
+	reconstructed := merged[0].Alerts[0]
+	if got := reconstructed.LabelsFingerprint(); got != current.AlertID {
+		t.Fatalf("reconstructed alert ID=%q, want persisted ID=%q", got, current.AlertID)
+	}
+
+	live := models.AlertGroup{
+		ID:       current.GroupID,
+		Receiver: current.Receiver,
+		Alerts:   models.AlertList{{LabelsFP: current.AlertID, State: models.AlertStateActive}},
+	}
+	merged = mergeLifecycleStoredAlerts([]models.AlertGroup{live}, false)
+	if len(merged) != 1 || len(merged[0].Alerts) != 1 {
+		t.Fatalf("live/stored merge groups=%d alerts=%d, want one deduplicated alert", len(merged), len(merged[0].Alerts))
+	}
+
+	comment := "resolved from reconstructed card"
+	result, err := store.ResolveAlertContext(context.Background(), reconstructed.LabelsFingerprint(), nil, &comment, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("ResolveAlertContext() returned error: %v", err)
+	}
+	if !result.Applied {
+		t.Fatal("expected resolve through reconstructed alert ID to be applied")
+	}
+}
 
 func TestMergeLifecycleStoredAlertsResolvedVisibilityByFilter(t *testing.T) {
 	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/lifecycle.sqlite"})
@@ -169,6 +226,54 @@ func TestFilterAlertsKeepsSuppressedNonLiveWithoutAlertmanager(t *testing.T) {
 
 	if count != 1 {
 		t.Fatalf("expected 1 suppressed non-live alert after filtering, got=%d", count)
+	}
+}
+
+func TestMergeLifecycleStoredAlertsRestoresSuppressionCauseForCard(t *testing.T) {
+	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/lifecycle.sqlite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	previousStore := lifecycleStore
+	lifecycleStore = store
+	t.Cleanup(func() { lifecycleStore = previousStore })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	labels := `{"service":"api"}`
+	live := alertlifecycle.LiveAlertSnapshot{
+		AlertID: "suppressed-card-cause", State: alertlifecycle.StateSuppressed,
+		Receiver: "team", GroupID: "group", GroupLabelsJSON: labels, LabelsJSON: labels,
+		MatchLabelsJSON: &labels, AnnotationsJSON: `{}`, StartsAt: now.Add(-time.Hour), LastSeenAt: now,
+		RelevantUpstreams: []string{"am-a", "am-b"}, RelevantSources: []alertlifecycle.SourceRef{{Name: "am-a", Cluster: "cluster-a"}, {Name: "am-b", Cluster: "cluster-a"}},
+		Targets: []alertlifecycle.LiveTargetSnapshot{{Target: "cluster-a", State: alertlifecycle.StateSuppressed, StartsAt: now.Add(-time.Hour), SourceNames: []string{"am-a", "am-b"}}},
+		SilencedBySources: []alertlifecycle.SourceSilenceRef{
+			{SourceName: "am-a", ClusterID: "cluster-a", SilenceIDs: []string{"sil-card-a"}},
+			{SourceName: "am-b", ClusterID: "cluster-a", SilenceIDs: []string{"sil-card-b"}},
+		},
+	}
+	sourceA := alertlifecycle.SourceSilenceState{SourceName: "am-a", ClusterID: "cluster-a", SyncStatus: "success", Silences: []alertlifecycle.SourceSilenceSnapshot{{
+		SilenceID: "sil-card-a", Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
+		Matchers: []alertlifecycle.SilenceMatcherSnapshot{{Name: "service", Value: "api", IsEqual: true}},
+	}}}
+	sourceB := alertlifecycle.SourceSilenceState{SourceName: "am-b", ClusterID: "cluster-a", SyncStatus: "success", Silences: []alertlifecycle.SourceSilenceSnapshot{{
+		SilenceID: "sil-card-b", Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
+		Matchers: []alertlifecycle.SilenceMatcherSnapshot{{Name: "service", Value: "api", IsEqual: true}},
+	}}}
+	if _, err = store.ApplyPollCycle(alertlifecycle.PollCycleInput{LiveAlerts: []alertlifecycle.LiveAlertSnapshot{live}, SuccessfulUpstreams: map[string]bool{"am-a": true, "am-b": true}, SilenceSources: []alertlifecycle.SourceSilenceState{sourceA, sourceB}, Timestamp: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ApplyPollCycle(alertlifecycle.PollCycleInput{SuccessfulUpstreams: map[string]bool{"am-a": true, "am-b": true}, SilenceSources: []alertlifecycle.SourceSilenceState{sourceA, sourceB}, Timestamp: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+
+	groups := mergeLifecycleStoredAlerts(nil, false)
+	if len(groups) != 1 || len(groups[0].Alerts) != 1 || len(groups[0].Alerts[0].SuppressionCauses) != 2 {
+		t.Fatalf("unexpected merged alert cause shape: %+v", groups)
+	}
+	causes := groups[0].Alerts[0].SuppressionCauses
+	if causes[0].Target != "cluster-a" || causes[0].Source != "am-a" || causes[0].SilenceID != "sil-card-a" || causes[1].Source != "am-b" || causes[1].SilenceID != "sil-card-b" {
+		t.Fatalf("unexpected restored card causes: %+v", causes)
 	}
 }
 

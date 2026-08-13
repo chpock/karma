@@ -26,6 +26,7 @@ const AppToasts: FC<{
 
   if (
     alertStore.data.upstreamsWithErrors.length === 0 &&
+    alertStore.data.upstreamsWithWarnings.length === 0 &&
     alertStore.info.upgradeReady === false
   ) {
     return null;
@@ -59,6 +60,22 @@ const AppToasts: FC<{
             hasClose
           />
         ))}
+        {alertStore.data.upstreamsWithWarnings.flatMap((upstream) =>
+          upstream.warnings.map((warning) => (
+            <Toast
+              key={`${upstream.name}-${warning.entryIndex}-${warning.reasonCode}`}
+              icon={faExclamation}
+              iconClass="text-warning"
+              message={
+                <ToastMessage
+                  title={`Alertmanager ${upstream.name} ignored a silence rule`}
+                  message={`Entry ${warning.entryIndex}${warning.silenceID ? ` (silence ${warning.silenceID})` : ""}, field ${warning.field}: ${warning.message}`}
+                />
+              }
+              hasClose
+            />
+          )),
+        )}
         {alertStore.info.upgradeReady ? (
           <Toast
             key="upgrade"

@@ -28,9 +28,10 @@ type AlertMapper interface {
 // SilenceMapper handles mapping of Alertmanager silence information to karma Silence models
 type SilenceMapper interface {
 	Mapper
-	Collect(string, map[string]string, time.Duration, http.RoundTripper) ([]models.Silence, error)
+	Collect(string, map[string]string, time.Duration, http.RoundTripper) ([]models.Silence, []models.SilenceWarning, error)
 	RewriteUsername([]byte, string) ([]byte, error)
 	Unmarshal([]byte) (*models.Silence, error)
+	UnmarshalResponse([]byte) (*models.Silence, error)
 }
 
 // RegisterAlertMapper allows to register mapper implementing alert data

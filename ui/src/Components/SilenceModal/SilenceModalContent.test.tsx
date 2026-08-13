@@ -1,4 +1,4 @@
-import { render, fireEvent } from "@testing-library/react";
+import { act, render, fireEvent, screen, waitFor } from "@testing-library/react";
 
 import { MockThemeContext } from "__fixtures__/Theme";
 import { AlertStore } from "Stores/AlertStore";
@@ -23,6 +23,7 @@ const generateUpstreams = (): APIAlertsResponseUpstreamsT => ({
       publicURI: "http://localhost:9093",
       readonly: false,
       error: "",
+      warnings: [],
       version: "0.24.0",
       headers: {},
       corsCredentials: "include",
@@ -55,6 +56,8 @@ const renderSilenceModalContent = () => {
         settingsStore={settingsStore}
         silenceFormStore={silenceFormStore}
         onHide={MockOnHide}
+        onSubmitted={() => {}}
+        registerCloseGuard={() => {}}
       />
     </ThemeContext>,
   );
@@ -69,19 +72,19 @@ describe("<SilenceModalContent />", () => {
     expect(container.innerHTML).toMatch(/Read only mode/);
   });
 
-  it("Clicking on the Browser tab changes content", () => {
-    const { container } = renderSilenceModalContent();
-    const tabs = container.querySelectorAll(".nav-link");
-    fireEvent.click(tabs[1]);
-    expect(silenceFormStore.tab.current).toBe("browser");
-  });
-
-  it("Clicking on the Editor tab changes content", () => {
+  it("never exposes Browse and ignores a stale browser tab value", () => {
     silenceFormStore.tab.setTab("browser");
     const { container } = renderSilenceModalContent();
-    const tabs = container.querySelectorAll(".nav-link");
-    fireEvent.click(tabs[0]);
-    expect(silenceFormStore.tab.current).toBe("editor");
+    expect(container).not.toHaveTextContent("Browse");
+    expect(container.querySelector(".fork-silence-editor")).toBeInTheDocument();
+    expect(container.innerHTML).not.toMatch(/Sort order/);
+  });
+
+  it("gives the icon-only close button an accessible name", () => {
+    renderSilenceModalContent();
+    expect(
+      screen.getAllByRole("button", { name: "Close silence editor" }),
+    ).toHaveLength(1);
   });
 
   it("Content is not blurred when silenceFormStore.toggle.blurred is false", () => {
@@ -102,58 +105,62 @@ describe("<SilenceModalContent />", () => {
 });
 
 describe("<SilenceModalContent /> Editor", () => {
-  it("title is 'New silence' when creating new silence", () => {
-    silenceFormStore.data.setStage("form");
+  it("has one 'Create silence' title when creating a new silence", () => {
     silenceFormStore.data.setSilenceID(null);
-    const { container } = renderSilenceModalContent();
-    const tabs = container.querySelectorAll(".nav-link");
-    expect(tabs[0].textContent).toBe("New silence");
-  });
-  it("title is 'Editing silence' when editing exiting silence", () => {
-    silenceFormStore.data.setStage("form");
-    silenceFormStore.data.setSilenceID("1234");
-    const { container } = renderSilenceModalContent();
-    const tabs = container.querySelectorAll(".nav-link");
-    expect(tabs[0].textContent).toBe("Editing silence");
-  });
-  it("title is 'Preview silenced alerts' when previewing silenced alerts", () => {
-    silenceFormStore.data.setStage("preview");
-    silenceFormStore.data.setSilenceID("1234");
-    const { container } = renderSilenceModalContent();
-    const tabs = container.querySelectorAll(".nav-link");
-    expect(tabs[0].textContent).toBe("Preview silenced alerts");
-  });
-  it("title is 'Silence submitted' after sending silence to Alertmanager", () => {
-    silenceFormStore.data.setStage("submit");
-    silenceFormStore.data.setSilenceID("1234");
-    const { container } = renderSilenceModalContent();
-    const tabs = container.querySelectorAll(".nav-link");
-    expect(tabs[0].textContent).toBe("Silence submitted");
+    renderSilenceModalContent();
+    expect(
+      screen.getAllByRole("heading", { name: "Create silence" }),
+    ).toHaveLength(1);
   });
 
-  it("renders SilenceForm when silenceFormStore.data.currentStage is 'UserInput'", () => {
-    silenceFormStore.data.setStage("form");
+  it("has one modal header", () => {
     const { container } = renderSilenceModalContent();
-    expect(container.querySelector("form")).toBeInTheDocument();
+    expect(container.querySelectorAll(".modal-header")).toHaveLength(1);
+    expect(
+      container.querySelectorAll(".fork-silence-editor__header"),
+    ).toHaveLength(0);
   });
 
-  it("renders SilencePreview when silenceFormStore.data.currentStage is 'Preview'", () => {
-    silenceFormStore.data.setStage("preview");
+  it("title is 'Edit silence' when editing an existing silence", () => {
+    silenceFormStore.data.setSilenceID("1234");
+    renderSilenceModalContent();
+    expect(screen.getByRole("heading", { name: "Edit silence" })).toBeVisible();
+  });
+
+  it("title is 'Recreate silence' when recreating an expired silence", () => {
+    silenceFormStore.data.setSilenceID("1234");
+    silenceFormStore.data.setOperation("recreate");
+    renderSilenceModalContent();
+    expect(
+      screen.getByRole("heading", { name: "Recreate silence" }),
+    ).toBeVisible();
+  });
+
+  it("renders new compact silence editor", () => {
     const { container } = renderSilenceModalContent();
     expect(container.innerHTML).toMatch(/Affected alerts/);
+    expect(container.querySelector(".fork-silence-editor")).toBeInTheDocument();
   });
 
-  it("renders SilenceSubmitController when silenceFormStore.data.currentStage is 'Submit'", () => {
-    silenceFormStore.data.setStage("submit");
-    const { asFragment } = renderSilenceModalContent();
-    expect(asFragment()).toMatchSnapshot();
-  });
-});
+  it("remounts editor state when an external edit selects another silence", async () => {
+    const { container, getByDisplayValue } = renderSilenceModalContent();
+    const authorInput = container.querySelector(
+      ".fork-silence-editor input.form-control",
+    ) as HTMLInputElement;
+    fireEvent.change(authorInput, { target: { value: "draft-author" } });
 
-describe("<SilenceModalContent /> Browser", () => {
-  it("renders silence browser when tab is set to Browser", () => {
-    silenceFormStore.tab.setTab("browser");
-    const { container } = renderSilenceModalContent();
-    expect(container.innerHTML).toMatch(/Sort order/);
+    act(() => {
+      silenceFormStore.data.setSilenceID("silence-external-selected");
+      silenceFormStore.data.setOperation("edit");
+      silenceFormStore.data.setAuthor("selected-author");
+    });
+
+    await waitFor(() => {
+      expect(
+        container.querySelector(".fork-silence-editor"),
+      ).toBeInTheDocument();
+      expect(container).not.toHaveTextContent("draft-author");
+      expect(getByDisplayValue("selected-author")).toBeInTheDocument();
+    });
   });
 });

@@ -22,7 +22,7 @@ func (m SilenceMapper) IsSupported(version string) bool {
 	return versionRange.Check(semver.MustParse(version))
 }
 
-func (m SilenceMapper) Collect(uri string, headers map[string]string, timeout time.Duration, httpTransport http.RoundTripper) ([]models.Silence, error) {
+func (m SilenceMapper) Collect(uri string, headers map[string]string, timeout time.Duration, httpTransport http.RoundTripper) ([]models.Silence, []models.SilenceWarning, error) {
 	c, u := newHTTPClient(uri, headers, httpTransport)
 	return silences(c, u, timeout)
 }
@@ -33,4 +33,10 @@ func (m SilenceMapper) RewriteUsername(body []byte, username string) ([]byte, er
 
 func (m SilenceMapper) Unmarshal(body []byte) (*models.Silence, error) {
 	return unmarshal(body)
+}
+
+// UnmarshalResponse decodes an existing silence returned by Alertmanager. Unlike
+// request payloads, response objects must carry a supported status.state.
+func (m SilenceMapper) UnmarshalResponse(body []byte) (*models.Silence, error) {
+	return unmarshalResponse(body)
 }

@@ -46,6 +46,7 @@ beforeEach(() => {
         headers: { foo: "bar" },
         corsCredentials: "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: "default",
         clusterMembers: ["default"],
@@ -215,6 +216,7 @@ describe("<AlertAck />", () => {
         headers: { "X-Cluster": a === "m1" || a === "2" ? "c1" : "c2" },
         corsCredentials: a === "m1" || a === "2" ? "same-origin" : "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: a === "m1" || a === "2" ? "c1" : "c2",
         clusterMembers: a === "m1" || a === "2" ? ["m1", "m2"] : ["m3", "m4"],
@@ -259,6 +261,7 @@ describe("<AlertAck />", () => {
         headers: { "X-Cluster": a === "m1" || a === "2" ? "c1" : "c2" },
         corsCredentials: a === "m1" || a === "m2" ? "same-origin" : "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: a === "m1" || a === "2" ? "c1" : "c2",
         clusterMembers: a === "m1" || a === "2" ? ["m1", "m2"] : ["m3", "m4"],
@@ -409,11 +412,8 @@ describe("<AlertAck />", () => {
     const comment = JSON.parse(
       fetchMock.callHistory.lastCall()!.options.body as string,
     ).comment;
-    expect(comment).not.toEqual(
-      "ACK! This alert was acknowledged using karma on Tue Feb 01 2000 00:00:00 GMT",
-    );
-    expect(comment).toMatch(
-      /ACK! This alert was acknowledged using karma on (Mon Jan 31 2000 19|Tue Feb 01 2000 00):00:00 GMT([+-]+)[0-9]+ \(.*\)/,
+    expect(comment).toBe(
+      `ACK! This alert was acknowledged using karma on ${new Date("2000-02-01T00:00:00.000Z").toString()}`,
     );
   });
 
@@ -552,6 +552,7 @@ describe("<AlertAck />", () => {
         headers: { "X-Cluster": a === "m1" || a === "2" ? "c1" : "c2" },
         corsCredentials: a === "m1" || a === "m2" ? "same-origin" : "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: a === "m1" || a === "2" ? "c1" : "c2",
         clusterMembers: a === "m1" || a === "2" ? ["m1", "m2"] : ["m3", "m4"],
@@ -612,6 +613,7 @@ describe("<AlertAck />", () => {
         headers: { "X-Cluster": a === "m1" || a === "2" ? "c1" : "c2" },
         corsCredentials: a === "m1" || a === "m2" ? "same-origin" : "include",
         error: "",
+        warnings: [],
         version: "0.24.0",
         cluster: a === "m1" || a === "2" ? "c1" : "c2",
         clusterMembers: a === "m1" || a === "2" ? ["m1", "m2"] : ["m3", "m4"],
@@ -664,6 +666,7 @@ describe("<AlertAck />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "default",
           clusterMembers: ["default", "fallback"],

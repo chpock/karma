@@ -1,6 +1,6 @@
 import { act } from "react";
 
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 
 import {
   MockAlert,
@@ -127,6 +127,7 @@ describe("<Alert />", () => {
           uri: "http://localhost",
           publicURI: "http://localhost",
           error: "",
+          warnings: [],
           version: "0.24.0",
           readonly: false,
           corsCredentials: "include",
@@ -139,6 +140,7 @@ describe("<Alert />", () => {
           uri: "http://localhost",
           publicURI: "http://localhost",
           error: "",
+          warnings: [],
           version: "0.24.0",
           readonly: false,
           corsCredentials: "include",
@@ -165,6 +167,7 @@ describe("<Alert />", () => {
           uri: "http://localhost",
           publicURI: "http://localhost",
           error: "",
+          warnings: [],
           version: "0.24.0",
           readonly: false,
           corsCredentials: "include",
@@ -177,6 +180,7 @@ describe("<Alert />", () => {
           uri: "http://localhost",
           publicURI: "http://localhost",
           error: "",
+          warnings: [],
           version: "0.24.0",
           readonly: false,
           corsCredentials: "include",
@@ -257,6 +261,54 @@ describe("<Alert />", () => {
     const { container } = renderAlert(alert, group, false, false);
     expect(container.innerHTML).not.toMatch(/Mocked Silence/);
     expect(container.innerHTML).toMatch(/silence123456789/);
+  });
+
+  it("renders retained suppression evidence without mutation actions", () => {
+    const alert = MockedAlert();
+    alert.isLive = false;
+    alert.state = "suppressed";
+    alert.alertmanager = [];
+    alert.suppressionCauses = [
+      {
+        target: "prod-eu",
+        source: "am-a",
+        silenceID: "historical-silence-id",
+        resolutionStatus: "known",
+        startsAt: "2026-08-01T10:00:00Z",
+        endsAt: "2026-08-01T12:00:00Z",
+        createdBy: "operator@example.com",
+        comment: "planned maintenance",
+        matchers: [
+          { name: "service", value: "api", isRegex: false, isEqual: true },
+        ],
+      },
+      {
+        target: "prod-eu",
+        source: "am-b",
+        silenceID: "unresolved-silence-id",
+        resolutionStatus: "unresolved",
+        startsAt: null,
+        endsAt: null,
+        createdBy: "",
+        comment: "",
+        matchers: [],
+      },
+    ];
+    const group = MockAlertGroup([], [alert], [], [], {});
+    renderAlert(alert, group, false, false);
+
+    expect(screen.getByText("Retained suppression evidence")).toBeVisible();
+    expect(screen.getByText("historical-silence-id")).toBeVisible();
+    expect(screen.getByText("prod-eu / am-a")).toBeVisible();
+    expect(screen.getByText('service="api"')).toBeVisible();
+    expect(screen.getByText("planned maintenance")).toBeVisible();
+    expect(screen.getByText("Rule details were not available.")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Edit" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Delete" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders only one silence for HA cluster", () => {

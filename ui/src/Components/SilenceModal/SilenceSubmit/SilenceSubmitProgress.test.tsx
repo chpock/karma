@@ -24,6 +24,7 @@ const generateUpstreams = (): APIAlertsResponseUpstreamsT => ({
       headers: { foo: "bar" },
       corsCredentials: "include",
       error: "",
+      warnings: [],
       version: "0.24.0",
       cluster: "mockAlertmanager",
       clusterMembers: ["mockAlertmanager"],
@@ -79,7 +80,7 @@ const renderSilenceSubmitProgress = () => {
   );
 };
 
-describe("<SilenceSubmitProgress />", () => {
+describe("[legacy-only] <SilenceSubmitProgress />", () => {
   it("sends a request on mount", async () => {
     renderSilenceSubmitProgress();
     await act(async () => {
@@ -157,6 +158,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -169,6 +171,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -226,6 +229,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -238,6 +242,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -289,6 +294,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -378,6 +384,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -390,6 +397,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -446,6 +454,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],
@@ -458,6 +467,7 @@ describe("<SilenceSubmitProgress />", () => {
           headers: {},
           corsCredentials: "include",
           error: "",
+          warnings: [],
           version: "0.24.0",
           cluster: "ha",
           clusterMembers: ["am1", "am2"],

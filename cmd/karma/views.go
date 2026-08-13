@@ -182,6 +182,7 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 		// need to overwrite settings as they can have user specific data
 		newResp := models.AlertsResponse{}
 		_ = jsonv2.Unmarshal(data, &newResp)
+		refreshAlertsResponseSilenceExpiry(&newResp, start)
 		labels := newResp.Settings.Labels
 		newResp.Settings = resp.Settings
 		newResp.Settings.Labels = labels
@@ -200,7 +201,7 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 	allReceivers := map[string]struct{}{}
 
 	matchFilters := getFiltersFromQuery(request.Filters)
-	dedupedAlerts := dedupedAlertsWithLifecycle(matchFilters)
+	dedupedAlerts := dedupedAlertsWithLifecycleContext(r.Context(), matchFilters)
 	dedupedColors := alertmanager.DedupColors()
 	filtered := filterAlerts(dedupedAlerts, matchFilters)
 
@@ -364,11 +365,13 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 				for _, alert := range ag.Alerts {
 					for _, am := range alert.Alertmanager {
 						for _, silence := range am.Silences {
+							silenceCopy := *silence
+							silenceCopy.IsExpired = silenceCopy.EndsAt.Before(start)
 							if _, found := silences[am.Cluster][silence.ID]; !found {
 								if _, found := silences[am.Cluster]; !found {
 									silences[am.Cluster] = map[string]models.Silence{}
 								}
-								silences[am.Cluster][silence.ID] = *silence
+								silences[am.Cluster][silence.ID] = silenceCopy
 							}
 						}
 					}
@@ -472,6 +475,16 @@ func alerts(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+func refreshAlertsResponseSilenceExpiry(response *models.AlertsResponse, now time.Time) {
+	for cluster, silences := range response.Silences {
+		for silenceID, silence := range silences {
+			silence.IsExpired = silence.EndsAt.Before(now)
+			silences[silenceID] = silence
+		}
+		response.Silences[cluster] = silences
+	}
+}
+
 func labelsSettings(grids []models.APIGrid, store models.LabelsSettings) {
 	labelSettings("@alertmanager", store)
 	labelSettings("@cluster", store)
@@ -561,16 +574,6 @@ func autocomplete(w http.ResponseWriter, r *http.Request) {
 func silences(w http.ResponseWriter, r *http.Request) {
 	noCache(w)
 
-	cacheKey := r.RequestURI
-
-	data, found := apiCache.Get(cacheKey)
-	if found {
-		mimeJSON(w)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
-		return
-	}
-
 	dedupedSilences := []models.ManagedSilence{}
 
 	showExpired := false
@@ -597,7 +600,9 @@ func silences(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	now := time.Now().UTC()
 	for _, silence := range alertmanager.DedupSilences() {
+		silence.IsExpired = !silence.Silence.EndsAt.After(now)
 		if silence.IsExpired && !showExpired {
 			continue
 		}
@@ -654,7 +659,7 @@ func silences(w http.ResponseWriter, r *http.Request) {
 	for _, silence := range dedupedSilences {
 		silenceCounters[silence.Silence.ID] = 0
 	}
-	for _, alertGroup := range dedupedAlertsWithLifecycle(nil) {
+	for _, alertGroup := range dedupedAlertsWithLifecycleContext(r.Context(), nil) {
 		for _, alert := range alertGroup.Alerts {
 			sidDone := map[string]struct{}{}
 			for _, am := range alert.Alertmanager {
@@ -675,8 +680,7 @@ func silences(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	data, _ = marshalJSON(dedupedSilences)
-	_ = apiCache.Add(cacheKey, data)
+	data, _ := marshalJSON(dedupedSilences)
 
 	mimeJSON(w)
 	w.WriteHeader(http.StatusOK)
@@ -703,7 +707,7 @@ func alertList(w http.ResponseWriter, r *http.Request) {
 
 	q, _ := lookupQueryStringSlice(r, "q")
 	matchFilters := getFiltersFromQuery(q)
-	dedupedAlerts := dedupedAlertsWithLifecycle(matchFilters)
+	dedupedAlerts := dedupedAlertsWithLifecycleContext(r.Context(), matchFilters)
 	filtered := filterAlerts(dedupedAlerts, matchFilters)
 
 	labelMap := map[string]map[string]string{}
@@ -780,7 +784,7 @@ func counters(w http.ResponseWriter, r *http.Request) {
 
 	q, _ := lookupQueryStringSlice(r, "q")
 	matchFilters := getFiltersFromQuery(q)
-	dedupedAlerts := dedupedAlertsWithLifecycle(matchFilters)
+	dedupedAlerts := dedupedAlertsWithLifecycleContext(r.Context(), matchFilters)
 	filtered := filterAlerts(dedupedAlerts, matchFilters)
 	upstreams := getUpstreams()
 	counters := map[string]map[string]int{}

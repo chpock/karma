@@ -12,7 +12,7 @@ jest.mock("react-cool-dimensions", () => ({
 
 import { act } from "react";
 
-import { render, fireEvent } from "@testing-library/react";
+import { render, fireEvent, screen, waitFor } from "@testing-library/react";
 
 import fetchMock from "@fetch-mock/jest";
 
@@ -95,6 +95,7 @@ describe("<SilenceModal />", () => {
           uri: "http://localhost:9093",
           publicURI: "http://localhost:9093",
           error: "",
+          warnings: [],
           version: "0.24.0",
           headers: {},
           corsCredentials: "same-origin",
@@ -196,5 +197,147 @@ describe("<SilenceModal />", () => {
     fireEvent.click(toggle!);
     unmount();
     expect(document.body.className.split(" ")).not.toContain("modal-open");
+  });
+
+  it("routes header close and Escape through the editor dirty guard", async () => {
+    alertStore.data.setUpstreams({
+      counters: { total: 1, healthy: 1, failed: 0 },
+      instances: [
+        {
+          name: "dev-member",
+          cluster: "dev",
+          clusterMembers: ["dev-member"],
+          uri: "http://localhost:9093",
+          publicURI: "http://localhost:9093",
+          error: "",
+          warnings: [],
+          version: "0.24.0",
+          headers: {},
+          corsCredentials: "same-origin",
+          readonly: false,
+        },
+      ],
+      clusters: { dev: ["dev-member"] },
+    });
+    silenceFormStore.data.setAutofillMatchers(false);
+    silenceFormStore.data.addEmptyMatcher();
+    silenceFormStore.data.matchers[0].name = "alertname";
+    silenceFormStore.data.matchers[0].values = [
+      { label: "HostDown", value: "HostDown", wasCreated: false },
+    ];
+    const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(false);
+
+    const { container } = renderSilenceModal();
+    fireEvent.click(container.querySelector(".nav-link")!);
+    const commentField = await waitFor(() => {
+      const field = screen
+        .getByText("Comment")
+        .parentElement?.querySelector("textarea");
+      if (!field) {
+        throw new Error("comment textarea not ready");
+      }
+      return field as HTMLTextAreaElement;
+    });
+    fireEvent.change(commentField, {
+      target: { value: "changed" },
+    });
+
+    const closeButtons = document.body.querySelectorAll(
+      ".modal-content .btn-close",
+    );
+    fireEvent.click(closeButtons[0]);
+    expect(document.body.querySelector(".modal-content")).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape", code: "Escape" });
+    expect(document.body.querySelector(".modal-content")).toBeInTheDocument();
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("always opens editor tab from navbar toggle", async () => {
+    alertStore.data.setUpstreams({
+      counters: { total: 1, healthy: 1, failed: 0 },
+      instances: [
+        {
+          name: "dev-member",
+          cluster: "dev",
+          clusterMembers: ["dev-member"],
+          uri: "http://localhost:9093",
+          publicURI: "http://localhost:9093",
+          error: "",
+          warnings: [],
+          version: "0.24.0",
+          headers: {},
+          corsCredentials: "same-origin",
+          readonly: false,
+        },
+      ],
+      clusters: { dev: ["dev-member"] },
+    });
+
+    const { container } = renderSilenceModal();
+    const toggle = container.querySelector(".nav-link");
+    fireEvent.click(toggle!);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create silence" }),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(toggle!);
+    act(() => {
+      jest.runOnlyPendingTimers();
+    });
+    fireEvent.click(toggle!);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create silence" }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Browse")).not.toBeInTheDocument();
+  });
+
+  it("blocks navbar close when registered guard rejects close", async () => {
+    alertStore.data.setUpstreams({
+      counters: { total: 1, healthy: 1, failed: 0 },
+      instances: [
+        {
+          name: "dev-member",
+          cluster: "dev",
+          clusterMembers: ["dev-member"],
+          uri: "http://localhost:9093",
+          publicURI: "http://localhost:9093",
+          error: "",
+          warnings: [],
+          version: "0.24.0",
+          headers: {},
+          corsCredentials: "same-origin",
+          readonly: false,
+        },
+      ],
+      clusters: { dev: ["dev-member"] },
+    });
+
+    const confirmSpy = jest.spyOn(window, "confirm").mockReturnValue(false);
+    const { container } = renderSilenceModal();
+    const toggle = container.querySelector(".nav-link");
+    fireEvent.click(toggle!);
+
+    const commentField = await waitFor(() => {
+      const field = screen
+        .getByText("Comment")
+        .parentElement?.querySelector("textarea");
+      if (!field) {
+        throw new Error("comment textarea not ready");
+      }
+      return field as HTMLTextAreaElement;
+    });
+    fireEvent.change(commentField, {
+      target: { value: "changed" },
+    });
+
+    fireEvent.click(toggle!);
+    expect(document.body.querySelector(".modal-content")).toBeInTheDocument();
+    expect(confirmSpy).toHaveBeenCalled();
   });
 });

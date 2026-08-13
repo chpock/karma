@@ -65,8 +65,13 @@ alertLifecycle:
   retention:
     ttl: 720h0m0s
     maxAlerts: 100000
+  silenceHistory:
+    retention:
+      ttl: 720h0m0s
   housekeeping:
     incrementalVacuumInterval: 24h0m0s
+silenceEditor:
+  maxPayloadBytes: 0
 annotations:
   default:
     hidden: true
@@ -277,6 +282,84 @@ func TestReadSimpleConfig(t *testing.T) {
 			t.Errorf("Expected Alertmanager TLS insecureSkipVerify 'true' got '%v'", am.TLS.InsecureSkipVerify)
 		}
 	}
+}
+
+func TestReadAlertLifecycleConfigFromEnv(t *testing.T) {
+	t.Setenv("ALERTLIFECYCLE_ENABLED", "false")
+	t.Setenv("ALERTLIFECYCLE_SQLITE_PATH", "/tmp/karma-test-lifecycle.sqlite")
+	t.Setenv("ALERTLIFECYCLE_RETENTION_TTL", "48h")
+	t.Setenv("ALERTLIFECYCLE_SILENCEHISTORY_RETENTION_TTL", "96h")
+	t.Setenv("ALERTLIFECYCLE_RETENTION_MAXALERTS", "42")
+	t.Setenv("ALERTLIFECYCLE_HOUSEKEEPING_INCREMENTALVACUUMINTERVAL", "2h")
+
+	_, _ = mockConfigRead()
+
+	if Config.AlertLifecycle.Enabled {
+		t.Fatal("expected alertLifecycle.enabled=false from env")
+	}
+	if got, want := Config.AlertLifecycle.SQLite.Path, "/tmp/karma-test-lifecycle.sqlite"; got != want {
+		t.Fatalf("unexpected sqlite path: got=%q want=%q", got, want)
+	}
+	if got, want := Config.AlertLifecycle.Retention.TTL, 48*time.Hour; got != want {
+		t.Fatalf("unexpected retention ttl: got=%s want=%s", got, want)
+	}
+	if got, want := Config.AlertLifecycle.SilenceHistory.Retention.TTL, 96*time.Hour; got != want {
+		t.Fatalf("unexpected silence history ttl: got=%s want=%s", got, want)
+	}
+	if got, want := Config.AlertLifecycle.Retention.MaxAlerts, 42; got != want {
+		t.Fatalf("unexpected max alerts: got=%d want=%d", got, want)
+	}
+	if got, want := Config.AlertLifecycle.Housekeeping.IncrementalVacuumInterval, 2*time.Hour; got != want {
+		t.Fatalf("unexpected vacuum interval: got=%s want=%s", got, want)
+	}
+}
+
+func TestReadSilenceEditorPayloadLimit(t *testing.T) {
+	t.Run("default is unlimited", func(t *testing.T) {
+		_, err := mockConfigRead()
+		if err != nil {
+			t.Fatalf("Read() returned error: %v", err)
+		}
+		if got := Config.SilenceEditor.MaxPayloadBytes; got != 0 {
+			t.Fatalf("maxPayloadBytes=%d, want 0", got)
+		}
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		t.Setenv("SILENCEEDITOR_MAXPAYLOADBYTES", "131072")
+		_, err := mockConfigRead()
+		if err != nil {
+			t.Fatalf("Read() returned error: %v", err)
+		}
+		if got := Config.SilenceEditor.MaxPayloadBytes; got != 131072 {
+			t.Fatalf("maxPayloadBytes=%d, want 131072", got)
+		}
+	})
+
+	t.Run("command line", func(t *testing.T) {
+		f := pflag.NewFlagSet(".", pflag.ExitOnError)
+		SetupFlags(f)
+		if err := f.Set("silenceEditor.maxPayloadBytes", "262144"); err != nil {
+			t.Fatalf("Set() returned error: %v", err)
+		}
+		if _, err := Config.Read(f); err != nil {
+			t.Fatalf("Read() returned error: %v", err)
+		}
+		if got := Config.SilenceEditor.MaxPayloadBytes; got != 262144 {
+			t.Fatalf("maxPayloadBytes=%d, want 262144", got)
+		}
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		f := pflag.NewFlagSet(".", pflag.ExitOnError)
+		SetupFlags(f)
+		if err := f.Set("silenceEditor.maxPayloadBytes", "-1"); err != nil {
+			t.Fatalf("Set() returned error: %v", err)
+		}
+		if _, err := Config.Read(f); err == nil {
+			t.Fatal("expected negative maxPayloadBytes to be rejected")
+		}
+	})
 }
 
 type urlSecretTest struct {

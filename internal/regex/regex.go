@@ -2,18 +2,10 @@ package regex
 
 import (
 	"regexp"
-	"strings"
 )
 
 func WrapRegexWithAnchors(r string) string {
-	var prefix, suffix string
-	if !strings.HasPrefix(r, "^") {
-		prefix = "^"
-	}
-	if !strings.HasSuffix(r, "$") {
-		suffix = "$"
-	}
-	return prefix + r + suffix
+	return "^(?:" + r + ")$"
 }
 
 func MustCompileAnchored(r string) *regexp.Regexp {

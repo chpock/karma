@@ -232,6 +232,25 @@ func mockCache() {
 	}
 }
 
+func TestRefreshAlertsResponseSilenceExpiryUsesRequestTime(t *testing.T) {
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	response := models.AlertsResponse{Silences: map[string]map[string]models.Silence{
+		"cluster-a": {
+			"expired": {ID: "expired", EndsAt: now.Add(-time.Nanosecond), IsExpired: false},
+			"active":  {ID: "active", EndsAt: now.Add(time.Nanosecond), IsExpired: true},
+		},
+	}}
+
+	refreshAlertsResponseSilenceExpiry(&response, now)
+
+	if !response.Silences["cluster-a"]["expired"].IsExpired {
+		t.Fatal("cached expired silence remained active")
+	}
+	if response.Silences["cluster-a"]["active"].IsExpired {
+		t.Fatal("cached active silence remained expired")
+	}
+}
+
 func mockAlerts(version string) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()
