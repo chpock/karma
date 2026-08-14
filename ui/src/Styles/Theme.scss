@@ -167,6 +167,16 @@ $body-secondary-color: $gray-600;
   --karma-silence-editor-preview-missing-bg: #fff3cd;
   --karma-silence-editor-preview-missing-color: #664d03;
   --karma-silence-editor-preview-missing-border: #ffecb5;
+  --karma-silence-editor-syntax-label: #216a89;
+  --karma-silence-editor-syntax-operator: #a84d16;
+  --karma-silence-editor-syntax-negative: #ad4053;
+  --karma-silence-editor-syntax-regexp: #784c9a;
+  --karma-silence-editor-syntax-quote: #795c00;
+  --karma-silence-editor-syntax-value: #28734c;
+  --karma-silence-editor-syntax-meta: #b22975;
+  --karma-silence-editor-syntax-meta-bg: #f9e1ef;
+  --karma-silence-editor-placeholder-resting: #687277;
+  --karma-silence-editor-placeholder-editing: #899399;
 
   .modal {
     --bs-modal-bg: #{$white};
@@ -303,6 +313,16 @@ $body-secondary-color: $gray-600;
   --karma-silence-editor-preview-missing-bg: #725b1d;
   --karma-silence-editor-preview-missing-color: #fff4cc;
   --karma-silence-editor-preview-missing-border: #9b7d28;
+  --karma-silence-editor-syntax-label: #75b9d4;
+  --karma-silence-editor-syntax-operator: #efad73;
+  --karma-silence-editor-syntax-negative: #f28a98;
+  --karma-silence-editor-syntax-regexp: #d4a5e4;
+  --karma-silence-editor-syntax-quote: #e8c76a;
+  --karma-silence-editor-syntax-value: #89c99b;
+  --karma-silence-editor-syntax-meta: #f79ac8;
+  --karma-silence-editor-syntax-meta-bg: #5a2b4a;
+  --karma-silence-editor-placeholder-resting: #687277;
+  --karma-silence-editor-placeholder-editing: #707a7f;
 
   // Component overrides for dark theme
   .badge,

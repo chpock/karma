@@ -4,6 +4,7 @@ import {
   ReactNode,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -768,6 +769,7 @@ const SilenceEditor: FC<{
   const [editingMatcher, setEditingMatcher] = useState<number | null>(null);
   const [suggestions, setSuggestions] = useState<SuggestionStateT | null>(null);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState<number>(0);
+  const [suggestionMenuStyle, setSuggestionMenuStyle] = useState<CSSProperties>();
 
   const previewGenerationRef = useRef(0);
   const previewDebounceRef = useRef<number | null>(null);
@@ -775,6 +777,8 @@ const SilenceEditor: FC<{
   const initialAuthorRef = useRef<string>(initial.author);
   const matcherEditBackupRef = useRef<{ [index: number]: string }>({});
   const matcherInputsRef = useRef<Array<HTMLInputElement | null>>([]);
+  const suggestionListsRef = useRef<Array<HTMLDivElement | null>>([]);
+  const suggestionPointerDownRef = useRef(false);
   const suggestionGenerationRef = useRef(0);
   const suggestionDebounceRef = useRef<number | null>(null);
   const suggestionAbortRef = useRef<AbortController | null>(null);
@@ -789,6 +793,75 @@ const SilenceEditor: FC<{
     }
   }, [silenceFormStore]);
   const matcherPreflightInitializedRef = useRef(false);
+
+  useLayoutEffect(() => {
+    const updateSuggestionMenuPosition = () => {
+      if (editingMatcher === null || suggestions?.index !== editingMatcher) {
+        setSuggestionMenuStyle(undefined);
+        return;
+      }
+
+      const input = matcherInputsRef.current[editingMatcher];
+      const modal = input?.closest(".modal-content");
+      if (!input || !modal) {
+        return;
+      }
+
+      const inputRect = input.getBoundingClientRect();
+      const modalRect = modal.getBoundingClientRect();
+      const edgePadding = 8;
+      const width = Math.min(448, modalRect.width - edgePadding * 2);
+      const left = Math.max(
+        modalRect.left + edgePadding,
+        Math.min(inputRect.left, modalRect.right - edgePadding - width),
+      );
+      setSuggestionMenuStyle({
+        width: `${width}px`,
+        left: `${left - inputRect.left}px`,
+      });
+    };
+
+    updateSuggestionMenuPosition();
+    window.addEventListener("resize", updateSuggestionMenuPosition);
+    return () => window.removeEventListener("resize", updateSuggestionMenuPosition);
+  }, [editingMatcher, suggestions]);
+
+  useLayoutEffect(() => {
+    const list =
+      editingMatcher === null ? null : suggestionListsRef.current[editingMatcher];
+    const activeOption = list?.querySelector<HTMLElement>(
+      '[aria-selected="true"]',
+    );
+    if (!list || !activeOption) {
+      return;
+    }
+    const listRect = list.getBoundingClientRect();
+    const optionRect = activeOption.getBoundingClientRect();
+    if (optionRect.top < listRect.top) {
+      list.scrollTop += optionRect.top - listRect.top;
+    } else if (optionRect.bottom > listRect.bottom) {
+      list.scrollTop += optionRect.bottom - listRect.bottom;
+    }
+  }, [activeSuggestionIndex, suggestions]);
+
+  useEffect(() => {
+    if (editingMatcher === null || suggestions === null) {
+      return;
+    }
+
+    const closeSuggestionsOutside = (event: PointerEvent) => {
+      const input = matcherInputsRef.current[editingMatcher];
+      if (
+        event.target instanceof Node &&
+        !input?.contains(event.target) &&
+        !suggestionListsRef.current[editingMatcher]?.contains(event.target)
+      ) {
+        setSuggestions(null);
+      }
+    };
+    window.addEventListener("pointerdown", closeSuggestionsOutside);
+    return () => window.removeEventListener("pointerdown", closeSuggestionsOutside);
+  }, [editingMatcher, suggestions]);
 
   useEffect(() => {
     if (!target && defaultTargets.length > 0) {
@@ -2062,8 +2135,8 @@ const SilenceEditor: FC<{
                     style={
                       {
                         "--matcher-width": `${Math.max(
-                          16,
-                          Math.min(52, expression.length + 5),
+                          15,
+                          Math.min(52, expression.length + 1),
                         )}ch`,
                       } as CSSProperties
                     }
@@ -2120,6 +2193,10 @@ const SilenceEditor: FC<{
                       }}
                       onBlur={() => {
                         window.setTimeout(() => {
+                          if (suggestionPointerDownRef.current) {
+                            suggestionPointerDownRef.current = false;
+                            return;
+                          }
                           setSuggestions(null);
                           if (parseMatcherExpression(expressions[index])) {
                             setEditingMatcher((current) =>
@@ -2221,9 +2298,26 @@ const SilenceEditor: FC<{
                   suggestions &&
                   suggestions.index === index ? (
                     <div
+                      ref={(list) => {
+                        suggestionListsRef.current[index] = list;
+                      }}
                       id={`${matcherComboboxId}-list-${index}`}
                       className="fork-silence-editor__suggestions"
                       role="listbox"
+                      style={suggestionMenuStyle}
+                      onPointerDown={() => {
+                        suggestionPointerDownRef.current = true;
+                      }}
+                      onPointerUp={() => {
+                        window.setTimeout(() => {
+                          suggestionPointerDownRef.current = false;
+                        }, 150);
+                      }}
+                      onPointerCancel={() => {
+                        window.setTimeout(() => {
+                          suggestionPointerDownRef.current = false;
+                        }, 150);
+                      }}
                     >
                       {suggestions.loading ? (
                         <div className="fork-silence-editor__suggestion">
@@ -2249,6 +2343,9 @@ const SilenceEditor: FC<{
                               suggestionIndex === activeSuggestionIndex
                             }
                             onMouseDown={(event) => event.preventDefault()}
+                            onMouseEnter={() => {
+                              setActiveSuggestionIndex(suggestionIndex);
+                            }}
                             onClick={() => applySuggestion(index, item)}
                           >
                             <span>{item.text}</span>

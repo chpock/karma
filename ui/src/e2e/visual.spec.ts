@@ -96,6 +96,176 @@ test("SilenceModalEditorPreview", async ({ page }) => {
   await expect(previews).toHaveScreenshot("SilenceModalEditorPreview.png");
 });
 
+test("SilenceModalEditorMatcherEditing", async ({ page }) => {
+  await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+  await page.addStyleTag({
+    content: "* { caret-color: transparent !important; }",
+  });
+
+  const matcherControls = page.locator(
+    ".fork-silence-editor__matcher-control",
+  );
+  const count = await matcherControls.count();
+  for (let i = 0; i < count; i++) {
+    await matcherControls
+      .nth(i)
+      .locator(".fork-silence-editor__matcher-expression")
+      .click();
+  }
+
+  for (let i = 0; i < count; i++) {
+    await expect(matcherControls.nth(i)).toHaveScreenshot(
+      `SilenceModalEditorMatcherEditing-${i}.png`,
+    );
+  }
+});
+
+test("SilenceModalEditorMatcherSyntax", async ({ page }) => {
+  await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+  await page.addStyleTag({
+    content: "* { caret-color: transparent !important; }",
+  });
+
+  const editors = page.locator(".fork-silence-editor");
+  const count = await editors.count();
+  for (let i = 0; i < count; i++) {
+    const input = editors
+      .nth(i)
+      .locator(".fork-silence-editor__matcher-expression");
+    await input.click();
+    await input.fill('service=~"api|payments"');
+    await input.press("Enter");
+  }
+
+  const controls = page.locator(".fork-silence-editor__matcher-control");
+  for (let i = 0; i < count; i++) {
+    await expect(controls.nth(i)).toHaveScreenshot(
+      `SilenceModalEditorMatcherSyntax-${i}.png`,
+    );
+  }
+});
+
+test("SilenceModalEditorMatcherPlaceholder", async ({ page }) => {
+  await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+  await page.addStyleTag({
+    content: "* { caret-color: transparent !important; }",
+  });
+
+  const editors = page.locator(".fork-silence-editor");
+  const count = await editors.count();
+  for (let i = 0; i < count; i++) {
+    const editor = editors.nth(i);
+    await editor.getByRole("button", { name: "+ Add matcher" }).click();
+    const placeholder = editor
+      .locator(".fork-silence-editor__matcher-expression")
+      .nth(1);
+    await expect(placeholder).toHaveScreenshot(
+      `SilenceModalEditorMatcherPlaceholder-${i}.png`,
+    );
+    await placeholder.click();
+    await expect(placeholder).toHaveScreenshot(
+      `SilenceModalEditorMatcherPlaceholderFocused-${i}.png`,
+    );
+  }
+});
+
+test("SilenceModalEditorMatcherInvalidFocused", async ({ page }) => {
+  await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+  await page.addStyleTag({
+    content: "* { caret-color: transparent !important; }",
+  });
+
+  const editors = page.locator(".fork-silence-editor");
+  const count = await editors.count();
+  for (let i = 0; i < count; i++) {
+    const editor = editors.nth(i);
+    await editor.getByRole("button", { name: "+ Add matcher" }).click();
+    const matcher = editor
+      .locator(".fork-silence-editor__matcher-expression")
+      .nth(1);
+    await matcher.click();
+    await expect(
+      editor.locator(".fork-silence-editor__matcher-control.invalid").nth(0),
+    ).toHaveCSS("border-color", "rgb(231, 76, 60)");
+    await expect(
+      editor.locator(".fork-silence-editor__matcher-control.invalid").nth(0),
+    ).toHaveScreenshot(`SilenceModalEditorMatcherInvalidFocused-${i}.png`);
+  }
+});
+
+test("SilenceModalEditorAutocomplete", async ({ page }) => {
+  await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+  await page.addStyleTag({
+    content:
+      "* { caret-color: transparent !important; } .fork-silence-editor__suggestions { scrollbar-width: none; } .fork-silence-editor__suggestions::-webkit-scrollbar { display: none; } .fork-silence-editor__suggestion { pointer-events: none; }",
+  });
+
+  const editors = page.locator(".fork-silence-editor");
+  await editors.first().getByRole("button", { name: "+ Add matcher" }).click();
+  await page.clock.runFor(250);
+
+  const firstEditor = editors.first();
+  const firstMenu = firstEditor.locator(".fork-silence-editor__suggestions");
+  await firstMenu.waitFor();
+  const selectedItem = firstMenu.locator('[aria-selected="true"]');
+  await expect(selectedItem).toHaveClass(
+    /fork-silence-editor__suggestion active/,
+  );
+
+  await expect
+    .poll(() => firstMenu.locator('[role="option"]').count())
+    .toBeGreaterThan(5);
+  const [menuBox, modalBox] = await Promise.all([
+    firstMenu.boundingBox(),
+    page.locator(".modal-content").first().boundingBox(),
+  ]);
+  expect(menuBox).not.toBeNull();
+  expect(modalBox).not.toBeNull();
+  expect(menuBox!.width).toBeGreaterThan(160);
+  expect(menuBox!.x).toBeGreaterThanOrEqual(modalBox!.x);
+  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(
+    modalBox!.x + modalBox!.width,
+  );
+  await expect
+    .poll(() =>
+      firstMenu.evaluate((menu) => menu.scrollWidth - menu.clientWidth),
+    )
+    .toBe(0);
+  const firstMatcher = firstEditor
+    .locator(".fork-silence-editor__matcher-expression")
+    .nth(1);
+  const initialMetrics = await firstMenu.evaluate((menu) => ({
+    clientHeight: menu.clientHeight,
+    scrollHeight: menu.scrollHeight,
+  }));
+  expect(initialMetrics.scrollHeight).toBeGreaterThan(
+    initialMetrics.clientHeight,
+  );
+  for (let i = 0; i < 8; i++) {
+    await firstMatcher.press("ArrowDown");
+  }
+  await expect(firstMenu.locator('[aria-selected="true"]')).toContainText(
+    "prometheus",
+  );
+  await expect
+    .poll(() => firstMenu.evaluate((menu) => menu.scrollTop))
+    .toBeGreaterThan(0);
+  await expect(firstMenu.locator('[aria-selected="true"]')).toBeInViewport();
+  const beforeScroll = await firstMenu.evaluate((menu) => menu.scrollTop);
+  await firstMenu.evaluate((menu) => {
+    menu.scrollTop = menu.scrollHeight;
+  });
+  await expect
+    .poll(() => firstMenu.evaluate((menu) => menu.scrollTop))
+    .toBeGreaterThan(beforeScroll);
+  await expect(firstMenu).toBeVisible();
+});
+
 test("SilenceModalEditorEndsAtDateTime", async ({ page }) => {
   await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
   await page.goto(`/src/e2e/stories.html#SilenceModalEditor`);

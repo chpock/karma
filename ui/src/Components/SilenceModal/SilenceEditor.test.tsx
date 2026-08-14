@@ -1019,9 +1019,109 @@ describe("<SilenceEditor />", () => {
         screen.getByRole("option", { name: /team/ }).id,
       ),
     );
+    fireEvent.mouseEnter(screen.getByRole("option", { name: /service/ }));
+    expect(input).toHaveAttribute(
+      "aria-activedescendant",
+      serviceOption.id,
+    );
+    expect(serviceOption).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(input).toHaveValue('team=""');
+    expect(input).toHaveValue('service=""');
+  });
+
+  it("keeps autocomplete open while interacting with its scrollbar", async () => {
+    jest.useFakeTimers();
+    const stores = createStores(false);
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      if (input.toString().includes("/silence-editor/labels")) {
+        return new Response(
+          JSON.stringify({
+            status: "success",
+            target: "am1",
+            total: 2,
+            truncated: false,
+            labels: [
+              { name: "service", values: 3 },
+              { name: "team", values: 2 },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return previewResponse();
+    }) as typeof fetch;
+    renderEditor(stores);
+    const input = screen.getByLabelText("Matcher 1 expression, resting");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "s" } });
+    fireEvent.keyUp(input, { key: "s" });
+    await act(async () => {
+      jest.advanceTimersByTime(220);
+    });
+
+    const listbox = await screen.findByRole("listbox");
+    fireEvent.pointerDown(listbox);
+    fireEvent.blur(input);
+    await act(async () => {
+      jest.advanceTimersByTime(100);
+    });
+
+    expect(listbox).toBeInTheDocument();
+  });
+
+  it("keeps the keyboard-selected autocomplete option visible", async () => {
+    jest.useFakeTimers();
+    const stores = createStores(false);
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      if (input.toString().includes("/silence-editor/labels")) {
+        return new Response(
+          JSON.stringify({
+            status: "success",
+            target: "am1",
+            total: 8,
+            truncated: false,
+            labels: Array.from({ length: 8 }, (_, index) => ({
+              name: `label_${index}`,
+              values: index + 1,
+            })),
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return previewResponse();
+    }) as typeof fetch;
+    renderEditor(stores);
+    const input = screen.getByLabelText("Matcher 1 expression, resting");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "l" } });
+    fireEvent.keyUp(input, { key: "l" });
+    await act(async () => {
+      jest.advanceTimersByTime(220);
+    });
+
+    const listbox = await screen.findByRole("listbox");
+    const options = screen.getAllByRole("option");
+    Object.defineProperties(listbox, {
+      scrollTop: { configurable: true, value: 0, writable: true },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ top: 0, bottom: 80 }),
+      },
+    });
+    options.forEach((option, index) => {
+      Object.defineProperty(option, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ top: index * 40, bottom: index * 40 + 40 }),
+      });
+    });
+
+    for (let i = 0; i < 4; i++) {
+      fireEvent.keyDown(input, { key: "ArrowDown" });
+    }
+
+    await waitFor(() => expect(listbox.scrollTop).toBeGreaterThan(0));
+    expect(input).toHaveAttribute("aria-activedescendant", expect.any(String));
   });
 
   it("blocks Alertmanager submission when backend RE2 validation fails", async () => {

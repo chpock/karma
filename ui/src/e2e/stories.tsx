@@ -137,13 +137,21 @@ window.fetch = async (
     return jsonResponse({
       status: "success",
       target: "am",
-      total: 4,
+      total: 12,
       truncated: false,
       labels: [
         { name: "alertname", values: 6 },
         { name: "cluster", values: 2 },
         { name: "instance", values: 5 },
         { name: "service", values: 3 },
+        { name: "deployment", values: 4 },
+        { name: "environment", values: 3 },
+        { name: "namespace", values: 6 },
+        { name: "pod", values: 9 },
+        { name: "prometheus", values: 2 },
+        { name: "receiver", values: 4 },
+        { name: "region", values: 3 },
+        { name: "very_long_alert_label_name", values: 1 },
       ],
     });
   }

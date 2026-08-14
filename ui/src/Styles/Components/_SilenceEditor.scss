@@ -57,7 +57,7 @@
 .fork-silence-editor__matcher-control {
   position: relative;
   width: var(--matcher-width, 24ch);
-  min-width: 16ch;
+  min-width: 15ch;
   max-width: min(52ch, calc(100vw - 7rem));
   height: 2.2rem;
   overflow: hidden;
@@ -72,10 +72,10 @@
   position: absolute;
   inset: 0 auto 0 0;
   min-width: max-content;
-  padding: 0.45rem 0.55rem;
+  padding: 0 0.55rem;
   white-space: pre;
   font:
-    600 0.78rem/1.2 ui-monospace,
+    600 0.875rem/1.2 ui-monospace,
     SFMono-Regular,
     Menlo,
     Consolas,
@@ -83,6 +83,8 @@
 }
 
 .fork-silence-editor__matcher-highlight {
+  display: flex;
+  align-items: center;
   z-index: 0;
   color: var(--bs-body-color);
   pointer-events: none;
@@ -96,12 +98,18 @@
   color: transparent;
   caret-color: var(--bs-body-color);
   background: transparent;
+  line-height: 2.2rem;
   outline: 0;
 }
 
 .fork-silence-editor__matcher-expression::placeholder {
-  color: var(--bs-secondary-color);
+  color: var(--karma-silence-editor-placeholder-resting);
   opacity: 1;
+}
+
+.fork-silence-editor__matcher-row.editing
+  .fork-silence-editor__matcher-expression::placeholder {
+  color: var(--karma-silence-editor-placeholder-editing);
 }
 
 .fork-silence-editor__matcher-expression::selection {
@@ -119,6 +127,11 @@
   background: var(--bs-tertiary-bg);
 }
 
+.fork-silence-editor__matcher-row.editing
+  .fork-silence-editor__matcher-control.invalid {
+  border-color: var(--bs-danger);
+}
+
 .fork-silence-editor__matcher-control.invalid {
   border-color: var(--bs-danger);
   background: color-mix(in srgb, var(--bs-danger) 7%, var(--bs-body-bg));
@@ -134,39 +147,39 @@
 }
 
 .fork-silence-editor .syntax-label {
-  color: #4e91ad;
+  color: var(--karma-silence-editor-syntax-label);
 }
 
 .fork-silence-editor .syntax-operator {
-  color: #d68a4d;
+  color: var(--karma-silence-editor-syntax-operator);
   font-weight: 750;
 }
 
 .fork-silence-editor .syntax-operator.negative {
-  color: #df6673;
+  color: var(--karma-silence-editor-syntax-negative);
 }
 
 .fork-silence-editor .syntax-operator.regexp {
-  color: #b780cc;
+  color: var(--karma-silence-editor-syntax-regexp);
 }
 
 .fork-silence-editor .syntax-quote {
-  color: #d7a943;
+  color: var(--karma-silence-editor-syntax-quote);
 }
 
 .fork-silence-editor .syntax-value {
-  color: #66a879;
+  color: var(--karma-silence-editor-syntax-value);
 }
 
 .fork-silence-editor .syntax-value.regexp {
-  text-decoration: underline dotted #b780cc;
+  text-decoration: underline dotted var(--karma-silence-editor-syntax-regexp);
   text-underline-offset: 3px;
 }
 
 .fork-silence-editor .syntax-regexp-meta {
   border-radius: 2px;
-  color: #ed69ae;
-  background: rgb(237 105 174 / 10%);
+  color: var(--karma-silence-editor-syntax-meta);
+  background: var(--karma-silence-editor-syntax-meta-bg);
   font-weight: 800;
   text-decoration: none;
 }
@@ -198,18 +211,21 @@
   position: absolute;
   z-index: 20;
   top: calc(100% + 2px);
-  left: 0;
-  right: 2.2rem;
+  min-width: min(28rem, calc(100vw - 2rem));
   max-height: 12rem;
-  overflow: auto;
+  overflow: hidden auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--bs-border-color);
   border-radius: 0.25rem;
   background: var(--bs-body-bg);
-  box-shadow: 0 0.3rem 0.8rem rgb(0 0 0 / 12%);
+  box-shadow: 0 0.45rem 1rem rgb(0 0 0 / 20%);
 }
 
 .fork-silence-editor__suggestion {
+  box-sizing: border-box;
   width: 100%;
+  min-width: 0;
+  height: 2.375rem;
   display: flex;
   border: 0;
   border-bottom: 1px solid var(--bs-border-color-translucent);
@@ -219,19 +235,33 @@
   text-align: left;
   justify-content: space-between;
   gap: 1rem;
+  white-space: nowrap;
+
+  span,
+  small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  span {
+    min-width: 0;
+  }
 }
 
 .fork-silence-editor__suggestion:last-child {
   border-bottom: 0;
 }
 
-.fork-silence-editor__suggestion:hover,
 .fork-silence-editor__suggestion.active {
-  background: var(--bs-tertiary-bg);
+  color: var(--bs-primary-text-emphasis);
+  background: var(--bs-primary-bg-subtle);
+  box-shadow: inset 0.2rem 0 0 var(--bs-primary);
 }
 
 .fork-silence-editor__suggestion small {
-  color: var(--bs-secondary-color);
+  min-width: 0;
+  color: inherit;
+  opacity: 0.78;
 }
 
 .fork-silence-editor__suggestion-summary {
