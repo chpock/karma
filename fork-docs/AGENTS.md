@@ -91,6 +91,32 @@ Additional rules:
 - Browser/visual tests must use local mocks or fixtures only. Agents must not
   access real Alertmanager instances, databases, or other real services.
 
+### UI color review gate
+
+For every UI change that adds or changes a visible color, background, border,
+shadow, opacity, badge, button, focus state, or status indicator, agents must
+review the rendered result in both the light and dark themes before reporting
+completion. Do not assume that a Bootstrap variable is suitable because of its
+name: theme overrides, selector specificity, inherited color, opacity, and the
+actual surrounding background can change the final result.
+
+The review must cover every affected state that exists in the UI, including as
+applicable: resting, hover, focus, active, disabled, loading, selected,
+success, warning, and error. For each state, verify and record in the task
+summary:
+
+- the actual foreground/background/border colors after rendering;
+- contrast status against the real composited background, distinguishing normal
+  text, secondary hints, and non-text UI boundaries;
+- semantic meaning: neutral, primary action, unavailable, progress, success,
+  warning, or error must remain visually unambiguous in both themes.
+
+Use an isolated visual fixture or regression test that renders the relevant
+states in both themes. A visual baseline that does not actually contain the
+changed state is not evidence. If a design intentionally departs from WCAG
+guidance (for example, subdued placeholder text), document the user-approved
+target and verify that target instead.
+
 ## 7. Scope guardrails for this fork phase
 
 Current lifecycle feature scope includes:

@@ -768,6 +768,44 @@ const silenceModalEditorStory = (): React.ReactNode => {
   );
 };
 
+const silenceModalEditorValidationStory = (): React.ReactNode => {
+  const alertStore = makeAlertStore();
+  const settingsStore = new Settings(null);
+  const silenceFormStore = new SilenceFormStore();
+
+  silenceFormStore.data.setMatchers([
+    {
+      id: "0",
+      isRegex: false,
+      isEqual: true,
+      name: "alertname",
+      values: [
+        {
+          value: "Host_Down",
+          label: "Host_Down",
+          wasCreated: false,
+        },
+      ],
+    },
+  ]);
+  silenceFormStore.data.setStart(new Date("2018-08-14T17:36:40Z"));
+  silenceFormStore.data.setEnd(addDays(new Date("2018-08-14T19:00:00Z"), 5));
+  silenceFormStore.tab.setTab("editor");
+
+  return (
+    <Modal>
+      <SilenceModalContent
+        alertStore={alertStore}
+        silenceFormStore={silenceFormStore}
+        settingsStore={settingsStore}
+        onHide={() => {}}
+        onSubmitted={() => {}}
+        registerCloseGuard={() => {}}
+      />
+    </Modal>
+  );
+};
+
 const toastStory = (): React.ReactNode => {
   const alertStore = new AlertStore([]);
   alertStore.info.setVersion("999.99.0");
@@ -811,6 +849,7 @@ const stories: StoryMap = {
   ManagedSilence: managedSilenceStory,
   SilenceModalEditorReadOnly: silenceModalEditorReadOnlyStory,
   SilenceModalEditor: silenceModalEditorStory,
+  SilenceModalEditorValidation: silenceModalEditorValidationStory,
   Toast: toastStory,
 };
 

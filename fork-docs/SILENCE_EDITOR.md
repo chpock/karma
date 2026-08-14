@@ -25,6 +25,9 @@ All matchers are combined with AND. The editor supports `=`, `!=`, `=~`, and `!~
 label/value autocomplete, keyboard selection, and RE2-compatible validation.
 Submission requires at least one matcher that does not match an empty value, which
 prevents an accidental match-all silence.
+When submission is unavailable, the affected field heading shows the missing or
+invalid requirement in red. The message disappears once the editor is ready to
+submit.
 
 Preview includes current and retained alerts for the selected target. It marks
 matched labels, shows when a matcher succeeded because a label was missing, and

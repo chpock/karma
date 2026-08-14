@@ -20,6 +20,7 @@ const stories: { name: string; waitFor: string }[] = [
   { name: "ManagedSilence", waitFor: ".components-managed-silence" },
   { name: "SilenceModalEditorReadOnly", waitFor: ".modal-content" },
   { name: "SilenceModalEditor", waitFor: ".modal-content" },
+  { name: "SilenceModalEditorValidation", waitFor: ".modal-content" },
   { name: "Toast", waitFor: "#root > div" },
 ];
 
@@ -139,6 +140,27 @@ test("SilenceModalEditorLayoutSpacing", async ({ page }) => {
     0,
   );
   expect(measurements.previewGap).toBeGreaterThanOrEqual(11);
+});
+
+test("SilenceModalEditorValidationLayoutIsStable", async ({ page }) => {
+  await page.goto("/src/e2e/stories.html#SilenceModalEditorValidation");
+
+  const editor = page.locator(".fork-silence-editor").first();
+  const matcher = editor.locator(".fork-silence-editor__matcher-control");
+  const preview = editor.locator(".fork-silence-editor__preview");
+  const before = {
+    matcher: await matcher.boundingBox(),
+    preview: await preview.boundingBox(),
+  };
+  await editor.getByLabel("Author").fill("operator@example.com");
+  await editor.getByLabel("Comment").fill("Planned maintenance");
+  const after = {
+    matcher: await matcher.boundingBox(),
+    preview: await preview.boundingBox(),
+  };
+
+  expect(before.matcher?.y).toBe(after.matcher?.y);
+  expect(before.preview?.y).toBe(after.preview?.y);
 });
 
 test("SilenceModalEditorFocusedTiming", async ({ page }) => {

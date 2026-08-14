@@ -776,6 +776,7 @@ const SilenceEditor: FC<{
     useState<boolean>(false);
   const [submitRequiresReopen, setSubmitRequiresReopen] =
     useState<boolean>(false);
+  const readOnly = submitting || submitSuccess !== null;
 
   const [editingMatcher, setEditingMatcher] = useState<number | null>(null);
   const [suggestions, setSuggestions] = useState<SuggestionStateT | null>(null);
@@ -1065,6 +1066,45 @@ const SilenceEditor: FC<{
     }
     return matcherError;
   }, [matcherError, target]);
+  const targetError = readOnly
+    ? "This target is read-only."
+    : !target
+      ? "Target is required."
+      : null;
+  const authorError = !author.trim() ? "Author is required." : null;
+  const commentError = !comment.trim() ? "Comment is required." : null;
+  const startTimeError = timeError && !startAtBase ? timeError : null;
+  const endTimeError = timeError && startAtBase ? timeError : null;
+  const previewVerificationMessage = !matcherPreflightValid
+    ? previewRefreshing
+      ? "Checking matchers..."
+      : previewError
+        ? "Matcher verification failed."
+        : "Waiting to verify matchers..."
+    : null;
+  const previewValidationError =
+    previewInputError !== null && previewError === previewInputError;
+  const previewHeaderStatus = previewStale
+    ? previewError !== null
+      ? "Stale: matcher verification failed"
+      : previewRefreshing
+        ? "Stale: refreshing preview"
+        : "Stale: waiting to refresh preview"
+    : previewValidationError
+      ? null
+      : previewVerificationMessage;
+  const submitDescribedBy = [
+    targetError ? `${editorFieldId}-target-error` : null,
+    matcherError ? `${editorFieldId}-matchers-error` : null,
+    authorError ? `${editorFieldId}-author-error` : null,
+    commentError ? `${editorFieldId}-comment-error` : null,
+    startTimeError ? `${editorFieldId}-starts-error` : null,
+    endTimeError ? `${editorFieldId}-ends-error` : null,
+    previewHeaderStatus ? `${editorFieldId}-preview-verification` : null,
+    submitError ? `${editorFieldId}-submit-error` : null,
+  ]
+    .filter((id): id is string => id !== null)
+    .join(" ");
 
   const dirty = useMemo(() => {
     return (
@@ -1334,6 +1374,7 @@ const SilenceEditor: FC<{
     setPreviewNextCursor(null);
     setPreviewSnapshot(null);
     setPreviewRefreshing(false);
+    setPreviewError(null);
     if (matcherPreflightInitializedRef.current) {
       setMatcherPreflightValid(false);
     } else {
@@ -1986,13 +2027,24 @@ const SilenceEditor: FC<{
     }
   };
 
-  const readOnly = submitting || submitSuccess !== null;
   return (
     <div className="fork-silence-editor">
       <div className="fork-silence-editor__body">
         <div className="fork-silence-editor__grid">
           <div className="fork-silence-editor__field">
-            <label htmlFor={`${editorFieldId}-target`}>Alertmanager</label>
+            <label htmlFor={`${editorFieldId}-target`}>
+              Alertmanager
+              {targetError ? (
+                <span
+                  id={`${editorFieldId}-target-error`}
+                  className={`fork-silence-editor__field-error${
+                    readOnly ? " fork-silence-editor__field-error--warning" : ""
+                  }`}
+                >
+                  {targetError}
+                </span>
+              ) : null}
+            </label>
             <select
               id={`${editorFieldId}-target`}
               data-modal-initial-focus={
@@ -2014,7 +2066,17 @@ const SilenceEditor: FC<{
           </div>
 
           <div className="fork-silence-editor__field">
-            <label htmlFor={`${editorFieldId}-starts-mode`}>Starts</label>
+            <label htmlFor={`${editorFieldId}-starts-mode`}>
+              Starts
+              {startTimeError ? (
+                <span
+                  id={`${editorFieldId}-starts-error`}
+                  className="fork-silence-editor__field-error"
+                >
+                  {startTimeError}
+                </span>
+              ) : null}
+            </label>
             <select
               id={`${editorFieldId}-starts-mode`}
               data-modal-initial-focus={
@@ -2073,7 +2135,17 @@ const SilenceEditor: FC<{
           </div>
 
           <div className="fork-silence-editor__field">
-            <label htmlFor={`${editorFieldId}-ends-mode`}>Ends</label>
+            <label htmlFor={`${editorFieldId}-ends-mode`}>
+              Ends
+              {endTimeError ? (
+                <span
+                  id={`${editorFieldId}-ends-error`}
+                  className="fork-silence-editor__field-error"
+                >
+                  {endTimeError}
+                </span>
+              ) : null}
+            </label>
             <select
               id={`${editorFieldId}-ends-mode`}
               className="form-select"
@@ -2145,11 +2217,7 @@ const SilenceEditor: FC<{
                 />
               </div>
             ) : null}
-            {timeError ? (
-              <small className="fork-silence-editor__timing-summary text-danger">
-                <strong>{timeError}</strong>
-              </small>
-            ) : endsAt ? (
+            {timeError === null && endsAt ? (
               <small className="fork-silence-editor__timing-summary">
                 <strong>{formatLocalTimestamp(endsAt)}</strong>
                 <br />
@@ -2160,7 +2228,17 @@ const SilenceEditor: FC<{
           </div>
 
           <div className="fork-silence-editor__field fork-silence-editor__full">
-            <span className="fork-silence-editor__field-label">Matchers</span>
+            <span className="fork-silence-editor__field-label">
+              Matchers
+              {matcherError ? (
+                <span
+                  id={`${editorFieldId}-matchers-error`}
+                  className="fork-silence-editor__field-error"
+                >
+                  {matcherError}
+                </span>
+              ) : null}
+            </span>
             <div className="fork-silence-editor__matchers">
               {expressions.map((expression, index) => (
                 <div
@@ -2418,13 +2496,20 @@ const SilenceEditor: FC<{
             >
               + Add matcher
             </button>
-            {matcherError ? (
-              <div className="text-danger small mt-1">{matcherError}</div>
-            ) : null}
           </div>
 
           <div className="fork-silence-editor__field">
-            <label htmlFor={`${editorFieldId}-author`}>Author</label>
+            <label htmlFor={`${editorFieldId}-author`}>
+              Author
+              {authorError ? (
+                <span
+                  id={`${editorFieldId}-author-error`}
+                  className="fork-silence-editor__field-error"
+                >
+                  {authorError}
+                </span>
+              ) : null}
+            </label>
             <input
               id={`${editorFieldId}-author`}
               className="form-control"
@@ -2435,7 +2520,17 @@ const SilenceEditor: FC<{
           </div>
 
           <div className="fork-silence-editor__field fork-silence-editor__full">
-            <label htmlFor={`${editorFieldId}-comment`}>Comment</label>
+            <label htmlFor={`${editorFieldId}-comment`}>
+              Comment
+              {commentError ? (
+                <span
+                  id={`${editorFieldId}-comment-error`}
+                  className="fork-silence-editor__field-error"
+                >
+                  {commentError}
+                </span>
+              ) : null}
+            </label>
             <textarea
               id={`${editorFieldId}-comment`}
               className="form-control"
@@ -2449,18 +2544,31 @@ const SilenceEditor: FC<{
 
         <div className="fork-silence-editor__preview">
           <div className="fork-silence-editor__preview-header">
-            <strong>Affected alerts</strong>
-            <span className="badge bg-secondary ms-2">{previewTotal}</span>
+              <strong>Affected alerts</strong>
+              <span className="badge bg-secondary ms-2">{previewTotal}</span>
+              {previewHeaderStatus && previewStale ? (
+                <span className="badge bg-warning text-dark ms-2">
+                  {previewHeaderStatus}
+                </span>
+              ) : previewHeaderStatus ? (
+                <span
+                  id={`${editorFieldId}-preview-verification`}
+                  className={`fork-silence-editor__field-error ms-2${
+                    previewError === null
+                      ? " fork-silence-editor__field-error--pending"
+                      : ""
+                  }`}
+                >
+                  {previewHeaderStatus}
+                </span>
+              ) : null}
             {previewRefreshing ? (
               <span className="ms-2 text-muted">
                 <FontAwesomeIcon icon={faSpinner} spin /> Refreshing
               </span>
             ) : null}
-            {previewStale ? (
-              <span className="badge bg-warning text-dark ms-2">Stale</span>
-            ) : null}
           </div>
-          {previewError ? (
+          {previewError && !previewValidationError ? (
             <div className="text-danger small p-2">{previewError}</div>
           ) : null}
           {(previewError === null || preview.length > 0) && (
@@ -2557,7 +2665,9 @@ const SilenceEditor: FC<{
         </div>
 
         {submitError ? (
-          <div className="alert alert-danger mt-2 mb-0">{submitError}</div>
+          <div id={`${editorFieldId}-submit-error`} className="alert alert-danger mt-2 mb-0">
+            {submitError}
+          </div>
         ) : null}
         {submitSuccess ? (
           <div className="alert alert-success mt-2 mb-0">
@@ -2565,7 +2675,6 @@ const SilenceEditor: FC<{
             <code>{submitSuccess}</code>
           </div>
         ) : null}
-
         <div className="fork-silence-editor__actions mt-3">
           <button
             type="button"
@@ -2577,7 +2686,7 @@ const SilenceEditor: FC<{
           </button>
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn btn-primary fork-silence-editor__submit"
             disabled={
               readOnly ||
               formError !== null ||
@@ -2586,6 +2695,7 @@ const SilenceEditor: FC<{
               silenceFormStore.data.editorSessionState !== "editing" ||
               !matcherPreflightValid
             }
+            aria-describedby={submitDescribedBy || undefined}
             onClick={() => {
               void submit();
             }}

@@ -178,6 +178,11 @@ $body-secondary-color: $gray-600;
   --karma-silence-editor-placeholder-resting: #687277;
   --karma-silence-editor-placeholder-editing: #899399;
   --karma-silence-editor-focus-border: #3f6173;
+  --karma-silence-editor-validation-error-bg: #b42318;
+  --karma-silence-editor-validation-error-border: #8f1b13;
+  --karma-silence-editor-validation-error-color: #fff;
+  --karma-silence-editor-validation-warning: #8a5a00;
+  --karma-silence-editor-validation-pending: #1c6382;
 
   .modal {
     --bs-modal-bg: #{$white};
@@ -325,6 +330,11 @@ $body-secondary-color: $gray-600;
   --karma-silence-editor-placeholder-resting: #687277;
   --karma-silence-editor-placeholder-editing: #707a7f;
   --karma-silence-editor-focus-border: #80a8c6;
+  --karma-silence-editor-validation-error-bg: #b42318;
+  --karma-silence-editor-validation-error-border: #f04438;
+  --karma-silence-editor-validation-error-color: #fff;
+  --karma-silence-editor-validation-warning: #ffd58a;
+  --karma-silence-editor-validation-pending: #9ed3e8;
 
   // Component overrides for dark theme
   .badge,

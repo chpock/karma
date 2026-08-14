@@ -189,6 +189,14 @@ describe("<SilenceEditor />", () => {
     const durationInput = screen.getByPlaceholderText("1w2d6h or 1y");
 
     const submit = screen.getByRole("button", { name: "Create silence" });
+    expect(submit).toHaveClass("fork-silence-editor__submit");
+    expect(screen.getByText("Author is required.")).toHaveClass(
+      "fork-silence-editor__field-error",
+    );
+    expect(submit).toHaveAttribute(
+      "aria-describedby",
+      expect.stringMatching(/author-error/),
+    );
 
     for (const invalid of ["30m2h", "0h1m", "1h2h", "01h", " 1h "]) {
       fireEvent.change(durationInput, { target: { value: invalid } });
@@ -202,6 +210,7 @@ describe("<SilenceEditor />", () => {
     await waitFor(() => {
       expect(submit).toBeEnabled();
     });
+    expect(submit).not.toHaveAttribute("aria-describedby");
   });
 
   it("anchors duration to max(startsAt, submitTime) in edit mode (Q7c)", async () => {
@@ -1270,6 +1279,7 @@ describe("<SilenceEditor />", () => {
     await waitFor(() =>
       expect(screen.getByText("matcher set too broad")).toBeInTheDocument(),
     );
+    expect(screen.getAllByText("matcher set too broad")).toHaveLength(1);
     expect(
       screen.getByRole("button", { name: "Create silence" }),
     ).toBeDisabled();
@@ -1293,13 +1303,20 @@ describe("<SilenceEditor />", () => {
     fireEvent.focus(matcher);
     fireEvent.change(matcher, { target: { value: "invalid matcher" } });
 
-    expect(screen.getByText("Stale")).toBeInTheDocument();
+    expect(screen.getByText("Stale: matcher verification failed")).toHaveClass(
+      "bg-warning",
+    );
     expect(
       screen.getByText(
         (_, element) =>
           element?.textContent === "alertname=alert-before-invalid-edit",
       ),
     ).toBeInTheDocument();
+
+    fireEvent.change(matcher, { target: { value: 'alertname="Host_Down"' } });
+    expect(
+      screen.queryByText('Each matcher must use full expression format: label="value"'),
+    ).not.toBeInTheDocument();
   });
 
   it("loads preview before author and comment are complete", async () => {
