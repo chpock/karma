@@ -41,6 +41,25 @@
   gap: 0.5rem;
 }
 
+.fork-silence-editor__timing-summary {
+  display: block;
+  min-height: 2.4rem;
+  padding-top: 0.3rem;
+  color: var(--bs-secondary-color);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.fork-silence-editor__timing-summary strong {
+  color: var(--bs-body-color);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.fork-silence-editor__timing-summary.text-danger strong {
+  color: inherit;
+}
+
 .fork-silence-editor__matchers {
   display: flex;
   flex-wrap: wrap;

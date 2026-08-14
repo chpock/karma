@@ -542,16 +542,27 @@ function applyDuration(base: Date, parts: DurationPartT[]): Date {
   return out;
 }
 
-function formatDateSummary(d: Date): string {
-  const offsetMinutes = -d.getTimezoneOffset();
-  const sign = offsetMinutes >= 0 ? "+" : "-";
-  const offsetHours = String(Math.floor(Math.abs(offsetMinutes) / 60)).padStart(
-    2,
-    "0",
-  );
-  const offsetRemainder = String(Math.abs(offsetMinutes) % 60).padStart(2, "0");
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return `${d.toLocaleString()} ${timezone} (UTC${sign}${offsetHours}:${offsetRemainder}) -> ${d.toISOString()}`;
+function formatLocalTimestamp(d: Date): string {
+  return d.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
+function formatUTCTimestamp(d: Date): string {
+  return d.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "UTC",
+    timeZoneName: "short",
+  });
 }
 
 function sameMembers(left: string[], right: string[]): boolean {
@@ -2029,8 +2040,19 @@ const SilenceEditor: FC<{
                 />
               </div>
             ) : (
-              <small className="text-muted">At submission</small>
+              <small className="fork-silence-editor__timing-summary">
+                <strong>At submission</strong>
+                <br />
+                Estimate: {formatUTCTimestamp(startAtBase || estimateNow)}
+              </small>
             )}
+            {startMode === "date" && startAtBase ? (
+              <small className="fork-silence-editor__timing-summary">
+                <strong>{formatLocalTimestamp(startAtBase)}</strong>
+                <br />
+                {formatUTCTimestamp(startAtBase)}
+              </small>
+            ) : null}
           </div>
 
           <div className="fork-silence-editor__field">
@@ -2107,13 +2129,15 @@ const SilenceEditor: FC<{
               </div>
             ) : null}
             {timeError ? (
-              <small className="text-danger">{timeError}</small>
+              <small className="fork-silence-editor__timing-summary text-danger">
+                <strong>{timeError}</strong>
+              </small>
             ) : endsAt ? (
-              <small className="text-muted">
-                {formatDateSummary(endsAt)}
-                {durationKind !== "absolute"
-                  ? " (estimate until submission)"
-                  : ""}
+              <small className="fork-silence-editor__timing-summary">
+                <strong>{formatLocalTimestamp(endsAt)}</strong>
+                <br />
+                {durationKind !== "absolute" ? "Estimate: " : ""}
+                {formatUTCTimestamp(endsAt)}
               </small>
             ) : null}
           </div>
