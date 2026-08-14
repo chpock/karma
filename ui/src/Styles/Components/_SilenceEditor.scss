@@ -34,7 +34,7 @@
 
 .fork-silence-editor .form-control:focus,
 .fork-silence-editor .form-select:focus {
-  box-shadow: 0 0 0 0.15rem var(--karma-silence-editor-focus-ring) !important;
+  box-shadow: none !important;
   outline: 1px solid var(--karma-silence-editor-focus-border);
   outline-offset: -1px;
 }
@@ -152,13 +152,13 @@
   .fork-silence-editor__matcher-control {
   border-color: var(--karma-silence-editor-focus-border);
   background: var(--bs-tertiary-bg);
-  box-shadow: 0 0 0 0.15rem var(--karma-silence-editor-focus-ring);
+  box-shadow: none;
 }
 
 .fork-silence-editor__matcher-row.editing
   .fork-silence-editor__matcher-control.invalid {
   border-color: var(--bs-danger);
-  box-shadow: 0 0 0 0.15rem rgb(var(--bs-danger-rgb) / 25%);
+  box-shadow: none;
 }
 
 .fork-silence-editor__matcher-control.invalid {

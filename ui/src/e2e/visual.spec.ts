@@ -174,7 +174,36 @@ test("SilenceModalEditorFocusedTiming", async ({ page }) => {
     expect(focusStyle.focused).toBe(true);
     expect(focusStyle.borderWidth).toBe("1px");
     expect(focusStyle.outlineColor).toBe(focusStyle.expectedColor);
-    expect(focusStyle.boxShadow).not.toBe("none");
+    // Bootswatch retains its static inset depth. Focus must never add an outer ring.
+    expect(focusStyle.boxShadow).toMatch(/inset$/);
+
+    const matcherInput = editors
+      .nth(i)
+      .locator(".fork-silence-editor__matcher-expression")
+      .first();
+    const matcherRestingBoxShadow = await matcherInput.evaluate((element) => {
+      const control = element.closest<HTMLElement>(
+        ".fork-silence-editor__matcher-control",
+      );
+      if (!control) {
+        throw new Error("expected matcher control");
+      }
+      return getComputedStyle(control).boxShadow;
+    });
+    await matcherInput.click();
+    const matcherStyle = await matcherInput.evaluate((element) => {
+      const control = element.closest<HTMLElement>(
+        ".fork-silence-editor__matcher-control",
+      );
+      if (!control) {
+        throw new Error("expected matcher control");
+      }
+      const style = getComputedStyle(control);
+      return {
+        boxShadow: style.boxShadow,
+      };
+    });
+    expect(matcherStyle.boxShadow).toBe(matcherRestingBoxShadow);
   }
 });
 
