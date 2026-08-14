@@ -137,11 +137,15 @@ All routes are under `/silence-editor/` and scoped to one logical target.
 
 ### 7.1 Autocomplete
 
-- `GET /silence-editor/labels?target=...`
-- `GET /silence-editor/values?target=...&name=...`
+- `POST /silence-editor/labels`
+- `POST /silence-editor/values`
 
-Responses provide exact `total`, `truncated`, and target-scoped label/value counts.
-Prefix characters are literal; `%` and `_` are not SQL wildcards.
+Both request bodies contain `target`, `term`, and `contextMatchers`; the values
+request also contains `name`. `contextMatchers` contains only completed valid
+matcher expressions other than the field being edited. The backend validates and
+compiles it independently. Responses provide required `contextFingerprint`, exact
+`total`, `truncated`, and target/context-scoped label/value counts. Prefix
+characters are literal; `%` and `_` are not SQL wildcards.
 
 ### 7.2 Status verification
 

@@ -7,6 +7,9 @@
 - The POC remains an interaction and layout aid; the React implementation and
   this specification are the runtime contract.
 - All product and architecture questions in section 14 are resolved.
+- Context-aware matcher suggestions are specified separately in
+  [`silence-editor-contextual-suggestions.md`](silence-editor-contextual-suggestions.md)
+  and remain pending implementation decisions.
 
 ## 2. Problem
 
@@ -563,12 +566,18 @@ alphabetical and normally include every distinct name, with an emergency safety
 cap of 1000. Value results are scoped to one selected label, ordered by matching
 alert frequency descending with an alphabetical tie-break, and limited to 50.
 Both response types include `total` and `truncated`; truncation is never silent.
-The UI prefix-filters label names and does not render all returned names into
-the DOM at once. Lifecycle-enabled deployments serve these queries from the
-normalized `alert_target_match_labels` index. `total` is an exact grouped count
+The backend applies the typed label-name prefix before the 1000-entry cap, so a
+valid label is never lost merely because it sorts after an earlier truncated
+result. Lifecycle-enabled deployments select candidate alert IDs before
+aggregating names or values from the normalized `alert_target_match_labels`
+index. The candidate set is constrained by every completed valid matcher other
+than the field currently being edited. `total` is an exact grouped count
 computed independently from the returned page limit; it is never a lower bound.
 Typed prefixes are literal strings: SQL wildcard characters `%` and `_` have no
-special meaning in autocomplete.
+special meaning in autocomplete. The complete request, cache, and invalidation
+contract is in [Contextual Silence-Editor Suggestions](silence-editor-contextual-suggestions.md).
+For label-name suggestions, names not already used by a valid matcher in the
+editor are shown first; already-used names follow in alphabetical order.
 
 ### Q6. Empty and broad matchers (decided)
 

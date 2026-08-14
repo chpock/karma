@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prymitive/karma/internal/models"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -2614,8 +2616,8 @@ func TestTargetMatchLabelIndexAndStats(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	now := time.Now().UTC().Truncate(time.Millisecond)
-	labelsA := `{"service":"api","team":"payments","pod_name":"one","pattern":"100%ready"}`
-	labelsB := `{"service":"payments","team":"payments","podXname":"two","pattern":"100Xready"}`
+	labelsA := `{"alertname":"HostDown","service":"api","team":"payments","pod_name":"one","pattern":"100%ready"}`
+	labelsB := `{"alertname":"OtherAlert","service":"payments","team":"payments","podXname":"two","pattern":"100Xready"}`
 
 	if err = store.UpsertCurrentAlert(AlertCurrent{
 		AlertID:           "idx-a",
@@ -2740,6 +2742,29 @@ func TestTargetMatchLabelIndexAndStats(t *testing.T) {
 	}
 	if values[1].Value != "payments" || values[1].Hits != 1 {
 		t.Fatalf("unexpected second value row: %+v", values[1])
+	}
+
+	contextMatchers := []models.SilenceMatcher{
+		models.NewSilenceMatcher("alertname", "HostDown", false, true),
+	}
+	contextNames, contextNameTotal, err := store.ListTargetContextLabelNamesWithLive("cluster-a", contextMatchers, "", 10, nil)
+	if err != nil {
+		t.Fatalf("ListTargetContextLabelNamesWithLive failed: %v", err)
+	}
+	if contextNameTotal != 5 {
+		t.Fatalf("expected exactly HostDown label names, got total=%d rows=%+v", contextNameTotal, contextNames)
+	}
+	for _, item := range contextNames {
+		if item.Name == "podXname" {
+			t.Fatalf("label from another alert leaked through context filtering: %+v", contextNames)
+		}
+	}
+	contextValues, contextValueTotal, err := store.ListTargetContextLabelValuesWithLive("cluster-a", "service", contextMatchers, "", 10, nil)
+	if err != nil {
+		t.Fatalf("ListTargetContextLabelValuesWithLive failed: %v", err)
+	}
+	if contextValueTotal != 1 || len(contextValues) != 1 || contextValues[0].Value != "api" || contextValues[0].Hits != 1 {
+		t.Fatalf("expected only HostDown service value, total=%d rows=%+v", contextValueTotal, contextValues)
 	}
 	limitedValues, limitedTotal, err := store.ListTargetLabelValues("cluster-a", "service", "", 1)
 	if err != nil {

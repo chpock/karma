@@ -20,6 +20,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prymitive/karma/internal/alertmanager"
@@ -28,7 +29,6 @@ import (
 	runtimeLog "github.com/prymitive/karma/internal/log"
 	"github.com/prymitive/karma/internal/mapper"
 	"github.com/prymitive/karma/internal/models"
-	"github.com/prymitive/karma/internal/regex"
 	"github.com/prymitive/karma/internal/uri"
 )
 
@@ -41,6 +41,25 @@ const (
 )
 
 var silenceEditorMatcherNamePattern = stdregexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
+
+const (
+	silenceEditorSuggestionCacheContexts = 8
+	silenceEditorSuggestionCacheIDs      = 100_000
+	silenceEditorSuggestionCacheTTL      = 2 * time.Minute
+)
+
+type silenceEditorSuggestionCacheEntry struct {
+	key       string
+	ids       []string
+	expiresAt time.Time
+	usedAt    time.Time
+}
+
+var silenceEditorSuggestionCache = struct {
+	sync.Mutex
+	entries map[string]silenceEditorSuggestionCacheEntry
+	total   int
+}{entries: map[string]silenceEditorSuggestionCacheEntry{}}
 
 type silenceEditorMatcher struct {
 	Name    string `json:"name"`
@@ -130,11 +149,12 @@ type silenceEditorLabelItem struct {
 }
 
 type silenceEditorLabelsResponse struct {
-	Status    string                   `json:"status"`
-	Target    string                   `json:"target"`
-	Total     int                      `json:"total"`
-	Truncated bool                     `json:"truncated"`
-	Labels    []silenceEditorLabelItem `json:"labels"`
+	Status             string                   `json:"status"`
+	Target             string                   `json:"target"`
+	ContextFingerprint string                   `json:"contextFingerprint"`
+	Total              int                      `json:"total"`
+	Truncated          bool                     `json:"truncated"`
+	Labels             []silenceEditorLabelItem `json:"labels"`
 }
 
 type silenceEditorValueItem struct {
@@ -143,12 +163,21 @@ type silenceEditorValueItem struct {
 }
 
 type silenceEditorValuesResponse struct {
-	Status    string                   `json:"status"`
-	Target    string                   `json:"target"`
-	Name      string                   `json:"name"`
-	Total     int                      `json:"total"`
-	Truncated bool                     `json:"truncated"`
-	Values    []silenceEditorValueItem `json:"values"`
+	Status             string                   `json:"status"`
+	Target             string                   `json:"target"`
+	Name               string                   `json:"name"`
+	ContextFingerprint string                   `json:"contextFingerprint"`
+	Total              int                      `json:"total"`
+	Truncated          bool                     `json:"truncated"`
+	Values             []silenceEditorValueItem `json:"values"`
+}
+
+type silenceEditorSuggestionsRequest struct {
+	Target               string                 `json:"target"`
+	Name                 string                 `json:"name,omitempty"`
+	Term                 string                 `json:"term,omitempty"`
+	ContextMatchers      []silenceEditorMatcher `json:"contextMatchers"`
+	ExistingMatcherNames []string               `json:"existingMatcherNames"`
 }
 
 type silenceEditorPreviewCandidate struct {
@@ -166,7 +195,6 @@ type silenceEditorPreviewCandidate struct {
 
 type compiledSilenceEditorMatcher struct {
 	matcher models.SilenceMatcher
-	regex   *stdregexp.Regexp
 }
 
 type silenceEditorPreviewCursor struct {
@@ -458,29 +486,30 @@ func sortSilenceEditorPreviewAlerts(alerts []silenceEditorPreviewAlert) {
 func silenceEditorLabelNames(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	noCache(w)
-	target := strings.TrimSpace(r.URL.Query().Get("target"))
-	if target == "" {
+	req, contextMatchers, ok := decodeSilenceEditorSuggestionsRequest(w, r, "labels")
+	if !ok {
+		return
+	}
+	if req.Target == "" {
 		runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_rejected", "Silence editor autocomplete request rejected", slog.String("kind", "labels"), slog.String("reason_code", "missing_target"))
 		badRequestJSON(w, "target is required")
 		return
 	}
-	term := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("term")))
-	items, total, liveOverlayCount, err := collectSilenceEditorLabelNames(r.Context(), target, term)
+	items, total, liveOverlayCount, err := collectSilenceEditorLabelNames(r.Context(), req.Target, contextMatchers, req.Term)
 	if err != nil {
-		runtimeLog.ErrorContext(r.Context(), "silence_preview", "autocomplete_failed", "Failed to collect silence editor label names", slog.String("target", target), slog.String("kind", "labels"), slog.String("stage", "collect"), slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
+		runtimeLog.ErrorContext(r.Context(), "silence_preview", "autocomplete_failed", "Failed to collect silence editor label names", slog.String("target", req.Target), slog.String("kind", "labels"), slog.String("stage", "collect"), slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
 		silenceEditorErrorJSON(w, http.StatusInternalServerError, "failed to collect labels", false)
 		return
 	}
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].Name < items[j].Name
-	})
+	sortSilenceEditorLabelSuggestions(items, req.ExistingMatcherNames)
 
 	resp := silenceEditorLabelsResponse{
-		Status:    "success",
-		Target:    target,
-		Total:     total,
-		Truncated: total > silenceEditorLabelLimit,
-		Labels:    items,
+		Status:             "success",
+		Target:             req.Target,
+		ContextFingerprint: silenceEditorSuggestionsFingerprint(req.Target, contextMatchers),
+		Total:              total,
+		Truncated:          total > silenceEditorLabelLimit,
+		Labels:             items,
 	}
 	if len(resp.Labels) > silenceEditorLabelLimit {
 		resp.Labels = resp.Labels[:silenceEditorLabelLimit]
@@ -490,28 +519,47 @@ func silenceEditorLabelNames(w http.ResponseWriter, r *http.Request) {
 	mimeJSON(w)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
-	runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_completed", "Silence editor label autocomplete completed", slog.String("target", target), slog.String("kind", "labels"), slog.Int("result_count", len(resp.Labels)), slog.Int("exact_total", total), slog.Int("live_overlay_count", liveOverlayCount), slog.Duration("duration", time.Since(startedAt)))
+	runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_completed", "Silence editor label autocomplete completed", slog.String("target", req.Target), slog.String("kind", "labels"), slog.Int("result_count", len(resp.Labels)), slog.Int("exact_total", total), slog.Int("live_overlay_count", liveOverlayCount), slog.Duration("duration", time.Since(startedAt)))
+}
+
+func sortSilenceEditorLabelSuggestions(items []silenceEditorLabelItem, existingNames []string) {
+	existing := make(map[string]struct{}, len(existingNames))
+	for _, name := range existingNames {
+		name = strings.TrimSpace(name)
+		if silenceEditorMatcherNamePattern.MatchString(name) {
+			existing[name] = struct{}{}
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		_, leftExists := existing[items[i].Name]
+		_, rightExists := existing[items[j].Name]
+		if leftExists != rightExists {
+			return !leftExists
+		}
+		return items[i].Name < items[j].Name
+	})
 }
 
 func silenceEditorLabelValues(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now()
 	noCache(w)
-	target := strings.TrimSpace(r.URL.Query().Get("target"))
-	if target == "" {
+	req, contextMatchers, ok := decodeSilenceEditorSuggestionsRequest(w, r, "values")
+	if !ok {
+		return
+	}
+	if req.Target == "" {
 		runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_rejected", "Silence editor autocomplete request rejected", slog.String("kind", "values"), slog.String("reason_code", "missing_target"))
 		badRequestJSON(w, "target is required")
 		return
 	}
-	name := strings.TrimSpace(r.URL.Query().Get("name"))
-	if name == "" {
-		runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_rejected", "Silence editor autocomplete request rejected", slog.String("target", target), slog.String("kind", "values"), slog.String("reason_code", "missing_label_name"))
+	if req.Name == "" {
+		runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_rejected", "Silence editor autocomplete request rejected", slog.String("target", req.Target), slog.String("kind", "values"), slog.String("reason_code", "missing_label_name"))
 		badRequestJSON(w, "name is required")
 		return
 	}
-	term := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("term")))
-	items, total, liveOverlayCount, err := collectSilenceEditorLabelValues(r.Context(), target, name, term)
+	items, total, liveOverlayCount, err := collectSilenceEditorLabelValues(r.Context(), req.Target, req.Name, contextMatchers, req.Term)
 	if err != nil {
-		runtimeLog.ErrorContext(r.Context(), "silence_preview", "autocomplete_failed", "Failed to collect silence editor label values", slog.String("target", target), slog.String("kind", "values"), slog.String("stage", "collect"), slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
+		runtimeLog.ErrorContext(r.Context(), "silence_preview", "autocomplete_failed", "Failed to collect silence editor label values", slog.String("target", req.Target), slog.String("kind", "values"), slog.String("stage", "collect"), slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
 		silenceEditorErrorJSON(w, http.StatusInternalServerError, "failed to collect values", false)
 		return
 	}
@@ -523,12 +571,13 @@ func silenceEditorLabelValues(w http.ResponseWriter, r *http.Request) {
 	})
 
 	resp := silenceEditorValuesResponse{
-		Status:    "success",
-		Target:    target,
-		Name:      name,
-		Total:     total,
-		Truncated: total > silenceEditorValueLimit,
-		Values:    items,
+		Status:             "success",
+		Target:             req.Target,
+		Name:               req.Name,
+		ContextFingerprint: silenceEditorSuggestionsFingerprint(req.Target, contextMatchers),
+		Total:              total,
+		Truncated:          total > silenceEditorValueLimit,
+		Values:             items,
 	}
 	if len(resp.Values) > silenceEditorValueLimit {
 		resp.Values = resp.Values[:silenceEditorValueLimit]
@@ -538,13 +587,62 @@ func silenceEditorLabelValues(w http.ResponseWriter, r *http.Request) {
 	mimeJSON(w)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
-	runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_completed", "Silence editor value autocomplete completed", slog.String("target", target), slog.String("kind", "values"), slog.Int("result_count", len(resp.Values)), slog.Int("exact_total", total), slog.Int("live_overlay_count", liveOverlayCount), slog.Duration("duration", time.Since(startedAt)))
+	runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_completed", "Silence editor value autocomplete completed", slog.String("target", req.Target), slog.String("kind", "values"), slog.Int("result_count", len(resp.Values)), slog.Int("exact_total", total), slog.Int("live_overlay_count", liveOverlayCount), slog.Duration("duration", time.Since(startedAt)))
 }
 
-func collectSilenceEditorLabelNames(ctx context.Context, target, term string) ([]silenceEditorLabelItem, int, int, error) {
+func decodeSilenceEditorSuggestionsRequest(w http.ResponseWriter, r *http.Request, kind string) (silenceEditorSuggestionsRequest, []models.SilenceMatcher, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, silenceEditorPreviewMaxRequestBytes)
+	var req silenceEditorSuggestionsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_rejected", "Silence editor autocomplete request rejected", slog.String("kind", kind), slog.String("reason_code", "invalid_request_body"))
+		badRequestJSON(w, "invalid request body")
+		return silenceEditorSuggestionsRequest{}, nil, false
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	req.Name = strings.TrimSpace(req.Name)
+	compiled, err := compileSilenceEditorMatchers(req.ContextMatchers)
+	if err != nil {
+		runtimeLog.DebugContext(r.Context(), "silence_preview", "autocomplete_rejected", "Silence editor autocomplete request rejected", slog.String("kind", kind), slog.String("reason_code", "invalid_context_matcher"))
+		badRequestJSON(w, err.Error())
+		return silenceEditorSuggestionsRequest{}, nil, false
+	}
+	matchers := make([]models.SilenceMatcher, 0, len(compiled))
+	for _, matcher := range compiled {
+		matchers = append(matchers, matcher.matcher)
+	}
+	return req, matchers, true
+}
+
+func silenceEditorSuggestionsFingerprint(target string, matchers []models.SilenceMatcher) string {
+	type fingerprintMatcher struct {
+		Name    string `json:"name"`
+		Value   string `json:"value"`
+		IsRegex bool   `json:"isRegex"`
+		IsEqual bool   `json:"isEqual"`
+	}
+	canonical := make([]fingerprintMatcher, 0, len(matchers))
+	for _, matcher := range matchers {
+		canonical = append(canonical, fingerprintMatcher{Name: matcher.Name, Value: matcher.Value, IsRegex: matcher.IsRegex, IsEqual: matcher.IsEqual})
+	}
+	sort.Slice(canonical, func(i, j int) bool {
+		return fmt.Sprintf("%s\x00%s\x00%t\x00%t", canonical[i].Name, canonical[i].Value, canonical[i].IsRegex, canonical[i].IsEqual) < fmt.Sprintf("%s\x00%s\x00%t\x00%t", canonical[j].Name, canonical[j].Value, canonical[j].IsRegex, canonical[j].IsEqual)
+	})
+	raw, _ := json.Marshal(struct {
+		Target   string               `json:"target"`
+		Matchers []fingerprintMatcher `json:"matchers"`
+	}{Target: strings.TrimSpace(target), Matchers: canonical})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func collectSilenceEditorLabelNames(ctx context.Context, target string, matchers []models.SilenceMatcher, term string) ([]silenceEditorLabelItem, int, int, error) {
 	live := collectSilenceEditorLiveRawLabelSets(ctx, target)
 	if lifecycleStore != nil {
-		stats, total, err := lifecycleStore.ListTargetLabelNamesWithLive(target, term, silenceEditorLabelLimit+1, live)
+		candidateIDs, err := silenceEditorSuggestionCandidateIDs(target, matchers, live)
+		if err != nil {
+			return nil, 0, len(live), err
+		}
+		stats, total, err := lifecycleStore.ListTargetLabelNamesForCandidateIDsWithLive(target, candidateIDs, term, silenceEditorLabelLimit+1, live)
 		if err != nil {
 			return nil, 0, len(live), err
 		}
@@ -554,14 +652,18 @@ func collectSilenceEditorLabelNames(ctx context.Context, target, term string) ([
 		}
 		return items, total, len(live), nil
 	}
-	items := collectSilenceEditorLiveLabelNames(live, term)
+	items := collectSilenceEditorLiveLabelNames(live, matchers, term)
 	return items, len(items), len(live), nil
 }
 
-func collectSilenceEditorLabelValues(ctx context.Context, target, name, term string) ([]silenceEditorValueItem, int, int, error) {
+func collectSilenceEditorLabelValues(ctx context.Context, target, name string, matchers []models.SilenceMatcher, term string) ([]silenceEditorValueItem, int, int, error) {
 	live := collectSilenceEditorLiveRawLabelSets(ctx, target)
 	if lifecycleStore != nil {
-		stats, total, err := lifecycleStore.ListTargetLabelValuesWithLive(target, name, term, silenceEditorValueLimit+1, live)
+		candidateIDs, err := silenceEditorSuggestionCandidateIDs(target, matchers, live)
+		if err != nil {
+			return nil, 0, len(live), err
+		}
+		stats, total, err := lifecycleStore.ListTargetLabelValuesForCandidateIDsWithLive(target, name, candidateIDs, term, silenceEditorValueLimit+1, live)
 		if err != nil {
 			return nil, 0, len(live), err
 		}
@@ -571,13 +673,73 @@ func collectSilenceEditorLabelValues(ctx context.Context, target, name, term str
 		}
 		return items, total, len(live), nil
 	}
-	items := collectSilenceEditorLiveLabelValues(live, name, term)
+	items := collectSilenceEditorLiveLabelValues(live, name, matchers, term)
 	return items, len(items), len(live), nil
 }
 
-func collectSilenceEditorLiveLabelNames(live []alertlifecycle.TargetLabelOverlay, term string) []silenceEditorLabelItem {
+func silenceEditorSuggestionCandidateIDs(target string, matchers []models.SilenceMatcher, live []alertlifecycle.TargetLabelOverlay) ([]string, error) {
+	revision, err := lifecycleStore.TargetSuggestionRevision(target)
+	if err != nil {
+		// A cache read is an optimization. Its failure must not change the exact result.
+		return lifecycleStore.ListTargetContextCandidateIDsWithLive(target, matchers, live)
+	}
+	liveRaw, marshalErr := json.Marshal(live)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("failed to fingerprint live suggestion overlay: %w", marshalErr)
+	}
+	liveHash := sha256.Sum256(liveRaw)
+	key := fmt.Sprintf("%p:%s:%d:%s:%s", lifecycleStore, target, revision, silenceEditorSuggestionsFingerprint(target, matchers), hex.EncodeToString(liveHash[:]))
+	now := time.Now()
+	silenceEditorSuggestionCache.Lock()
+	entry, ok := silenceEditorSuggestionCache.entries[key]
+	if ok && now.Before(entry.expiresAt) {
+		entry.usedAt = now
+		silenceEditorSuggestionCache.entries[key] = entry
+		ids := slices.Clone(entry.ids)
+		silenceEditorSuggestionCache.Unlock()
+		return ids, nil
+	}
+	if ok {
+		delete(silenceEditorSuggestionCache.entries, key)
+		silenceEditorSuggestionCache.total -= len(entry.ids)
+	}
+	silenceEditorSuggestionCache.Unlock()
+
+	ids, err := lifecycleStore.ListTargetContextCandidateIDsWithLive(target, matchers, live)
+	if err != nil || len(ids) > silenceEditorSuggestionCacheIDs {
+		return ids, err
+	}
+	silenceEditorSuggestionCache.Lock()
+	defer silenceEditorSuggestionCache.Unlock()
+	for len(silenceEditorSuggestionCache.entries) >= silenceEditorSuggestionCacheContexts || silenceEditorSuggestionCache.total+len(ids) > silenceEditorSuggestionCacheIDs {
+		var oldestKey string
+		var oldest time.Time
+		for candidateKey, candidate := range silenceEditorSuggestionCache.entries {
+			if oldestKey == "" || candidate.usedAt.Before(oldest) {
+				oldestKey, oldest = candidateKey, candidate.usedAt
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		oldestEntry := silenceEditorSuggestionCache.entries[oldestKey]
+		delete(silenceEditorSuggestionCache.entries, oldestKey)
+		silenceEditorSuggestionCache.total -= len(oldestEntry.ids)
+	}
+	if silenceEditorSuggestionCache.total+len(ids) <= silenceEditorSuggestionCacheIDs {
+		silenceEditorSuggestionCache.entries[key] = silenceEditorSuggestionCacheEntry{key: key, ids: slices.Clone(ids), expiresAt: now.Add(silenceEditorSuggestionCacheTTL), usedAt: now}
+		silenceEditorSuggestionCache.total += len(ids)
+	}
+	return ids, nil
+}
+
+func collectSilenceEditorLiveLabelNames(live []alertlifecycle.TargetLabelOverlay, matchers []models.SilenceMatcher, term string) []silenceEditorLabelItem {
+	term = strings.ToLower(strings.TrimSpace(term))
 	result := map[string]map[string]struct{}{}
 	for _, alert := range live {
+		if !silenceEditorModelMatchersMatch(matchers, alert.Labels) {
+			continue
+		}
 		for k, v := range alert.Labels {
 			if term != "" && !strings.HasPrefix(strings.ToLower(k), term) {
 				continue
@@ -595,9 +757,13 @@ func collectSilenceEditorLiveLabelNames(live []alertlifecycle.TargetLabelOverlay
 	return items
 }
 
-func collectSilenceEditorLiveLabelValues(live []alertlifecycle.TargetLabelOverlay, name, term string) []silenceEditorValueItem {
+func collectSilenceEditorLiveLabelValues(live []alertlifecycle.TargetLabelOverlay, name string, matchers []models.SilenceMatcher, term string) []silenceEditorValueItem {
+	term = strings.ToLower(strings.TrimSpace(term))
 	hits := map[string]int{}
 	for _, alert := range live {
+		if !silenceEditorModelMatchersMatch(matchers, alert.Labels) {
+			continue
+		}
 		value, ok := alert.Labels[name]
 		if !ok {
 			continue
@@ -612,6 +778,15 @@ func collectSilenceEditorLiveLabelValues(live []alertlifecycle.TargetLabelOverla
 		items = append(items, silenceEditorValueItem{Value: value, Hits: count})
 	}
 	return items
+}
+
+func silenceEditorModelMatchersMatch(matchers []models.SilenceMatcher, labels map[string]string) bool {
+	for _, matcher := range matchers {
+		if !matcher.IsMatch(labels) {
+			return false
+		}
+	}
+	return true
 }
 
 func collectSilenceEditorLiveRawLabelSets(ctx context.Context, target string) []alertlifecycle.TargetLabelOverlay {
@@ -658,19 +833,11 @@ func compileSilenceEditorMatchers(src []silenceEditorMatcher) ([]compiledSilence
 		if !silenceEditorMatcherNamePattern.MatchString(name) {
 			return nil, fmt.Errorf("invalid matcher name %q", name)
 		}
-		compiled := compiledSilenceEditorMatcher{matcher: models.SilenceMatcher{
-			Name:    name,
-			Value:   matcher.Value,
-			IsRegex: matcher.IsRegex,
-			IsEqual: matcher.IsEqual,
-		}}
-		if matcher.IsRegex {
-			re, err := regex.CompileAnchored(matcher.Value)
-			if err != nil {
-				return nil, fmt.Errorf("invalid regex for %s: %w", name, err)
-			}
-			compiled.regex = re
+		compiledMatcher, err := models.NewSilenceMatcherChecked(name, matcher.Value, matcher.IsRegex, matcher.IsEqual)
+		if err != nil {
+			return nil, fmt.Errorf("invalid regex for %s: %w", name, err)
 		}
+		compiled := compiledSilenceEditorMatcher{matcher: compiledMatcher}
 		result = append(result, compiled)
 	}
 	return result, nil
@@ -689,22 +856,7 @@ func silenceEditorMatcherSetIsSafe(matchers []compiledSilenceEditorMatcher) bool
 }
 
 func silenceEditorMatcherMatches(matcher compiledSilenceEditorMatcher, value string) bool {
-	if matcher.matcher.IsRegex {
-		re := matcher.regex
-		if re == nil {
-			return false
-		}
-		matched := re.MatchString(value)
-		if matcher.matcher.IsEqual {
-			return matched
-		}
-		return !matched
-	}
-	matched := value == matcher.matcher.Value
-	if matcher.matcher.IsEqual {
-		return matched
-	}
-	return !matched
+	return matcher.matcher.IsMatch(map[string]string{matcher.matcher.Name: value})
 }
 
 func silenceEditorMatches(matchers []compiledSilenceEditorMatcher, labels map[string]string) (bool, []string, []string) {

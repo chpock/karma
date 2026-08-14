@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -791,6 +791,66 @@ func TestSilenceEditorPreviewFingerprintUsesUnambiguousStructuredEncoding(t *tes
 	}
 }
 
+func TestSilenceEditorSuggestionsFingerprintIsMatcherOrderIndependent(t *testing.T) {
+	one, err := compileSilenceEditorMatchers([]silenceEditorMatcher{
+		{Name: "alertname", Value: "HostDown", IsEqual: true},
+		{Name: "cluster", Value: "prod", IsEqual: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := compileSilenceEditorMatchers([]silenceEditorMatcher{
+		{Name: "cluster", Value: "prod", IsEqual: true},
+		{Name: "alertname", Value: "HostDown", IsEqual: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toModels := func(in []compiledSilenceEditorMatcher) []models.SilenceMatcher {
+		out := make([]models.SilenceMatcher, 0, len(in))
+		for _, matcher := range in {
+			out = append(out, matcher.matcher)
+		}
+		return out
+	}
+	if got, want := silenceEditorSuggestionsFingerprint("target", toModels(one)), silenceEditorSuggestionsFingerprint("target", toModels(two)); got != want {
+		t.Fatalf("equivalent context matcher order changed fingerprint: got=%s want=%s", got, want)
+	}
+}
+
+func TestSilenceEditorLiveOnlySuggestionsNormalizePrefix(t *testing.T) {
+	live := []alertlifecycle.TargetLabelOverlay{{
+		AlertID: "alert-1",
+		Labels:  map[string]string{"service": "payments"},
+	}}
+	names := collectSilenceEditorLiveLabelNames(live, nil, "S")
+	if len(names) != 1 || names[0].Name != "service" {
+		t.Fatalf("uppercase label prefix did not match live-only suggestion: %+v", names)
+	}
+	values := collectSilenceEditorLiveLabelValues(live, "service", nil, "P")
+	if len(values) != 1 || values[0].Value != "payments" {
+		t.Fatalf("uppercase value prefix did not match live-only suggestion: %+v", values)
+	}
+}
+
+func TestSortSilenceEditorLabelSuggestionsPrioritizesNewLabels(t *testing.T) {
+	items := []silenceEditorLabelItem{
+		{Name: "alertname"},
+		{Name: "service"},
+		{Name: "team"},
+		{Name: "cluster"},
+	}
+	sortSilenceEditorLabelSuggestions(items, []string{"service", "alertname"})
+	got := make([]string, 0, len(items))
+	for _, item := range items {
+		got = append(got, item.Name)
+	}
+	want := []string{"cluster", "team", "alertname", "service"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("unexpected label suggestion priority: got=%v want=%v", got, want)
+	}
+}
+
 func TestSilenceEditorLabelsRequiresTarget(t *testing.T) {
 	alertmanager.UnregisterAll()
 	upstreamSetup = false
@@ -803,7 +863,8 @@ func TestSilenceEditorLabelsRequiresTarget(t *testing.T) {
 	r := testRouter()
 	setupRouter(r, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/silence-editor/labels", nil)
+	req := httptest.NewRequest(http.MethodPost, "/silence-editor/labels", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
 	r.ServeHTTP(resp, req)
 
@@ -842,12 +903,7 @@ func TestSortSilenceEditorPreviewAlertsUsesContractOrder(t *testing.T) {
 }
 
 func TestSilenceEditorMatcherUsesPrecompiledRegexWithoutRecompile(t *testing.T) {
-	re := regexp.MustCompile("^api$")
-
-	compiled := compiledSilenceEditorMatcher{
-		matcher: models.NewSilenceMatcher("service", "api", true, true),
-		regex:   re,
-	}
+	compiled := compiledSilenceEditorMatcher{matcher: models.NewSilenceMatcher("service", "api", true, true)}
 	compiled.matcher.Value = "["
 
 	if !silenceEditorMatcherMatches(compiled, "api") {

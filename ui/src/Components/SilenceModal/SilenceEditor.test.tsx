@@ -1030,6 +1030,51 @@ describe("<SilenceEditor />", () => {
     expect(input).toHaveValue('service=""');
   });
 
+  it("sends only completed sibling matchers as autocomplete context", async () => {
+    jest.useFakeTimers();
+    const stores = createStores(false);
+    const editingMatcher = NewEmptyMatcher();
+    stores.silenceFormStore.data.setMatchers([
+      stores.silenceFormStore.data.matchers[0],
+      editingMatcher,
+    ]);
+    let requestBody: Record<string, unknown> | undefined;
+    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input.toString().includes("/silence-editor/labels")) {
+        requestBody = JSON.parse(init?.body as string) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            status: "success",
+            target: "am1",
+            contextFingerprint: "context-1",
+            total: 1,
+            truncated: false,
+            labels: [{ name: "service", values: 1 }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return previewResponse();
+    }) as typeof fetch;
+
+    renderEditor(stores);
+    const input = screen.getByLabelText("Matcher 2 expression, resting");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "s" } });
+    fireEvent.keyUp(input, { key: "s" });
+    await act(async () => {
+      jest.advanceTimersByTime(220);
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(requestBody?.contextMatchers).toEqual([
+        { name: "alertname", value: "Host_Down", isRegex: false, isEqual: true },
+      ]),
+    );
+    expect(requestBody?.existingMatcherNames).toEqual(["alertname"]);
+  });
+
   it("keeps autocomplete open while interacting with its scrollbar", async () => {
     jest.useFakeTimers();
     const stores = createStores(false);

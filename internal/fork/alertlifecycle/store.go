@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ const (
 	metaRegroupFinishedAt        = "regroup_finished_at"
 	metaRegroupTargetFingerprint = "regroup_target_fingerprint"
 	metaRegroupCursorRowID       = "regroup_cursor_rowid"
+	metaSuggestionRevisionPrefix = "suggestion_revision/"
 )
 
 const reasonCodeMaxLength = 64
@@ -1513,6 +1515,310 @@ ORDER BY hits DESC, label_value ASC
 LIMIT ?
 `, string(liveJSON), target, name, term, term, term, target, name, term, term, term, limit)
 	return scanTargetLabelValueStats(rows, err)
+}
+
+// ListTargetContextLabelNamesWithLive aggregates label names only after the
+// supplied matchers select the target's candidate alerts.
+func (s *Store) ListTargetContextLabelNamesWithLive(target string, matchers []models.SilenceMatcher, term string, limit int, live []TargetLabelOverlay) ([]SilenceEditorLabelNameStat, int, error) {
+	candidates, err := s.listTargetContextLabelCandidatesWithLive(target, matchers, live)
+	if err != nil {
+		return nil, 0, err
+	}
+	return aggregateTargetLabelNames(candidates, term, limit), countTargetLabelNames(candidates, term), nil
+}
+
+// ListTargetContextCandidateIDsWithLive returns the alert IDs selected before
+// label aggregation so callers can reuse that selection for prefix requests.
+func (s *Store) ListTargetContextCandidateIDsWithLive(target string, matchers []models.SilenceMatcher, live []TargetLabelOverlay) ([]string, error) {
+	candidates, err := s.listTargetContextLabelCandidatesWithLive(target, matchers, live)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		ids = append(ids, candidate.AlertID)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func (s *Store) ListTargetLabelNamesForCandidateIDsWithLive(target string, candidateIDs []string, term string, limit int, live []TargetLabelOverlay) ([]SilenceEditorLabelNameStat, int, error) {
+	candidates, err := s.listTargetLabelCandidatesByIDWithLive(target, candidateIDs, live)
+	if err != nil {
+		return nil, 0, err
+	}
+	return aggregateTargetLabelNames(candidates, term, limit), countTargetLabelNames(candidates, term), nil
+}
+
+// ListTargetContextLabelValuesWithLive aggregates values only after the
+// supplied matchers select the target's candidate alerts.
+func (s *Store) ListTargetContextLabelValuesWithLive(target, name string, matchers []models.SilenceMatcher, term string, limit int, live []TargetLabelOverlay) ([]SilenceEditorLabelValueStat, int, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, 0, errors.New("label name cannot be empty")
+	}
+	candidates, err := s.listTargetContextLabelCandidatesWithLive(target, matchers, live)
+	if err != nil {
+		return nil, 0, err
+	}
+	items, total := aggregateTargetLabelValues(candidates, name, term, limit)
+	return items, total, nil
+}
+
+func (s *Store) ListTargetLabelValuesForCandidateIDsWithLive(target, name string, candidateIDs []string, term string, limit int, live []TargetLabelOverlay) ([]SilenceEditorLabelValueStat, int, error) {
+	candidates, err := s.listTargetLabelCandidatesByIDWithLive(target, candidateIDs, live)
+	if err != nil {
+		return nil, 0, err
+	}
+	items, total := aggregateTargetLabelValues(candidates, name, term, limit)
+	return items, total, nil
+}
+
+func (s *Store) listTargetLabelCandidatesByIDWithLive(target string, candidateIDs []string, live []TargetLabelOverlay) ([]TargetLabelOverlay, error) {
+	ids := map[string]struct{}{}
+	for _, id := range candidateIDs {
+		ids[id] = struct{}{}
+	}
+	candidates, err := s.listTargetLabelCandidatesWithLive(target, live, candidateIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]TargetLabelOverlay, 0, len(candidateIDs))
+	for _, candidate := range candidates {
+		if _, ok := ids[candidate.AlertID]; ok {
+			result = append(result, candidate)
+		}
+	}
+	return result, nil
+}
+
+func aggregateTargetLabelNames(candidates []TargetLabelOverlay, term string, limit int) []SilenceEditorLabelNameStat {
+	term = strings.ToLower(strings.TrimSpace(term))
+	valuesByName := map[string]map[string]struct{}{}
+	for _, candidate := range candidates {
+		for name, value := range candidate.Labels {
+			if term != "" && !strings.HasPrefix(strings.ToLower(name), term) {
+				continue
+			}
+			if valuesByName[name] == nil {
+				valuesByName[name] = map[string]struct{}{}
+			}
+			valuesByName[name][value] = struct{}{}
+		}
+	}
+	items := make([]SilenceEditorLabelNameStat, 0, len(valuesByName))
+	for name, values := range valuesByName {
+		items = append(items, SilenceEditorLabelNameStat{Name: name, Values: len(values)})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items
+}
+
+func countTargetLabelNames(candidates []TargetLabelOverlay, term string) int {
+	return len(aggregateTargetLabelNames(candidates, term, 0))
+}
+
+func aggregateTargetLabelValues(candidates []TargetLabelOverlay, name, term string, limit int) ([]SilenceEditorLabelValueStat, int) {
+	term = strings.ToLower(strings.TrimSpace(term))
+	hits := map[string]int{}
+	for _, candidate := range candidates {
+		value, ok := candidate.Labels[name]
+		if !ok || (term != "" && !strings.HasPrefix(strings.ToLower(value), term)) {
+			continue
+		}
+		hits[value]++
+	}
+	items := make([]SilenceEditorLabelValueStat, 0, len(hits))
+	for value, count := range hits {
+		items = append(items, SilenceEditorLabelValueStat{Value: value, Hits: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Hits != items[j].Hits {
+			return items[i].Hits > items[j].Hits
+		}
+		return items[i].Value < items[j].Value
+	})
+	total := len(items)
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return items, total
+}
+
+func (s *Store) listTargetContextLabelCandidatesWithLive(target string, matchers []models.SilenceMatcher, live []TargetLabelOverlay) ([]TargetLabelOverlay, error) {
+	seedIDs, err := s.targetExactContextCandidateIDs(target, matchers, live)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := s.listTargetLabelCandidatesWithLive(target, live, seedIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]TargetLabelOverlay, 0, len(candidates))
+	for _, candidate := range candidates {
+		matches := true
+		for _, matcher := range matchers {
+			if !matcher.IsMatch(candidate.Labels) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			result = append(result, candidate)
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) targetExactContextCandidateIDs(target string, matchers []models.SilenceMatcher, live []TargetLabelOverlay) ([]string, error) {
+	exact := make([]models.SilenceMatcher, 0, len(matchers))
+	for _, matcher := range matchers {
+		if matcher.IsEqual && !matcher.IsRegex {
+			exact = append(exact, matcher)
+		}
+	}
+	if len(exact) == 0 {
+		return nil, nil
+	}
+	var query strings.Builder
+	query.WriteString(`SELECT l.alert_id FROM alert_target_match_labels l WHERE l.target=? AND l.label_name=? AND l.label_value=?`)
+	args := []any{target, exact[0].Name, exact[0].Value}
+	for _, matcher := range exact[1:] {
+		query.WriteString(` AND EXISTS (
+SELECT 1 FROM alert_target_match_labels candidate
+WHERE candidate.alert_id=l.alert_id AND candidate.target=l.target AND candidate.label_name=? AND candidate.label_value=?
+)`)
+		args = append(args, matcher.Name, matcher.Value)
+	}
+	rows, err := s.db.Query(query.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select exact context candidates: %w", err)
+	}
+	defer rows.Close()
+	ids := map[string]struct{}{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed scanning exact context candidate: %w", err)
+		}
+		ids[id] = struct{}{}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating exact context candidates: %w", err)
+	}
+	for _, overlay := range live {
+		matches := true
+		for _, matcher := range exact {
+			if !matcher.IsMatch(overlay.Labels) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			ids[overlay.AlertID] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(ids))
+	for id := range ids {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func (s *Store) listTargetLabelCandidatesWithLive(target string, live []TargetLabelOverlay, candidateIDs []string) ([]TargetLabelOverlay, error) {
+	if s == nil || s.db == nil {
+		return nil, ErrStoreNotInitialized
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, errors.New("target cannot be empty")
+	}
+	liveJSON, err := json.Marshal(live)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode live target labels: %w", err)
+	}
+	if candidateIDs != nil && len(candidateIDs) == 0 {
+		return []TargetLabelOverlay{}, nil
+	}
+	query := `
+WITH live_input AS MATERIALIZED (
+  SELECT json_extract(value, '$.alertID') AS alert_id,
+         json_extract(value, '$.labels') AS labels_json,
+         json_extract(value, '$.matchLabelsFingerprint') AS match_labels_fingerprint
+  FROM json_each(?)
+),
+live_alerts AS MATERIALIZED (
+  SELECT input.alert_id, input.labels_json
+  FROM live_input input
+  LEFT JOIN alert_target_states state ON state.alert_id=input.alert_id AND state.target=?
+  WHERE COALESCE(input.match_labels_fingerprint, '')=''
+     OR state.alert_id IS NULL
+     OR state.retired_at IS NOT NULL
+     OR state.match_labels_fingerprint<>input.match_labels_fingerprint
+),
+live_labels AS (
+  SELECT live.alert_id, labels.key AS label_name, CAST(labels.value AS TEXT) AS label_value
+  FROM live_alerts live, json_each(live.labels_json) labels
+),
+stored_labels AS (
+  SELECT l.alert_id, l.label_name, l.label_value
+  FROM alert_target_match_labels l
+  LEFT JOIN live_alerts live ON live.alert_id=l.alert_id
+  WHERE l.target=? AND live.alert_id IS NULL%s
+)
+SELECT alert_id, label_name, label_value FROM stored_labels
+UNION ALL
+SELECT alert_id, label_name, label_value FROM live_labels
+`
+	args := []any{string(liveJSON), target, target}
+	if candidateIDs != nil {
+		candidateJSON, marshalErr := json.Marshal(candidateIDs)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("failed to encode candidate IDs: %w", marshalErr)
+		}
+		query = fmt.Sprintf(query, ` AND l.alert_id IN (SELECT value FROM json_each(?))`)
+		args = append(args, string(candidateJSON))
+	} else {
+		query = fmt.Sprintf(query, "")
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load target label candidates: %w", err)
+	}
+	defer rows.Close()
+	labelsByAlert := map[string]map[string]string{}
+	for rows.Next() {
+		var alertID, name, value string
+		if err = rows.Scan(&alertID, &name, &value); err != nil {
+			return nil, fmt.Errorf("failed scanning target label candidate: %w", err)
+		}
+		if labelsByAlert[alertID] == nil {
+			labelsByAlert[alertID] = map[string]string{}
+		}
+		labelsByAlert[alertID][name] = value
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating target label candidates: %w", err)
+	}
+	requested := map[string]struct{}{}
+	for _, id := range candidateIDs {
+		requested[id] = struct{}{}
+	}
+	result := make([]TargetLabelOverlay, 0, len(labelsByAlert))
+	for alertID, labels := range labelsByAlert {
+		if candidateIDs == nil {
+			result = append(result, TargetLabelOverlay{AlertID: alertID, Labels: labels})
+			continue
+		}
+		if _, ok := requested[alertID]; ok {
+			result = append(result, TargetLabelOverlay{AlertID: alertID, Labels: labels})
+		}
+	}
+	return result, nil
 }
 
 func scanTargetLabelValueStats(rows *sql.Rows, err error) ([]SilenceEditorLabelValueStat, int, error) {
@@ -3649,7 +3955,41 @@ INSERT INTO alert_target_events(
 			return err
 		}
 	}
+	if !oldStateRaw.Valid || oldRetiredAtRaw.Valid != (row.RetiredAt != nil) || oldMatchLabelsFingerprint != row.MatchLabelsFingerprint {
+		key := metaSuggestionRevisionPrefix + row.Target
+		revision, readErr := readMetadataInt64Tx(tx, key)
+		if readErr != nil {
+			return fmt.Errorf("failed to read target suggestion revision: %w", readErr)
+		}
+		if err := setMetadataInt64Tx(tx, key, revision+1); err != nil {
+			return fmt.Errorf("failed to advance target suggestion revision: %w", err)
+		}
+	}
 	return nil
+}
+
+// TargetSuggestionRevision returns the monotonic revision for the target's
+// stored label relation. A missing row means the initial revision zero.
+func (s *Store) TargetSuggestionRevision(target string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, ErrStoreNotInitialized
+	}
+	var raw sql.NullString
+	err := s.db.QueryRow(`SELECT value FROM metadata WHERE key=?`, metaSuggestionRevisionPrefix+strings.TrimSpace(target)).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to read target suggestion revision: %w", err)
+	}
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return 0, nil
+	}
+	revision, parseErr := strconv.ParseInt(raw.String, 10, 64)
+	if parseErr != nil || revision < 0 {
+		return 0, errors.New("invalid target suggestion revision")
+	}
+	return revision, nil
 }
 
 func readAlertMatchLabelsFingerprintTx(tx *sql.Tx, alertID string) (string, error) {

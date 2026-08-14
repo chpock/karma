@@ -1111,6 +1111,12 @@ const SilenceEditor: FC<{
       setSuggestions(null);
       return;
     }
+    const contextMatchers = parsedMatchers.flatMap((matcher, matcherIndex) =>
+      matcher !== null && matcherIndex !== index ? [matcher] : [],
+    );
+    const existingMatcherNames = parsedMatchers.flatMap((matcher) =>
+      matcher === null ? [] : [matcher.name],
+    );
     const valueMode = expression.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)=""$/);
     const inEmptyQuotes =
       valueMode && caret === expression.length - 1 && expression.length >= 2;
@@ -1130,12 +1136,17 @@ const SilenceEditor: FC<{
         const controller = new AbortController();
         suggestionAbortRef.current = controller;
         try {
-          const params = new URLSearchParams({ target, name: valueMode[1] });
           const res = await fetch(
-            `${FormatBackendURI("silence-editor/values")}?${params.toString()}`,
+            FormatBackendURI("silence-editor/values"),
             {
               ...CommonOptions,
-              method: "GET",
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                target,
+                name: valueMode[1],
+                contextMatchers,
+              }),
               signal: controller.signal,
             },
           );
@@ -1189,12 +1200,18 @@ const SilenceEditor: FC<{
       const controller = new AbortController();
       suggestionAbortRef.current = controller;
       try {
-        const params = new URLSearchParams({ target, term: labelPrefix });
         const res = await fetch(
-          `${FormatBackendURI("silence-editor/labels")}?${params.toString()}`,
+          FormatBackendURI("silence-editor/labels"),
           {
             ...CommonOptions,
-            method: "GET",
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              target,
+              term: labelPrefix,
+              contextMatchers,
+              existingMatcherNames,
+            }),
             signal: controller.signal,
           },
         );

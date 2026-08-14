@@ -110,6 +110,7 @@ interface SilenceEditorLabelNameT {
 export interface SilenceEditorLabelNamesResponseT {
   status: string;
   target: string;
+  contextFingerprint: string;
   total: number;
   truncated: boolean;
   labels: SilenceEditorLabelNameT[];
@@ -124,6 +125,7 @@ export interface SilenceEditorLabelValuesResponseT {
   status: string;
   target: string;
   name: string;
+  contextFingerprint: string;
   total: number;
   truncated: boolean;
   values: SilenceEditorLabelValueT[];

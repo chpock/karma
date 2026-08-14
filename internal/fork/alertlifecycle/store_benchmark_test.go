@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/prymitive/karma/internal/models"
 )
 
 func BenchmarkTargetLabelValueStats100k(b *testing.B) {
@@ -15,6 +17,13 @@ func BenchmarkTargetLabelValueStats100k(b *testing.B) {
 	defer store.Close()
 	_, _ = store.db.Exec(`PRAGMA foreign_keys=OFF`)
 	tx, err := store.db.Begin()
+	if err != nil {
+		b.Fatal(err)
+	}
+	alertNameStmt, err := tx.Prepare(`
+INSERT INTO alert_target_match_labels(alert_id, target, label_name, label_value, updated_at)
+VALUES(?, 'cluster-a', 'alertname', ?, ?)
+`)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -43,8 +52,16 @@ INSERT INTO alert_target_states(
 		if _, err = stmt.Exec(alertID, fmt.Sprintf("service-%03d", i%500), now); err != nil {
 			b.Fatal(err)
 		}
+		alertName := "OtherAlert"
+		if i%100 == 0 {
+			alertName = "HostDown"
+		}
+		if _, err = alertNameStmt.Exec(alertID, alertName, now); err != nil {
+			b.Fatal(err)
+		}
 	}
 	_ = stmt.Close()
+	_ = alertNameStmt.Close()
 	_ = targetStmt.Close()
 	if err = tx.Commit(); err != nil {
 		b.Fatal(err)
@@ -64,6 +81,15 @@ INSERT INTO alert_target_states(
 		for i := 0; i < b.N; i++ {
 			values, total, queryErr := store.ListTargetLabelValuesWithLive("cluster-a", "service", "", 51, overlay)
 			if queryErr != nil || len(values) != 51 || total != 501 {
+				b.Fatalf("values=%d total=%d err=%v", len(values), total, queryErr)
+			}
+		}
+	})
+	b.Run("exact-alertname-context", func(b *testing.B) {
+		context := []models.SilenceMatcher{models.NewSilenceMatcher("alertname", "HostDown", false, true)}
+		for i := 0; i < b.N; i++ {
+			values, total, queryErr := store.ListTargetContextLabelValuesWithLive("cluster-a", "service", context, "", 51, nil)
+			if queryErr != nil || len(values) != 5 || total != 5 {
 				b.Fatalf("values=%d total=%d err=%v", len(values), total, queryErr)
 			}
 		}

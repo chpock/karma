@@ -158,6 +158,7 @@ Technical documentation for maintainers:
 - [State model](SPEC/state-model.md)
 - [API contracts](SPEC/api-contracts.md)
 - [UI contracts](SPEC/ui-contracts.md)
+- [Contextual silence-editor suggestions (draft)](SPEC/silence-editor-contextual-suggestions.md)
 - [Storage schema](SPEC/storage-schema.md)
 - [Silence editor specification](SPEC/silence-editor-redesign.md)
 - [Runtime logging contract](SPEC/runtime-logging-contract.md)
