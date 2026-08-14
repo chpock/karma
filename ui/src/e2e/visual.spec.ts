@@ -96,6 +96,88 @@ test("SilenceModalEditorPreview", async ({ page }) => {
   await expect(previews).toHaveScreenshot("SilenceModalEditorPreview.png");
 });
 
+test("SilenceModalEditorLayoutSpacing", async ({ page }) => {
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+
+  const editor = page.locator(".fork-silence-editor").first();
+  await editor.locator("select").nth(1).selectOption("date");
+  await editor.locator("select").nth(2).selectOption("absolute");
+
+  const measurements = await editor.evaluate((node) => {
+    const fields = node.querySelectorAll<HTMLElement>(
+      ".fork-silence-editor__field",
+    );
+    const starts = fields[1];
+    const ends = fields[2];
+    const preview = node.querySelector<HTMLElement>(
+      ".fork-silence-editor__preview",
+    );
+    const grid = node.querySelector<HTMLElement>(".fork-silence-editor__grid");
+    if (!starts || !ends || !preview || !grid) {
+      throw new Error("expected silence editor layout elements");
+    }
+    const timingGap = (field: HTMLElement) => {
+      const select = field.querySelector<HTMLElement>("select");
+      const row = field.querySelector<HTMLElement>(
+        ".fork-silence-editor__timing-row",
+      );
+      if (!select || !row) {
+        throw new Error("expected timing controls");
+      }
+      return row.getBoundingClientRect().top - select.getBoundingClientRect().bottom;
+    };
+    return {
+      startsDetailGap: timingGap(starts),
+      endsDetailGap: timingGap(ends),
+      previewGap:
+        preview.getBoundingClientRect().top - grid.getBoundingClientRect().bottom,
+    };
+  });
+
+  expect(measurements.startsDetailGap).toBeCloseTo(
+    measurements.endsDetailGap,
+    0,
+  );
+  expect(measurements.previewGap).toBeGreaterThanOrEqual(11);
+});
+
+test("SilenceModalEditorFocusedTiming", async ({ page }) => {
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+
+  const editors = page.locator(".fork-silence-editor");
+  const count = await editors.count();
+  for (let i = 0; i < count; i++) {
+    const timingField = editors
+      .nth(i)
+      .locator(".fork-silence-editor__field")
+      .nth(1);
+    const select = timingField.locator("select");
+    await select.focus();
+    await expect(select).toBeFocused();
+
+    const focusStyle = await select.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const expected = document.createElement("span");
+      expected.style.color =
+        "var(--karma-silence-editor-focus-border)";
+      element.parentElement?.append(expected);
+      const expectedColor = getComputedStyle(expected).color;
+      expected.remove();
+      return {
+        focused: element.matches(":focus"),
+        borderWidth: style.borderTopWidth,
+        boxShadow: style.boxShadow,
+        outlineColor: style.outlineColor,
+        expectedColor,
+      };
+    });
+    expect(focusStyle.focused).toBe(true);
+    expect(focusStyle.borderWidth).toBe("1px");
+    expect(focusStyle.outlineColor).toBe(focusStyle.expectedColor);
+    expect(focusStyle.boxShadow).not.toBe("none");
+  }
+});
+
 test("SilenceModalEditorMatcherEditing", async ({ page }) => {
   await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
   await page.goto("/src/e2e/stories.html#SilenceModalEditor");

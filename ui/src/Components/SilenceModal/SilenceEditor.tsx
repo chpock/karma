@@ -2093,7 +2093,7 @@ const SilenceEditor: FC<{
                 id={`${editorFieldId}-custom-duration`}
                 aria-label="Custom duration"
                 type="text"
-                className="form-control mt-2"
+                className="form-control"
                 value={customDuration}
                 disabled={readOnly}
                 onChange={(e) => {
@@ -2103,7 +2103,7 @@ const SilenceEditor: FC<{
               />
             ) : null}
             {durationKind === "absolute" ? (
-              <div className="fork-silence-editor__timing-row mt-2">
+              <div className="fork-silence-editor__timing-row">
                 <input
                   id={`${editorFieldId}-ends-date`}
                   aria-label="End date"

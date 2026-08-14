@@ -177,6 +177,8 @@ $body-secondary-color: $gray-600;
   --karma-silence-editor-syntax-meta-bg: #f9e1ef;
   --karma-silence-editor-placeholder-resting: #687277;
   --karma-silence-editor-placeholder-editing: #899399;
+  --karma-silence-editor-focus-border: #3f6173;
+  --karma-silence-editor-focus-ring: rgb(63 97 115 / 24%);
 
   .modal {
     --bs-modal-bg: #{$white};
@@ -323,6 +325,8 @@ $body-secondary-color: $gray-600;
   --karma-silence-editor-syntax-meta-bg: #5a2b4a;
   --karma-silence-editor-placeholder-resting: #687277;
   --karma-silence-editor-placeholder-editing: #707a7f;
+  --karma-silence-editor-focus-border: #80a8c6;
+  --karma-silence-editor-focus-ring: rgb(128 168 198 / 28%);
 
   // Component overrides for dark theme
   .badge,

@@ -8,6 +8,7 @@
 .fork-silence-editor__body {
   display: flex;
   flex-direction: column;
+  gap: 0.75rem;
 }
 
 .fork-silence-editor__grid {
@@ -29,6 +30,13 @@
   font-size: 0.78rem;
   font-weight: 600;
   color: var(--bs-secondary-color);
+}
+
+.fork-silence-editor .form-control:focus,
+.fork-silence-editor .form-select:focus {
+  box-shadow: 0 0 0 0.15rem var(--karma-silence-editor-focus-ring) !important;
+  outline: 1px solid var(--karma-silence-editor-focus-border);
+  outline-offset: -1px;
 }
 
 .fork-silence-editor__full {
@@ -142,13 +150,15 @@
 
 .fork-silence-editor__matcher-row.editing
   .fork-silence-editor__matcher-control {
-  border-color: var(--bs-primary);
+  border-color: var(--karma-silence-editor-focus-border);
   background: var(--bs-tertiary-bg);
+  box-shadow: 0 0 0 0.15rem var(--karma-silence-editor-focus-ring);
 }
 
 .fork-silence-editor__matcher-row.editing
   .fork-silence-editor__matcher-control.invalid {
   border-color: var(--bs-danger);
+  box-shadow: 0 0 0 0.15rem rgb(var(--bs-danger-rgb) / 25%);
 }
 
 .fork-silence-editor__matcher-control.invalid {
@@ -291,7 +301,6 @@
 }
 
 .fork-silence-editor__preview {
-  margin-top: 0.25rem;
   border: 1px solid var(--bs-border-color);
   border-radius: 0.25rem;
   background: var(--bs-tertiary-bg);
