@@ -817,7 +817,7 @@ describe("<SilenceEditor />", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          (_, element) => element?.textContent === "alertname=alert-2",
+          (_, element) => element?.textContent === "alert-2",
         ),
       ).toBeInTheDocument(),
     );
@@ -1295,7 +1295,7 @@ describe("<SilenceEditor />", () => {
       expect(
         screen.getByText(
           (_, element) =>
-            element?.textContent === "alertname=alert-before-invalid-edit",
+            element?.textContent === "alert-before-invalid-edit",
         ),
       ).toBeInTheDocument(),
     );
@@ -1308,8 +1308,7 @@ describe("<SilenceEditor />", () => {
     );
     expect(
       screen.getByText(
-        (_, element) =>
-          element?.textContent === "alertname=alert-before-invalid-edit",
+          (_, element) => element?.textContent === "alert-before-invalid-edit",
       ),
     ).toBeInTheDocument();
 
@@ -1341,7 +1340,7 @@ describe("<SilenceEditor />", () => {
     expect(
       screen.getByText(
         (_, element) =>
-          element?.textContent === "alertname=metadata-independent-preview",
+            element?.textContent === "metadata-independent-preview",
       ),
     ).toBeInTheDocument();
     expect(
@@ -1666,7 +1665,7 @@ describe("<SilenceEditor />", () => {
     await waitFor(() =>
       expect(
         screen.getByText(
-          (_, element) => element?.textContent === "alertname=page-1",
+          (_, element) => element?.textContent === "page-1",
         ),
       ).toBeInTheDocument(),
     );
@@ -2272,7 +2271,7 @@ describe("<SilenceEditor />", () => {
       return previewResponse([
         {
           ...previewAlert("alert-with-stripped-label"),
-          labels: [{ name: "alertname", value: "alert-with-stripped-label" }],
+          labels: [],
           matchedLabels: [
             { name: "alertname", value: "alert-with-stripped-label" },
             { name: "namespace", value: "prod" },
@@ -2286,10 +2285,11 @@ describe("<SilenceEditor />", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(
-          (_, element) => element?.textContent === "namespace=prod",
-        ),
+        screen.getByText("prod", { selector: ".syntax-value" }),
       ).toBeInTheDocument(),
+    );
+    expect(screen.getByText("alert-with-stripped-label")).toHaveClass(
+      "fork-silence-editor__preview-alertname--matched",
     );
   });
 
@@ -2320,14 +2320,29 @@ describe("<SilenceEditor />", () => {
     renderEditor(stores);
 
     await waitFor(() =>
-      expect(screen.getByText("service=payments")).toBeInTheDocument(),
+      expect(screen.getByText("payments", { selector: ".syntax-value" })).toBeInTheDocument(),
     );
 
-    expect(screen.getByText("service=payments")).toHaveClass(
+    const ordinaryLabel = screen
+      .getByText("payments", { selector: ".syntax-value" })
+      .closest(".fork-silence-editor__preview-label");
+    if (ordinaryLabel === null) {
+      throw new Error("expected preview label");
+    }
+    expect(ordinaryLabel).toHaveClass(
       "fork-silence-editor__preview-label",
     );
-    expect(screen.getByText("alertname=preview-label-colors")).toHaveClass(
-      "fork-silence-editor__preview-label--matched",
+    expect(ordinaryLabel.querySelector(".syntax-label")).toHaveTextContent(
+      "service",
+    );
+    expect(ordinaryLabel.querySelector(".syntax-operator")).toHaveTextContent(
+      "=",
+    );
+    expect(ordinaryLabel.querySelector(".syntax-value")).toHaveTextContent(
+      "payments",
+    );
+    expect(screen.getByText("preview-label-colors")).toHaveClass(
+      "fork-silence-editor__preview-alertname--matched",
     );
     expect(screen.getByText("cluster=<missing>")).toHaveClass(
       "fork-silence-editor__preview-label--missing",

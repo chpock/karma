@@ -404,6 +404,14 @@ const MatcherSyntax: FC<{ expression: string }> = ({ expression }) => {
   );
 };
 
+const PreviewLabel: FC<{ name: string; value: string }> = ({ name, value }) => (
+  <>
+    <span className="syntax-label">{name}</span>
+    <span className="syntax-operator">=</span>
+    <span className="syntax-value">{value}</span>
+  </>
+);
+
 function toDateInputValue(d: Date): string {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, "0");
@@ -2582,6 +2590,12 @@ const SilenceEditor: FC<{
                   BackgroundClassMap[
                     stateKey as keyof typeof BackgroundClassMap
                   ];
+                const alertName = alert.labels.find(
+                  (label) => label.name === "alertname",
+                ) ??
+                  alert.matchedLabels.find(
+                    (label) => label.name === "alertname",
+                  );
                 const matcherTitle = (name: string) =>
                   expressions
                     .filter(
@@ -2590,52 +2604,76 @@ const SilenceEditor: FC<{
                     )
                     .join("\n");
                 return (
-                  <div
+                  <article
                     className="fork-silence-editor__preview-item"
                     key={alert.id}
                   >
-                    <span className={`badge ${stateClass} me-2`}>
-                      {stateKey}
-                    </span>
-                    {alert.labels.map((label) => (
+                    <div className="fork-silence-editor__preview-identity">
                       <span
-                        key={`${alert.id}:${label.name}:${label.value}`}
-                        className={`badge me-1 fork-silence-editor__preview-label ${
-                          alert.matchedLabelNames.includes(label.name)
-                            ? "fork-silence-editor__preview-label--matched"
-                            : ""
-                        }`}
-                        title={matcherTitle(label.name)}
+                        className={`badge ${stateClass} fork-silence-editor__preview-state`}
                       >
-                        {label.name}={label.value}
+                        {stateKey}
                       </span>
-                    ))}
-                    {alert.missingLabelNames.map((name) => (
-                      <span
-                        key={`${alert.id}:missing:${name}`}
-                        className="badge me-1 fork-silence-editor__preview-label fork-silence-editor__preview-label--missing fork-silence-editor__missing-label"
-                        title={matcherTitle(name)}
-                      >
-                        {name}={"<missing>"}
-                      </span>
-                    ))}
-                    {alert.matchedLabels
-                      .filter(
-                        (matched) =>
-                          !alert.labels.some(
-                            (label) => label.name === matched.name,
-                          ),
-                      )
-                      .map((matched) => (
+                      {alertName ? (
                         <span
-                          key={`${alert.id}:matched-only:${matched.name}:${matched.value}`}
-                          className="badge me-1 fork-silence-editor__preview-label fork-silence-editor__preview-label--matched-only"
-                          title={matcherTitle(matched.name)}
+                          className={`fork-silence-editor__preview-alertname${
+                            alert.matchedLabelNames.includes("alertname")
+                              ? " fork-silence-editor__preview-alertname--matched"
+                              : ""
+                          }`}
+                          title={matcherTitle("alertname")}
                         >
-                          {matched.name}={matched.value}
+                          {alertName.value}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="fork-silence-editor__preview-labels">
+                      {alert.labels
+                        .filter((label) => label.name !== "alertname")
+                        .map((label) => (
+                          <span
+                            key={`${alert.id}:${label.name}:${label.value}`}
+                            className={`badge fork-silence-editor__preview-label ${
+                              alert.matchedLabelNames.includes(label.name)
+                                ? "fork-silence-editor__preview-label--matched"
+                                : ""
+                            }`}
+                            title={matcherTitle(label.name)}
+                          >
+                            <PreviewLabel name={label.name} value={label.value} />
+                          </span>
+                        ))}
+                      {alert.missingLabelNames.map((name) => (
+                        <span
+                          key={`${alert.id}:missing:${name}`}
+                          className="badge fork-silence-editor__preview-label fork-silence-editor__preview-label--missing fork-silence-editor__missing-label"
+                          title={matcherTitle(name)}
+                        >
+                          {name}={"<missing>"}
                         </span>
                       ))}
-                  </div>
+                      {alert.matchedLabels
+                        .filter(
+                          (matched) =>
+                            matched.name !== "alertname" &&
+                            !alert.labels.some(
+                              (label) => label.name === matched.name,
+                            ),
+                        )
+                        .map((matched) => (
+                          <span
+                            key={`${alert.id}:matched-only:${matched.name}:${matched.value}`}
+                            className="badge fork-silence-editor__preview-label fork-silence-editor__preview-label--matched-only"
+                            title={matcherTitle(matched.name)}
+                          >
+                            <PreviewLabel
+                              name={matched.name}
+                              value={matched.value}
+                            />
+                          </span>
+                        ))}
+                    </div>
+                  </article>
                 );
               })}
               {previewError === null && preview.length === 0 ? (

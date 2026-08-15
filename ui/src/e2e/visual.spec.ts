@@ -94,7 +94,157 @@ test("SilenceModalEditorPreview", async ({ page }) => {
     .locator(".fork-silence-editor__preview-item")
     .first()
     .waitFor();
+  const firstPreview = previews.first();
+  const expectedIdentityDirection = ["iphone", "android"].includes(
+    test.info().project.name,
+  )
+    ? "row"
+    : "column";
+  await expect(
+    firstPreview.locator(".fork-silence-editor__preview-identity").first(),
+  ).toHaveCSS("flex-direction", expectedIdentityDirection);
+  await expect(
+    firstPreview.locator(".fork-silence-editor__preview-alertname"),
+  ).toHaveCount(3);
+  await expect(
+    firstPreview.locator(".fork-silence-editor__preview-labels"),
+  ).toHaveCount(3);
+  const previewColors = await firstPreview.evaluate((preview) => {
+    const item = preview.querySelector<HTMLElement>(
+      ".fork-silence-editor__preview-item",
+    );
+    const matched = preview.querySelector<HTMLElement>(
+      ".fork-silence-editor__preview-label--matched",
+    );
+    const ordinary = preview.querySelector<HTMLElement>(
+      ".fork-silence-editor__preview-label:not(.fork-silence-editor__preview-label--matched):not(.fork-silence-editor__preview-label--matched-only):not(.fork-silence-editor__preview-label--missing)",
+    );
+    const matcherLabel = preview
+      .closest(".fork-silence-editor")
+      ?.querySelector<HTMLElement>(
+        ".fork-silence-editor__matcher-highlight .syntax-label",
+      );
+    const previewLabel = ordinary?.querySelector<HTMLElement>(".syntax-label");
+    return {
+      card: item && getComputedStyle(item).backgroundColor,
+      cardBorder: item && getComputedStyle(item).borderTopColor,
+      matched: matched && getComputedStyle(matched).backgroundColor,
+      preview: getComputedStyle(preview).backgroundColor,
+      ordinary: ordinary && getComputedStyle(ordinary).backgroundColor,
+      matcherLabel: matcherLabel && getComputedStyle(matcherLabel).color,
+      previewLabel: previewLabel && getComputedStyle(previewLabel).color,
+      previewLabelFontSize: ordinary && getComputedStyle(ordinary).fontSize,
+      previewLabelFontWeight: ordinary && getComputedStyle(ordinary).fontWeight,
+    };
+  });
+  expect(previewColors.card).toBe("rgba(0, 0, 0, 0)");
+  expect(previewColors.cardBorder).not.toBe("rgba(0, 0, 0, 0)");
+  expect(previewColors.cardBorder).not.toBe(previewColors.preview);
+  expect(previewColors.matched).not.toBe(previewColors.preview);
+  expect(previewColors.ordinary).toBe(previewColors.preview);
+  expect(previewColors.previewLabel).toBe(previewColors.matcherLabel);
+  expect(previewColors.previewLabelFontSize).toBe("11.2px");
+  expect(previewColors.previewLabelFontWeight).toBe("400");
+  const darkMatchedColors = await previews.nth(1).evaluate((preview) => {
+    const matched = preview.querySelector<HTMLElement>(
+      ".fork-silence-editor__preview-label--matched",
+    );
+    if (!matched) {
+      throw new Error("expected matched preview label");
+    }
+    const rgb = (color: string): [number, number, number] => {
+      const match = color.match(/\d+/g);
+      if (!match || match.length < 3) {
+        throw new Error(`expected RGB color, got ${color}`);
+      }
+      return [Number(match[0]), Number(match[1]), Number(match[2])];
+    };
+    const luminance = ([red, green, blue]: [number, number, number]) => {
+      const linear = [red, green, blue].map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+    };
+    const contrast = (foreground: string, background: string) => {
+      const [first, second] = [luminance(rgb(foreground)), luminance(rgb(background))];
+      return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+    };
+    const styles = getComputedStyle(matched);
+    return {
+      background: styles.backgroundColor,
+      labelContrast: contrast(
+        getComputedStyle(matched.querySelector(".syntax-label")!).color,
+        styles.backgroundColor,
+      ),
+      operatorContrast: contrast(
+        getComputedStyle(matched.querySelector(".syntax-operator")!).color,
+        styles.backgroundColor,
+      ),
+      valueContrast: contrast(
+        getComputedStyle(matched.querySelector(".syntax-value")!).color,
+        styles.backgroundColor,
+      ),
+      labelColor: getComputedStyle(matched.querySelector(".syntax-label")!).color,
+      valueColor: getComputedStyle(matched.querySelector(".syntax-value")!).color,
+    };
+  });
+  expect(darkMatchedColors.background).toBe("rgb(169, 189, 204)");
+  expect(darkMatchedColors.labelContrast).toBeGreaterThanOrEqual(4.5);
+  expect(darkMatchedColors.operatorContrast).toBeGreaterThanOrEqual(4.5);
+  expect(darkMatchedColors.valueContrast).toBeGreaterThanOrEqual(4.5);
+  expect(darkMatchedColors.labelColor).toBe("rgb(16, 42, 67)");
+  expect(darkMatchedColors.valueColor).toBe("rgb(15, 77, 38)");
+  if (!["iphone", "android"].includes(test.info().project.name)) {
+    const viewport = page.viewportSize();
+    if (viewport === null) {
+      throw new Error("expected viewport size");
+    }
+    await expect(page.locator(".modal-dialog").first()).toHaveCSS(
+      "max-height",
+      `${viewport.height - 24}px`,
+    );
+    await expect(firstPreview.locator(".fork-silence-editor__preview-list")).toHaveCSS(
+      "max-height",
+      "none",
+    );
+    await expect(
+      page.locator(".modal-body").first(),
+    ).toHaveCSS("overflow-y", "hidden");
+    await expect(firstPreview.locator(".fork-silence-editor__preview-list")).toHaveCSS(
+      "overflow-y",
+      "auto",
+    );
+  }
   await expect(previews).toHaveScreenshot("SilenceModalEditorPreview.png");
+  if (!["iphone", "android"].includes(test.info().project.name)) {
+    const scrollOwnership = await firstPreview.evaluate((preview) => {
+      const list = preview.querySelector<HTMLElement>(
+        ".fork-silence-editor__preview-list",
+      );
+      const item = list?.querySelector<HTMLElement>(
+        ".fork-silence-editor__preview-item",
+      );
+      const body = preview.closest<HTMLElement>(".modal-body");
+      if (!list || !item || !body) {
+        throw new Error("expected preview scroll container");
+      }
+      for (let index = 0; index < 24; index++) {
+        list.append(item.cloneNode(true));
+      }
+      list.scrollTop = list.scrollHeight;
+      return {
+        bodyOverflows: body.scrollHeight > body.clientHeight + 1,
+        listOverflows: list.scrollHeight > list.clientHeight,
+        listScrollTop: list.scrollTop,
+      };
+    });
+    expect(scrollOwnership.bodyOverflows).toBe(false);
+    expect(scrollOwnership.listOverflows).toBe(true);
+    expect(scrollOwnership.listScrollTop).toBeGreaterThan(0);
+  }
 });
 
 test("SilenceModalEditorLayoutSpacing", async ({ page }) => {
@@ -258,7 +408,11 @@ test("SilenceModalEditorMatcherSyntax", async ({ page }) => {
   await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
   await page.goto("/src/e2e/stories.html#SilenceModalEditor");
   await page.addStyleTag({
-    content: "* { caret-color: transparent !important; }",
+    content: `
+      * { caret-color: transparent !important; }
+      .fork-silence-editor__matcher-control { height: 36px !important; }
+      .fork-silence-editor__matcher-expression { line-height: 36px !important; }
+    `,
   });
 
   const editors = page.locator(".fork-silence-editor");
@@ -274,8 +428,10 @@ test("SilenceModalEditorMatcherSyntax", async ({ page }) => {
 
   const controls = page.locator(".fork-silence-editor__matcher-control");
   for (let i = 0; i < count; i++) {
+    // WebKit can antialias a few syntax glyph edge pixels differently.
     await expect(controls.nth(i)).toHaveScreenshot(
       `SilenceModalEditorMatcherSyntax-${i}.png`,
+      { maxDiffPixels: 10, maxDiffPixelRatio: 0.001 },
     );
   }
 });

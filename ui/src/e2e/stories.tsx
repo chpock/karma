@@ -200,6 +200,7 @@ window.fetch = async (
           labels: [
             { name: "alertname", value: "Host_Down" },
             { name: "service", value: "api" },
+            { name: "environment", value: "production" },
           ],
           matchedLabels: [
             { name: "alertname", value: "Host_Down" },
