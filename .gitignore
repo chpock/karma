@@ -8,3 +8,6 @@
 /ui/src/e2e/results
 /TODO.md
 /.vscode
+/.cortexkit
+/.vite
+/test-results
