@@ -38,6 +38,7 @@ One row per alert identity.
 - `last_seen_at TEXT` (nullable)
 - `relevant_upstreams_json TEXT NOT NULL`
 - `relevant_sources_json TEXT NOT NULL DEFAULT '[]'`
+- `source_links_json TEXT NOT NULL DEFAULT '[]'` (last-observed immutable source name, target, and URL evidence)
 - `suppression_observed_at TEXT` (nullable)
 - `resolved_at TEXT` (nullable)
 - `resolved_by TEXT` (nullable)

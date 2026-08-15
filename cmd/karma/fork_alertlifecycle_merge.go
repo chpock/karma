@@ -138,7 +138,7 @@ func lifecycleCurrentToModelAlert(ctx context.Context, current alertlifecycle.Al
 		Receiver:     current.Receiver,
 		Labels:       models.LabelsFromMap(labelsMap),
 		Annotations:  models.AnnotationsFromMap(annotationsMap),
-		Alertmanager: []models.AlertmanagerInstance{},
+		Alertmanager: lifecycleSourceLinksToAlertmanager(ctx, current.SourceLinksJSON),
 		State:        alertState,
 		RawState:     models.ParseAlertState(string(current.RawState)),
 		HasRawState:  true,
@@ -172,6 +172,24 @@ func lifecycleCurrentToModelAlert(ctx context.Context, current alertlifecycle.Al
 	alert.LabelsFP = current.AlertID
 
 	return alert, true
+}
+
+func lifecycleSourceLinksToAlertmanager(ctx context.Context, raw string) []models.AlertmanagerInstance {
+	links := []alertlifecycle.AlertSourceLink{}
+	if err := json.Unmarshal([]byte(raw), &links); err != nil {
+		runtimeLog.ErrorContext(ctx, "alert_lifecycle", "merge_decode_failed", "Failed to unmarshal lifecycle source links", slog.String("field", "source_links"), slog.Any("error", err))
+		return []models.AlertmanagerInstance{}
+	}
+	instances := make([]models.AlertmanagerInstance, 0, len(links))
+	for _, link := range links {
+		if link.Name == "" || link.Cluster == "" || link.URL == "" {
+			continue
+		}
+		instances = append(instances, models.AlertmanagerInstance{
+			Name: link.Name, Cluster: link.Cluster, Source: link.URL,
+		})
+	}
+	return instances
 }
 
 func lifecycleCurrentGroupLabels(ctx context.Context, current alertlifecycle.AlertCurrent) (promlabels.Labels, bool) {

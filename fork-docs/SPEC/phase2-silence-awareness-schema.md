@@ -22,7 +22,7 @@ Schema v1 contains 21 application tables.
 
 | Table | Identity | Ownership |
 |---|---|---|
-| `alert_states` | `alert_id` | Current global dimensions, display/group data, original match labels, source membership, resolve metadata |
+| `alert_states` | `alert_id` | Current global dimensions, display/group data, original match labels, source membership, immutable last-observed source links, resolve metadata |
 | `alert_events` | auto ID | Append-only old/new global dimensions and transition reason |
 | `metadata` | key | Schema version, housekeeping timestamps, grouping/regroup progress |
 
@@ -30,6 +30,9 @@ Schema v1 contains 21 application tables.
 and `is_resolved`. `match_labels_json` contains original pre-transform labels;
 `labels_json` contains display labels. `alert_id` remains the persisted source
 identity even when display-label transforms produce a different hash.
+`source_links_json` retains source name, logical target, and the alert's original
+Prometheus URL so a non-live alert can still navigate to its last observed source.
+It intentionally contains no mutable silence or inhibition state.
 
 ### 2.2 Per-target lifecycle and autocomplete
 

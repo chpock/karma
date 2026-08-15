@@ -28,6 +28,12 @@ Effective suppression explainability is covered by:
   `ui/src/Components/Grid/AlertGrid/AlertGroup/Alert/index.test.tsx` for read-only
   card rendering without Edit/Delete actions.
 
+Historical alert source-link preservation is covered by:
+
+- `TestBuildLiveLifecycleSnapshotCapturesAlertSourceLinks` for the live observation boundary;
+- `TestLifecycleMergeRetainsSourceLinksAfterAlertDisappears` for SQLite persistence,
+  non-live reconstruction, and absence of restored mutable silence/inhibition state.
+
 Invalid silence entries are covered at every decision boundary:
 
 - mapper: `TestSilencesSkipsInvalidEntriesIndependently`, duplicate-ID/field,

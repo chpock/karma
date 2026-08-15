@@ -66,6 +66,87 @@ func TestLifecycleMergePreservesStoredAlertIdentityForResolve(t *testing.T) {
 	}
 }
 
+func TestLifecycleMergeRetainsSourceLinksAfterAlertDisappears(t *testing.T) {
+	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/lifecycle.sqlite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	previousStore := lifecycleStore
+	lifecycleStore = store
+	t.Cleanup(func() { lifecycleStore = previousStore })
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	live := alertlifecycle.LiveAlertSnapshot{
+		AlertID: "source-link-past", State: alertlifecycle.StateActive,
+		Receiver: "team", GroupID: "source-link-group",
+		GroupLabelsJSON: `{"alertname":"SourceLink"}`,
+		LabelsJSON:      `{"alertname":"SourceLink"}`,
+		AnnotationsJSON: `{}`,
+		StartsAt:        now.Add(-time.Hour), LastSeenAt: now,
+		RelevantUpstreams: []string{"am-a"},
+		RelevantSources:   []alertlifecycle.SourceRef{{Name: "am-a", Cluster: "cluster-a"}},
+		SourceLinks: []alertlifecycle.AlertSourceLink{{
+			Name: "am-a", Cluster: "cluster-a", URL: "https://prometheus.example/graph?g0.expr=up",
+		}},
+	}
+	if _, err = store.ApplyPollCycle(alertlifecycle.PollCycleInput{
+		LiveAlerts:          []alertlifecycle.LiveAlertSnapshot{live},
+		SuccessfulUpstreams: map[string]bool{"am-a": true}, Timestamp: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.ApplyPollCycle(alertlifecycle.PollCycleInput{
+		SuccessfulUpstreams: map[string]bool{"am-a": true}, Timestamp: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	merged := mergeLifecycleStoredAlerts(nil, false)
+	if len(merged) != 1 || len(merged[0].Alerts) != 1 {
+		t.Fatalf("unexpected merged alerts: %+v", merged)
+	}
+	alert := merged[0].Alerts[0]
+	if alert.IsLive {
+		t.Fatal("reconstructed alert must be non-live")
+	}
+	if len(alert.Alertmanager) != 1 {
+		t.Fatalf("source links=%+v, want one preserved link", alert.Alertmanager)
+	}
+	link := alert.Alertmanager[0]
+	if link.Name != "am-a" || link.Cluster != "cluster-a" || link.Source != "https://prometheus.example/graph?g0.expr=up" {
+		t.Fatalf("source link=%+v, want original source evidence", link)
+	}
+	if len(link.SilencedBy) != 0 || len(link.InhibitedBy) != 0 {
+		t.Fatalf("historical source link must not restore mutable state: %+v", link)
+	}
+}
+
+func TestBuildLiveLifecycleSnapshotCapturesAlertSourceLinks(t *testing.T) {
+	alert := models.Alert{
+		StartsAt:    mustParseTS(t, "2026-08-15T12:00:00Z"),
+		Receiver:    "team",
+		Labels:      models.LabelsFromMap(map[string]string{"alertname": "SourceLink"}),
+		Annotations: models.AnnotationsFromMap(map[string]string{}),
+		State:       models.AlertStateActive,
+		Alertmanager: []models.AlertmanagerInstance{{
+			Name: "am-a", Cluster: "cluster-a", Source: "https://prometheus.example/graph?g0.expr=up",
+		}},
+	}
+	alert.UpdateFingerprints()
+	snapshots := buildLiveLifecycleSnapshot([]models.AlertGroup{{
+		ID: "source-link-group", Receiver: "team", Labels: models.LabelsFromMap(map[string]string{"alertname": "SourceLink"}),
+		Alerts: []models.Alert{alert},
+	}}, nil)
+	if len(snapshots) != 1 || len(snapshots[0].SourceLinks) != 1 {
+		t.Fatalf("source links=%+v, want one captured source link", snapshots)
+	}
+	link := snapshots[0].SourceLinks[0]
+	if link.Name != "am-a" || link.Cluster != "cluster-a" || link.URL != "https://prometheus.example/graph?g0.expr=up" {
+		t.Fatalf("source link=%+v, want original alert source", link)
+	}
+}
+
 func TestMergeLifecycleStoredAlertsResolvedVisibilityByFilter(t *testing.T) {
 	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/lifecycle.sqlite"})
 	if err != nil {

@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS alert_states (
   last_seen_at TEXT,
   relevant_upstreams_json TEXT NOT NULL,
   relevant_sources_json TEXT NOT NULL DEFAULT '[]',
+  source_links_json TEXT NOT NULL DEFAULT '[]',
   suppression_observed_at TEXT,
   resolved_at TEXT,
   resolved_by TEXT,
@@ -663,12 +664,20 @@ func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 	if strings.TrimSpace(alert.RelevantSources) == "" {
 		alert.RelevantSources = alert.RelevantUpstreams
 	}
+	if strings.TrimSpace(alert.SourceLinksJSON) == "" {
+		alert.SourceLinksJSON = "[]"
+	}
+	normalizedSourceLinks, err := normalizeAlertSourceLinksJSON(alert.SourceLinksJSON)
+	if err != nil {
+		return err
+	}
+	alert.SourceLinksJSON = normalizedSourceLinks
 	if alert.State.IsValid() {
 		alert.State = projectedState(alert.RawState, alert.IsLive, alert.IsSuppressed, alert.IsResolved)
 	}
 
-	if err := validateCurrentAlert(alert); err != nil {
-		return err
+	if validateErr := validateCurrentAlert(alert); validateErr != nil {
+		return validateErr
 	}
 
 	now := time.Now().UTC()
@@ -676,7 +685,7 @@ func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 		alert.UpdatedAt = now
 	}
 
-	_, err := s.db.Exec(`
+	_, err = s.db.Exec(`
 INSERT INTO alert_states(
   alert_id,
   state,
@@ -694,12 +703,13 @@ INSERT INTO alert_states(
   last_seen_at,
   relevant_upstreams_json,
   relevant_sources_json,
+  source_links_json,
   suppression_observed_at,
   resolved_at,
   resolved_by,
   resolved_comment,
   updated_at
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(alert_id) DO UPDATE SET
   state=excluded.state,
   raw_state=excluded.raw_state,
@@ -716,6 +726,7 @@ ON CONFLICT(alert_id) DO UPDATE SET
   last_seen_at=excluded.last_seen_at,
   relevant_upstreams_json=excluded.relevant_upstreams_json,
   relevant_sources_json=excluded.relevant_sources_json,
+  source_links_json=excluded.source_links_json,
   suppression_observed_at=excluded.suppression_observed_at,
   resolved_at=excluded.resolved_at,
   resolved_by=excluded.resolved_by,
@@ -738,6 +749,7 @@ ON CONFLICT(alert_id) DO UPDATE SET
 		formatNullableTime(alert.LastSeenAt),
 		alert.RelevantUpstreams,
 		alert.RelevantSources,
+		alert.SourceLinksJSON,
 		formatNullableTime(alert.SuppressionObservedAt),
 		formatNullableTime(alert.ResolvedAt),
 		alert.ResolvedBy,
@@ -839,6 +851,7 @@ SELECT
   last_seen_at,
   relevant_upstreams_json,
   relevant_sources_json,
+  source_links_json,
   suppression_observed_at,
   resolved_at,
   resolved_by,
@@ -882,6 +895,7 @@ WHERE alert_id = ?
 		&lastSeenRaw,
 		&current.RelevantUpstreams,
 		&current.RelevantSources,
+		&current.SourceLinksJSON,
 		&suppressionObservedRaw,
 		&resolvedAtRaw,
 		&resolvedByRaw,
@@ -1034,6 +1048,7 @@ SELECT
   last_seen_at,
   relevant_upstreams_json,
   relevant_sources_json,
+  source_links_json,
   suppression_observed_at,
   resolved_at,
   resolved_by,
@@ -1087,6 +1102,7 @@ SELECT
   last_seen_at,
   relevant_upstreams_json,
   relevant_sources_json,
+  source_links_json,
   suppression_observed_at,
   resolved_at,
   resolved_by,
@@ -2434,8 +2450,13 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			_ = tx.Rollback()
 			return PollCycleResult{}, marshalSourcesErr
 		}
+		sourceLinksJSON, marshalLinksErr := marshalAlertSourceLinks(live.SourceLinks)
+		if marshalLinksErr != nil {
+			_ = tx.Rollback()
+			return PollCycleResult{}, marshalLinksErr
+		}
 
-		if err = updateCurrentAlertFromLiveTx(tx, current.AlertID, live, newRawState, newIsLive, newIsSuppressed, newIsResolved, string(relevantJSON), string(relevantSourcesJSON), now); err != nil {
+		if err = updateCurrentAlertFromLiveTx(tx, current.AlertID, live, newRawState, newIsLive, newIsSuppressed, newIsResolved, string(relevantJSON), string(relevantSourcesJSON), string(sourceLinksJSON), now); err != nil {
 			_ = tx.Rollback()
 			return PollCycleResult{}, err
 		}
@@ -3360,6 +3381,11 @@ func validateLiveSnapshot(alert LiveAlertSnapshot) error {
 			return errors.New("live snapshot relevantSources contains empty cluster")
 		}
 	}
+	for _, link := range alert.SourceLinks {
+		if strings.TrimSpace(link.Name) == "" || strings.TrimSpace(link.Cluster) == "" || strings.TrimSpace(link.URL) == "" {
+			return errors.New("live snapshot sourceLinks contains an incomplete source link")
+		}
+	}
 	for _, target := range alert.Targets {
 		if strings.TrimSpace(target.Target) == "" {
 			return errors.New("live snapshot targets contains empty target")
@@ -3458,6 +3484,7 @@ SELECT
   last_seen_at,
   relevant_upstreams_json,
   relevant_sources_json,
+  source_links_json,
   suppression_observed_at,
   resolved_at,
   resolved_by,
@@ -3520,6 +3547,7 @@ func scanCurrentAlert(scanner interface{ Scan(dest ...any) error }) (AlertCurren
 		&lastSeenRaw,
 		&current.RelevantUpstreams,
 		&current.RelevantSources,
+		&current.SourceLinksJSON,
 		&suppressionObservedRaw,
 		&resolvedAtRaw,
 		&resolvedByRaw,
@@ -3608,6 +3636,10 @@ func insertCurrentAlertTx(tx *sql.Tx, live LiveAlertSnapshot, now time.Time) err
 	if err != nil {
 		return err
 	}
+	sourceLinksJSON, err := marshalAlertSourceLinks(live.SourceLinks)
+	if err != nil {
+		return err
+	}
 	livePlan := ObserveLive(LifecycleDimensions{}, live.State)
 	rawState := livePlan.RawState
 	isLive := livePlan.IsLive
@@ -3633,12 +3665,13 @@ INSERT INTO alert_states(
   last_seen_at,
   relevant_upstreams_json,
   relevant_sources_json,
+  source_links_json,
   suppression_observed_at,
   resolved_at,
   resolved_by,
   resolved_comment,
   updated_at
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `,
 		live.AlertID,
 		string(state),
@@ -3656,6 +3689,7 @@ INSERT INTO alert_states(
 		live.LastSeenAt.UTC().Format(time.RFC3339Nano),
 		string(relevantJSON),
 		string(relevantSourcesJSON),
+		string(sourceLinksJSON),
 		formatNullableTime(nil),
 		nil,
 		nil,
@@ -3669,7 +3703,7 @@ INSERT INTO alert_states(
 	return nil
 }
 
-func updateCurrentAlertFromLiveTx(tx *sql.Tx, alertID string, live LiveAlertSnapshot, newRawState State, newIsLive, newIsSuppressed, newIsResolved bool, relevantJSON, relevantSourcesJSON string, now time.Time) error {
+func updateCurrentAlertFromLiveTx(tx *sql.Tx, alertID string, live LiveAlertSnapshot, newRawState State, newIsLive, newIsSuppressed, newIsResolved bool, relevantJSON, relevantSourcesJSON, sourceLinksJSON string, now time.Time) error {
 	newState := projectedState(newRawState, newIsLive, newIsSuppressed, newIsResolved)
 	_, err := tx.Exec(`
 UPDATE alert_states SET
@@ -3688,6 +3722,7 @@ UPDATE alert_states SET
   last_seen_at = ?,
   relevant_upstreams_json = ?,
   relevant_sources_json = ?,
+  source_links_json = ?,
   suppression_observed_at = CASE WHEN ? = 1 THEN COALESCE(suppression_observed_at, ?) ELSE NULL END,
   resolved_at = NULL,
   resolved_by = NULL,
@@ -3710,6 +3745,7 @@ WHERE alert_id = ?
 		live.LastSeenAt.UTC().Format(time.RFC3339Nano),
 		relevantJSON,
 		relevantSourcesJSON,
+		sourceLinksJSON,
 		boolToInt(newIsSuppressed),
 		now.UTC().Format(time.RFC3339Nano),
 		now.UTC().Format(time.RFC3339Nano),
@@ -5631,6 +5667,45 @@ func marshalRelevantSources(refs []SourceRef) ([]byte, error) {
 	return out, nil
 }
 
+func marshalAlertSourceLinks(links []AlertSourceLink) ([]byte, error) {
+	bySource := map[string]AlertSourceLink{}
+	for _, link := range links {
+		name := strings.TrimSpace(link.Name)
+		cluster := strings.TrimSpace(link.Cluster)
+		url := strings.TrimSpace(link.URL)
+		if name == "" || cluster == "" || url == "" {
+			return nil, errors.New("source link requires name, cluster, and URL")
+		}
+		key := name + "\x00" + cluster
+		if existing, found := bySource[key]; !found || url < existing.URL {
+			bySource[key] = AlertSourceLink{Name: name, Cluster: cluster, URL: url}
+		}
+	}
+	out := make([]AlertSourceLink, 0, len(bySource))
+	for _, link := range bySource {
+		out = append(out, link)
+	}
+	slices.SortFunc(out, func(a, b AlertSourceLink) int {
+		if diff := strings.Compare(a.Name, b.Name); diff != 0 {
+			return diff
+		}
+		return strings.Compare(a.Cluster, b.Cluster)
+	})
+	return json.Marshal(out)
+}
+
+func normalizeAlertSourceLinksJSON(raw string) (string, error) {
+	var links []AlertSourceLink
+	if err := json.Unmarshal([]byte(raw), &links); err != nil {
+		return "", fmt.Errorf("invalid source links JSON: %w", err)
+	}
+	normalized, err := marshalAlertSourceLinks(links)
+	if err != nil {
+		return "", err
+	}
+	return string(normalized), nil
+}
+
 func selectStoredRelevantSources(existing, observed []SourceRef, allSuccessful bool) []SourceRef {
 	existing = normalizeSourceRefs(existing)
 	observed = normalizeSourceRefs(observed)
@@ -5735,6 +5810,7 @@ SELECT
   last_seen_at,
   relevant_upstreams_json,
   relevant_sources_json,
+  source_links_json,
   suppression_observed_at,
   resolved_at,
   resolved_by,

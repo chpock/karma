@@ -57,6 +57,10 @@ If the same alert fires again, its live Alertmanager state becomes authoritative
 previous manual resolution is cleared and suppression is recalculated from current
 data.
 
+For a past alert, **Alert source links** retain the Prometheus URL last observed
+while the alert was live. They are historical navigation evidence only: Karma does
+not recreate old Alertmanager state such as silences or inhibitions from them.
+
 ## 4. Resolving a past alert
 
 To resolve an alert:

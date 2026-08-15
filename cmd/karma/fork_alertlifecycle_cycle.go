@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/prymitive/karma/internal/alertmanager"
@@ -99,11 +100,15 @@ func buildLiveLifecycleSnapshot(groups []models.AlertGroup, rawMatchLabels map[s
 
 			upstreams := make([]string, 0, len(alert.Alertmanager))
 			sources := make([]alertlifecycle.SourceRef, 0, len(alert.Alertmanager))
+			sourceLinks := make([]alertlifecycle.AlertSourceLink, 0, len(alert.Alertmanager))
 			targetStates := map[string]alertlifecycle.LiveTargetSnapshot{}
 			silencedBySources := make([]alertlifecycle.SourceSilenceRef, 0, len(alert.Alertmanager))
 			for _, am := range alert.Alertmanager {
 				upstreams = append(upstreams, am.Name)
 				sources = append(sources, alertlifecycle.SourceRef{Name: am.Name, Cluster: am.Cluster})
+				if sourceURL := strings.TrimSpace(am.Source); sourceURL != "" {
+					sourceLinks = append(sourceLinks, alertlifecycle.AlertSourceLink{Name: am.Name, Cluster: am.Cluster, URL: sourceURL})
+				}
 				t := targetStates[am.Cluster]
 				if t.Target == "" {
 					t = alertlifecycle.LiveTargetSnapshot{Target: am.Cluster, State: modelStateToLifecycleState(am.State), StartsAt: am.StartsAt}
@@ -150,6 +155,7 @@ func buildLiveLifecycleSnapshot(groups []models.AlertGroup, rawMatchLabels map[s
 				LastSeenAt:        time.Now().UTC(),
 				RelevantUpstreams: upstreams,
 				RelevantSources:   sources,
+				SourceLinks:       sourceLinks,
 				Targets:           targets,
 				SilencedBySources: silencedBySources,
 			}
@@ -181,6 +187,7 @@ func mergeLiveLifecycleSnapshots(left, right alertlifecycle.LiveAlertSnapshot) a
 	}
 	merged.RelevantUpstreams = mergeLifecycleStrings(left.RelevantUpstreams, right.RelevantUpstreams)
 	merged.RelevantSources = mergeLifecycleSourceRefs(left.RelevantSources, right.RelevantSources)
+	merged.SourceLinks = mergeLifecycleSourceLinks(left.SourceLinks, right.SourceLinks)
 	merged.SilencedBySources = mergeLifecycleSilenceRefs(left.SilencedBySources, right.SilencedBySources)
 	merged.Targets = mergeLifecycleTargets(left.Targets, right.Targets)
 	return merged
@@ -227,6 +234,27 @@ func mergeLifecycleSourceRefs(left, right []alertlifecycle.SourceRef) []alertlif
 	out := make([]alertlifecycle.SourceRef, 0, len(byKey))
 	for _, source := range byKey {
 		out = append(out, source)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Cluster < out[j].Cluster
+	})
+	return out
+}
+
+func mergeLifecycleSourceLinks(left, right []alertlifecycle.AlertSourceLink) []alertlifecycle.AlertSourceLink {
+	bySource := map[string]alertlifecycle.AlertSourceLink{}
+	for _, link := range append(append([]alertlifecycle.AlertSourceLink{}, left...), right...) {
+		key := link.Name + "\x00" + link.Cluster
+		if existing, found := bySource[key]; !found || link.URL < existing.URL {
+			bySource[key] = link
+		}
+	}
+	out := make([]alertlifecycle.AlertSourceLink, 0, len(bySource))
+	for _, link := range bySource {
+		out = append(out, link)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Name != out[j].Name {

@@ -25,6 +25,14 @@ type SourceRef struct {
 	Cluster string `json:"cluster"`
 }
 
+// AlertSourceLink is immutable evidence of where an alert was last observed.
+// It deliberately excludes mutable Alertmanager state such as silences.
+type AlertSourceLink struct {
+	Name    string `json:"name"`
+	Cluster string `json:"cluster"`
+	URL     string `json:"url"`
+}
+
 type LiveTargetSnapshot struct {
 	Target      string
 	State       State
@@ -85,6 +93,7 @@ type AlertCurrent struct {
 	LastSeenAt            *time.Time
 	RelevantUpstreams     string
 	RelevantSources       string
+	SourceLinksJSON       string
 	SuppressionObservedAt *time.Time
 	ResolvedAt            *time.Time
 	ResolvedBy            *string
@@ -138,6 +147,7 @@ type LiveAlertSnapshot struct {
 	LastSeenAt        time.Time
 	RelevantUpstreams []string
 	RelevantSources   []SourceRef
+	SourceLinks       []AlertSourceLink
 	Targets           []LiveTargetSnapshot
 	SilencedBySources []SourceSilenceRef
 }

@@ -378,7 +378,8 @@ Implemented additions to `alert_states`:
 1. `is_suppressed INTEGER NOT NULL DEFAULT 0`
 2. `match_labels_json TEXT` (nullable only when original labels are unavailable)
 3. `relevant_sources_json TEXT NOT NULL` (upstream name + cluster identity captured with the alert)
-4. `suppression_observed_at TEXT` (nullable local time when current suppression episode was first observed/established)
+4. `source_links_json TEXT NOT NULL` (immutable last-observed source name, target, and Prometheus URL; never mutable Alertmanager state)
+5. `suppression_observed_at TEXT` (nullable local time when current suppression episode was first observed/established)
 
 No generic row-version/trigger column is used; D14 defines semantic CAS using existing lifecycle fields.
 
