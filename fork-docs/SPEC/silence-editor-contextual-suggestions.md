@@ -56,6 +56,10 @@ matcher name and operator.
 This contract is independent of whether a matcher was initially supplied from
 the main Karma filter bar or entered manually in the editor.
 
+The preview uses the identical context exclusion while a matcher is open for
+editing, but returns alert cards plus server-evaluated draft evidence. Its
+separate contract is in [Editing-Matcher Preview](silence-editor-redesign.md#q25-editing-matcher-preview-implemented).
+
 ## 3. Correctness Boundary
 
 The browser may determine which form fields appear complete, but it is not an

@@ -559,6 +559,112 @@ func TestSilenceEditorPreviewReturnsTargetScopedResults(t *testing.T) {
 	}
 }
 
+func TestSilenceEditorPreviewReturnsDraftEvidenceWithoutFilteringCandidates(t *testing.T) {
+	alertmanager.UnregisterAll()
+	upstreamSetup = false
+	mockConfig(t.Setenv)
+	t.Cleanup(func() {
+		alertmanager.UnregisterAll()
+		upstreamSetup = false
+	})
+	mockAlerts(mock.ListAllMocks()[0])
+	r := testRouter()
+	setupRouter(r, nil)
+
+	body := map[string]any{
+		"target": "default",
+		"matchers": []map[string]any{{
+			"name":    "alertname",
+			"value":   "Host_Down",
+			"isRegex": false,
+			"isEqual": true,
+		}},
+		"editingMatcher": map[string]any{
+			"expression": `alertname="does-not-match"`,
+		},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal preview request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/silence-editor/preview", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	r.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		EditingMatcherValid *bool `json:"editingMatcherValid"`
+		Alerts              []struct {
+			EditingMatcherEvidence *struct {
+				Result string              `json:"result"`
+				Label  models.OrderedLabel `json:"label"`
+			} `json:"editingMatcherEvidence"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode preview response: %v", err)
+	}
+	if len(payload.Alerts) == 0 {
+		t.Fatal("expected context-selected preview alerts")
+	}
+	if payload.EditingMatcherValid == nil || !*payload.EditingMatcherValid {
+		t.Fatalf("expected valid draft matcher verdict, got=%v", payload.EditingMatcherValid)
+	}
+	for _, alert := range payload.Alerts {
+		evidence := alert.EditingMatcherEvidence
+		if evidence == nil {
+			t.Fatal("expected draft evidence for every alert")
+		}
+		if evidence.Result != "does_not_match" {
+			t.Fatalf("expected does_not_match evidence, got %q", evidence.Result)
+		}
+		if evidence.Label.Name != "alertname" || evidence.Label.Value != "Host_Down" {
+			t.Fatalf("unexpected draft evidence label: %#v", evidence.Label)
+		}
+	}
+}
+
+func TestSilenceEditorEditingMatcherEvidence(t *testing.T) {
+	labels := map[string]string{"service": "api"}
+	tests := []struct {
+		name       string
+		expression string
+		result     string
+		label      string
+		missing    bool
+	}{
+		{name: "matches", expression: `service="api"`, result: "matches", label: "api"},
+		{name: "does not match", expression: `service="payments"`, result: "does_not_match", label: "api"},
+		{name: "invalid regex", expression: `service=~"["`, result: "invalid", label: "api"},
+		{name: "missing label", expression: `team="platform"`, result: "does_not_match", label: "<missing>", missing: true},
+		{name: "unparseable label", expression: `not a matcher`, result: "invalid"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence := parseSilenceEditorEditingMatcher(tc.expression).evidence(labels)
+			if evidence.Result != tc.result {
+				t.Fatalf("expected result=%q, got=%q", tc.result, evidence.Result)
+			}
+			if tc.label == "" {
+				if evidence.Label != nil {
+					t.Fatalf("expected no evidence label, got=%#v", evidence.Label)
+				}
+				return
+			}
+			if evidence.Label == nil || evidence.Label.Value != tc.label {
+				t.Fatalf("expected evidence label value=%q, got=%#v", tc.label, evidence.Label)
+			}
+			if evidence.IsMissing != tc.missing {
+				t.Fatalf("expected isMissing=%t, got=%t", tc.missing, evidence.IsMissing)
+			}
+		})
+	}
+}
+
 func TestSilenceEditorPreviewRejectsInvalidCursor(t *testing.T) {
 	alertmanager.UnregisterAll()
 	upstreamSetup = false

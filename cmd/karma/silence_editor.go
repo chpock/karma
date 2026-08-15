@@ -40,7 +40,10 @@ const (
 	silenceEditorPreviewMaxRequestBytes int64 = 64 * 1024
 )
 
-var silenceEditorMatcherNamePattern = stdregexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
+var (
+	silenceEditorMatcherNamePattern  = stdregexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*$`)
+	silenceEditorDraftMatcherPattern = stdregexp.MustCompile(`(?s)^\s*([a-zA-Z_:][a-zA-Z0-9_:]*)\s*(=~|!~|!=|=)\s*(.*?)\s*$`)
+)
 
 const (
 	silenceEditorSuggestionCacheContexts = 8
@@ -69,11 +72,16 @@ type silenceEditorMatcher struct {
 }
 
 type silenceEditorPreviewRequest struct {
-	Target   string                 `json:"target"`
-	Matchers []silenceEditorMatcher `json:"matchers"`
-	Cursor   string                 `json:"cursor,omitempty"`
-	Snapshot string                 `json:"snapshot,omitempty"`
-	Limit    int                    `json:"limit,omitempty"`
+	Target         string                              `json:"target"`
+	Matchers       []silenceEditorMatcher              `json:"matchers"`
+	EditingMatcher *silenceEditorEditingMatcherRequest `json:"editingMatcher,omitempty"`
+	Cursor         string                              `json:"cursor,omitempty"`
+	Snapshot       string                              `json:"snapshot,omitempty"`
+	Limit          int                                 `json:"limit,omitempty"`
+}
+
+type silenceEditorEditingMatcherRequest struct {
+	Expression string `json:"expression"`
 }
 
 type silenceEditorSubmitRequest struct {
@@ -117,18 +125,26 @@ type silenceEditorErrorResponse struct {
 }
 
 type silenceEditorPreviewAlert struct {
-	ID                string                `json:"id"`
-	State             string                `json:"state"`
-	RawState          string                `json:"rawState"`
-	IsLive            bool                  `json:"isLive"`
-	IsSuppressed      bool                  `json:"isSuppressed"`
-	IsResolved        bool                  `json:"isResolved"`
-	StartsAt          string                `json:"startsAt"`
-	LastSeenAt        *string               `json:"lastSeenAt,omitempty"`
-	Labels            []models.OrderedLabel `json:"labels"`
-	MatchedLabels     []models.OrderedLabel `json:"matchedLabels"`
-	MatchedLabelNames []string              `json:"matchedLabelNames"`
-	MissingLabelNames []string              `json:"missingLabelNames"`
+	ID                     string                               `json:"id"`
+	State                  string                               `json:"state"`
+	RawState               string                               `json:"rawState"`
+	IsLive                 bool                                 `json:"isLive"`
+	IsSuppressed           bool                                 `json:"isSuppressed"`
+	IsResolved             bool                                 `json:"isResolved"`
+	StartsAt               string                               `json:"startsAt"`
+	LastSeenAt             *string                              `json:"lastSeenAt,omitempty"`
+	Labels                 []models.OrderedLabel                `json:"labels"`
+	MatchedLabels          []models.OrderedLabel                `json:"matchedLabels"`
+	MatchedLabelNames      []string                             `json:"matchedLabelNames"`
+	MissingLabelNames      []string                             `json:"missingLabelNames"`
+	EditingMatcherEvidence *silenceEditorEditingMatcherEvidence `json:"editingMatcherEvidence,omitempty"`
+	rawLabels              map[string]string                    `json:"-"`
+}
+
+type silenceEditorEditingMatcherEvidence struct {
+	Result    string               `json:"result"`
+	Label     *models.OrderedLabel `json:"label,omitempty"`
+	IsMissing bool                 `json:"isMissing"`
 }
 
 type silenceEditorPreviewResponse struct {
@@ -140,6 +156,7 @@ type silenceEditorPreviewResponse struct {
 	NextCursor          string                      `json:"nextCursor,omitempty"`
 	Snapshot            string                      `json:"snapshot"`
 	ExcludedNoRawLabels int                         `json:"excludedNoRawLabels"`
+	EditingMatcherValid *bool                       `json:"editingMatcherValid,omitempty"`
 	Alerts              []silenceEditorPreviewAlert `json:"alerts"`
 }
 
@@ -224,7 +241,7 @@ func silenceEditorPreview(w http.ResponseWriter, r *http.Request) {
 		badRequestJSON(w, "target is required")
 		return
 	}
-	if len(req.Matchers) == 0 {
+	if len(req.Matchers) == 0 && req.EditingMatcher == nil {
 		logSilencePreviewRejection(r.Context(), req.Target, "missing_matchers", slog.LevelDebug)
 		badRequestJSON(w, "at least one matcher is required")
 		return
@@ -236,7 +253,7 @@ func silenceEditorPreview(w http.ResponseWriter, r *http.Request) {
 		badRequestJSON(w, err.Error())
 		return
 	}
-	if !silenceEditorMatcherSetIsSafe(compiled) {
+	if req.EditingMatcher == nil && !silenceEditorMatcherSetIsSafe(compiled) {
 		logSilencePreviewRejection(r.Context(), req.Target, "unsafe_matcher_set", slog.LevelDebug)
 		badRequestJSON(w, "at least one matcher must not match the empty string")
 		return
@@ -311,7 +328,16 @@ func silenceEditorPreview(w http.ResponseWriter, r *http.Request) {
 	if end > total {
 		end = total
 	}
-	page := matched[start:end]
+	page := slices.Clone(matched[start:end])
+	var editingMatcherValid *bool
+	if req.EditingMatcher != nil {
+		draft := parseSilenceEditorEditingMatcher(req.EditingMatcher.Expression)
+		valid := draft.matcher != nil
+		editingMatcherValid = &valid
+		for index := range page {
+			page[index].EditingMatcherEvidence = draft.evidence(page[index].rawLabels)
+		}
+	}
 
 	resp := silenceEditorPreviewResponse{
 		Status:              "success",
@@ -321,6 +347,7 @@ func silenceEditorPreview(w http.ResponseWriter, r *http.Request) {
 		Limit:               limit,
 		Snapshot:            snapshot.ID,
 		ExcludedNoRawLabels: snapshot.ExcludedNoRawLabels,
+		EditingMatcherValid: editingMatcherValid,
 		Alerts:              page,
 	}
 	if len(page) > 0 && end < total {
@@ -367,9 +394,92 @@ func matchSilenceEditorPreviewCandidates(matchers []compiledSilenceEditorMatcher
 			IsLive: candidate.IsLive, IsSuppressed: candidate.IsSuppressed, IsResolved: candidate.IsResolved,
 			StartsAt: candidate.StartsAt, LastSeenAt: candidate.LastSeenAt, Labels: candidate.Labels,
 			MatchedLabels: matchedLabels, MatchedLabelNames: matchedNames, MissingLabelNames: missingNames,
+			rawLabels: maps.Clone(candidate.RawLabels),
 		})
 	}
 	return matched, false
+}
+
+type silenceEditorEditingMatcher struct {
+	matcher *compiledSilenceEditorMatcher
+	name    string
+}
+
+func parseSilenceEditorEditingMatcher(expression string) silenceEditorEditingMatcher {
+	parts := silenceEditorDraftMatcherPattern.FindStringSubmatch(expression)
+	if len(parts) == 0 {
+		return silenceEditorEditingMatcher{}
+	}
+	name := parts[1]
+	value, ok := parseSilenceEditorEditingMatcherValue(parts[3])
+	if !ok {
+		return silenceEditorEditingMatcher{name: name}
+	}
+	compiled, err := compileSilenceEditorMatchers([]silenceEditorMatcher{{
+		Name: name, Value: value, IsRegex: parts[2] == "=~" || parts[2] == "!~", IsEqual: parts[2] == "=" || parts[2] == "=~",
+	}})
+	if err != nil {
+		return silenceEditorEditingMatcher{name: name}
+	}
+	return silenceEditorEditingMatcher{matcher: &compiled[0], name: name}
+}
+
+func parseSilenceEditorEditingMatcherValue(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, `"`) {
+		return raw, true
+	}
+	if len(raw) < 2 || !strings.HasSuffix(raw, `"`) {
+		return "", false
+	}
+	value := strings.Builder{}
+	for index := 1; index < len(raw)-1; index++ {
+		char := raw[index]
+		if char == '"' {
+			return "", false
+		}
+		if char != '\\' {
+			value.WriteByte(char)
+			continue
+		}
+		index++
+		if index >= len(raw)-1 {
+			return "", false
+		}
+		switch raw[index] {
+		case '\\', '"':
+			value.WriteByte(raw[index])
+		case 'n':
+			value.WriteByte('\n')
+		default:
+			value.WriteByte('\\')
+			value.WriteByte(raw[index])
+		}
+	}
+	return value.String(), true
+}
+
+func (draft silenceEditorEditingMatcher) evidence(labels map[string]string) *silenceEditorEditingMatcherEvidence {
+	evidence := &silenceEditorEditingMatcherEvidence{Result: "invalid"}
+	if draft.name == "" {
+		return evidence
+	}
+	value, exists := labels[draft.name]
+	if exists {
+		evidence.Label = &models.OrderedLabel{Name: draft.name, Value: value}
+	} else {
+		evidence.Label = &models.OrderedLabel{Name: draft.name, Value: "<missing>"}
+		evidence.IsMissing = true
+	}
+	if draft.matcher == nil {
+		return evidence
+	}
+	if silenceEditorMatcherMatches(*draft.matcher, value) {
+		evidence.Result = "matches"
+	} else {
+		evidence.Result = "does_not_match"
+	}
+	return evidence
 }
 
 func silenceEditorPreviewFingerprint(target string, matchers []compiledSilenceEditorMatcher) string {

@@ -74,6 +74,11 @@ type SuggestionStateT = {
   summary?: string;
 };
 
+type PreviewSnapshotContextT = {
+  snapshot: string;
+  matcherKey: string;
+};
+
 type EditorInitialStateT = {
   target: string;
   expressions: string[];
@@ -266,21 +271,26 @@ export function parseMatcherExpression(value: string): ParsedMatcherT | null {
 }
 
 function matcherDomainFingerprint(expressions: string[]): string {
-  const normalized: string[] = [];
+  const matchers: ParsedMatcherT[] = [];
   for (const expression of expressions) {
     const matcher = parseMatcherExpression(expression);
     if (matcher === null) {
       return JSON.stringify({ invalid: expressions });
     }
-    normalized.push(
+    matchers.push(matcher);
+  }
+  return matcherSetFingerprint(matchers);
+}
+
+function matcherSetFingerprint(matchers: ParsedMatcherT[]): string {
+  const normalized = matchers.map((matcher) =>
       JSON.stringify({
         name: matcher.name,
         value: matcher.value,
         isRegex: matcher.isRegex,
         isEqual: matcher.isEqual,
       }),
-    );
-  }
+  );
   normalized.sort();
   return JSON.stringify(normalized);
 }
@@ -766,7 +776,10 @@ const SilenceEditor: FC<{
   const [previewNextCursor, setPreviewNextCursor] = useState<string | null>(
     null,
   );
-  const [previewSnapshot, setPreviewSnapshot] = useState<string | null>(null);
+  const [fullPreviewSnapshot, setFullPreviewSnapshot] =
+    useState<PreviewSnapshotContextT | null>(null);
+  const [draftPreviewSnapshot, setDraftPreviewSnapshot] =
+    useState<PreviewSnapshotContextT | null>(null);
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0);
   const [previewExcludedNoRawLabels, setPreviewExcludedNoRawLabels] =
     useState<number>(0);
@@ -958,6 +971,36 @@ const SilenceEditor: FC<{
   const compiledMatchers = parsedMatchers.filter(
     (m): m is ParsedMatcherT => m !== null,
   );
+  const previewMatchers = useMemo(
+    () =>
+      parsedMatchers.flatMap((matcher, index) =>
+        index === editingMatcher || matcher === null ? [] : [matcher],
+      ),
+    [editingMatcher, parsedMatchers],
+  );
+  const previewEditingMatcher = useMemo(
+    () =>
+      editingMatcher === null
+        ? undefined
+        : { expression: expressions[editingMatcher] || "" },
+    [editingMatcher, expressions],
+  );
+  const fullPreviewMatcherKey = useMemo(
+    () => matcherDomainFingerprint(expressions),
+    [expressions],
+  );
+  const draftPreviewMatcherKey = useMemo(
+    () => matcherSetFingerprint(previewMatchers),
+    [previewMatchers],
+  );
+  const isDraftPreview = editingMatcher !== null;
+  const activePreviewSnapshot = isDraftPreview
+    ? draftPreviewSnapshot?.matcherKey === draftPreviewMatcherKey
+      ? draftPreviewSnapshot.snapshot
+      : null
+    : fullPreviewSnapshot?.matcherKey === fullPreviewMatcherKey
+      ? fullPreviewSnapshot.snapshot
+      : null;
 
   const endChanged = useMemo(() => {
     if (durationKind !== "absolute") {
@@ -1072,8 +1115,8 @@ const SilenceEditor: FC<{
     if (!target) {
       return "Target is required";
     }
-    return matcherError;
-  }, [matcherError, target]);
+    return editingMatcher === null ? matcherError : null;
+  }, [editingMatcher, matcherError, target]);
   const targetError = readOnly
     ? "This target is read-only."
     : !target
@@ -1380,7 +1423,6 @@ const SilenceEditor: FC<{
 
     setPreviewStale(preview.length > 0);
     setPreviewNextCursor(null);
-    setPreviewSnapshot(null);
     setPreviewRefreshing(false);
     setPreviewError(null);
     if (matcherPreflightInitializedRef.current) {
@@ -1400,7 +1442,8 @@ const SilenceEditor: FC<{
       setPreviewError(null);
       const req: SilenceEditorPreviewRequestT = {
         target,
-        matchers: compiledMatchers,
+        matchers: previewMatchers,
+        editingMatcher: previewEditingMatcher,
         limit: 100,
       };
       try {
@@ -1433,13 +1476,27 @@ const SilenceEditor: FC<{
         setPreview(data.alerts);
         setPreviewTotal(Number.isFinite(data.total) ? data.total : 0);
         setPreviewNextCursor(data.nextCursor || null);
-        setPreviewSnapshot(data.snapshot || null);
+        if (data.snapshot) {
+          const context = {
+            snapshot: data.snapshot,
+            matcherKey: isDraftPreview
+              ? draftPreviewMatcherKey
+              : fullPreviewMatcherKey,
+          };
+          if (isDraftPreview) {
+            setDraftPreviewSnapshot(context);
+          } else {
+            setFullPreviewSnapshot(context);
+          }
+        }
         setPreviewExcludedNoRawLabels(
           Number.isFinite(data.excludedNoRawLabels)
             ? data.excludedNoRawLabels
             : 0,
         );
-        setMatcherPreflightValid(true);
+        setMatcherPreflightValid(
+          allMatchersValid && data.editingMatcherValid !== false,
+        );
         setPreviewStale(false);
       } catch (err) {
         if (previewGenerationRef.current !== generation) {
@@ -1455,7 +1512,18 @@ const SilenceEditor: FC<{
         }
       }
     }, 350);
-  }, [expressions, previewInputError, previewRefreshNonce, target]);
+  }, [
+    allMatchersValid,
+    draftPreviewMatcherKey,
+    expressions,
+    previewEditingMatcher,
+    previewInputError,
+    previewMatchers,
+    previewRefreshNonce,
+    fullPreviewMatcherKey,
+    isDraftPreview,
+    target,
+  ]);
 
   const canClose = (_reason: SilenceEditorCloseReasonT) => {
     const sessionState = silenceFormStore.data.editorSessionState;
@@ -1498,9 +1566,10 @@ const SilenceEditor: FC<{
     setPreviewError(null);
     const req: SilenceEditorPreviewRequestT = {
       target,
-      matchers: compiledMatchers,
+      matchers: previewMatchers,
+      editingMatcher: previewEditingMatcher,
       cursor: previewNextCursor,
-      snapshot: previewSnapshot || undefined,
+      snapshot: activePreviewSnapshot || undefined,
       limit: 100,
     };
     try {
@@ -1517,7 +1586,11 @@ const SilenceEditor: FC<{
       }
       if (!res.ok) {
         if (res.status === 409) {
-          setPreviewSnapshot(null);
+          if (isDraftPreview) {
+            setDraftPreviewSnapshot(null);
+          } else {
+            setFullPreviewSnapshot(null);
+          }
           setPreviewNextCursor(null);
           setMatcherPreflightValid(false);
           setPreviewRefreshNonce((value) => value + 1);
@@ -1535,7 +1608,19 @@ const SilenceEditor: FC<{
       setPreview((current) => [...current, ...data.alerts]);
       setPreviewTotal(Number.isFinite(data.total) ? data.total : 0);
       setPreviewNextCursor(data.nextCursor || null);
-      setPreviewSnapshot(data.snapshot || previewSnapshot);
+        if (data.snapshot) {
+          const context = {
+            snapshot: data.snapshot,
+            matcherKey: isDraftPreview
+              ? draftPreviewMatcherKey
+              : fullPreviewMatcherKey,
+          };
+          if (isDraftPreview) {
+            setDraftPreviewSnapshot(context);
+          } else {
+            setFullPreviewSnapshot(context);
+          }
+        }
       setPreviewExcludedNoRawLabels(
         Number.isFinite(data.excludedNoRawLabels)
           ? data.excludedNoRawLabels
@@ -1567,6 +1652,22 @@ const SilenceEditor: FC<{
     ) {
       return;
     }
+
+    // A draft preview intentionally excludes this matcher and cannot authorize
+    // the full rule submitted below.
+    if (editingMatcher !== null) {
+      previewGenerationRef.current += 1;
+      if (previewDebounceRef.current !== null) {
+        window.clearTimeout(previewDebounceRef.current);
+        previewDebounceRef.current = null;
+      }
+      setSuggestions(null);
+      setEditingMatcher(null);
+    }
+    const submitFullSnapshot =
+      fullPreviewSnapshot?.matcherKey === fullPreviewMatcherKey
+        ? fullPreviewSnapshot.snapshot
+        : undefined;
 
     const generation = submitGenerationRef.current + 1;
     submitGenerationRef.current = generation;
@@ -1680,7 +1781,7 @@ const SilenceEditor: FC<{
           body: JSON.stringify({
             target,
             matchers: compiledMatchers,
-            snapshot: previewSnapshot || undefined,
+            snapshot: submitFullSnapshot,
             limit: 1,
           } satisfies SilenceEditorPreviewRequestT),
         },
@@ -1696,7 +1797,7 @@ const SilenceEditor: FC<{
           validationPayload.error || "Matcher validation failed",
         );
         if (validationResponse.status === 409) {
-          setPreviewSnapshot(null);
+          setFullPreviewSnapshot(null);
           setMatcherPreflightValid(false);
           setPreviewRefreshNonce((value) => value + 1);
         }
@@ -2554,6 +2655,11 @@ const SilenceEditor: FC<{
           <div className="fork-silence-editor__preview-header">
               <strong>Affected alerts</strong>
               <span className="badge bg-secondary ms-2">{previewTotal}</span>
+              {editingMatcher !== null ? (
+                <span className="fork-silence-editor__preview-draft-context ms-2">
+                  Preview excludes matcher being edited
+                </span>
+              ) : null}
               {previewHeaderStatus && previewStale ? (
                 <span className="badge bg-warning text-dark ms-2">
                   {previewHeaderStatus}
@@ -2582,6 +2688,23 @@ const SilenceEditor: FC<{
           {(previewError === null || preview.length > 0) && (
             <div className="fork-silence-editor__preview-list">
               {preview.map((alert) => {
+                const draftEvidence = alert.editingMatcherEvidence;
+                const draftLabelName = draftEvidence?.label?.name;
+                const draftLabelValue = draftEvidence?.label?.value;
+                const draftClass =
+                  draftEvidence?.result === "matches"
+                    ? "fork-silence-editor__preview-label--draft-match"
+                    : draftEvidence
+                      ? "fork-silence-editor__preview-label--draft-no-match"
+                      : "";
+                const draftDescription =
+                  draftEvidence?.result === "matches"
+                    ? "Matches draft matcher"
+                    : draftEvidence?.result === "does_not_match"
+                      ? "Does not match draft matcher"
+                      : draftEvidence
+                        ? "Draft matcher is invalid"
+                        : "";
                 const stateKey =
                   alert.state === "suppressed" && !alert.isLive
                     ? "suppressed-past"
@@ -2595,7 +2718,10 @@ const SilenceEditor: FC<{
                 ) ??
                   alert.matchedLabels.find(
                     (label) => label.name === "alertname",
-                  );
+                  ) ??
+                  (draftLabelName === "alertname" && draftLabelValue
+                    ? { name: draftLabelName, value: draftLabelValue }
+                    : undefined);
                 const matcherTitle = (name: string) =>
                   expressions
                     .filter(
@@ -2617,11 +2743,22 @@ const SilenceEditor: FC<{
                       {alertName ? (
                         <span
                           className={`fork-silence-editor__preview-alertname${
-                            alert.matchedLabelNames.includes("alertname")
+                            draftLabelName === "alertname"
+                              ? ` ${draftClass}`
+                              : alert.matchedLabelNames.includes("alertname")
                               ? " fork-silence-editor__preview-alertname--matched"
                               : ""
                           }`}
-                          title={matcherTitle("alertname")}
+                          title={
+                            draftLabelName === "alertname"
+                              ? draftDescription
+                              : matcherTitle("alertname")
+                          }
+                          aria-label={
+                            draftLabelName === "alertname"
+                              ? draftDescription
+                              : undefined
+                          }
                         >
                           {alertName.value}
                         </span>
@@ -2634,16 +2771,38 @@ const SilenceEditor: FC<{
                           <span
                             key={`${alert.id}:${label.name}:${label.value}`}
                             className={`badge fork-silence-editor__preview-label ${
-                              alert.matchedLabelNames.includes(label.name)
-                                ? "fork-silence-editor__preview-label--matched"
-                                : ""
+                              draftLabelName === label.name
+                                ? draftClass
+                                : alert.matchedLabelNames.includes(label.name)
+                                  ? "fork-silence-editor__preview-label--matched"
+                                  : ""
                             }`}
-                            title={matcherTitle(label.name)}
+                            title={
+                              draftLabelName === label.name
+                                ? draftDescription
+                                : matcherTitle(label.name)
+                            }
+                            aria-label={
+                              draftLabelName === label.name
+                                ? draftDescription
+                                : undefined
+                            }
                           >
                             <PreviewLabel name={label.name} value={label.value} />
                           </span>
                         ))}
-                      {alert.missingLabelNames.map((name) => (
+                      {draftEvidence?.isMissing && draftLabelName ? (
+                        <span
+                          className={`badge fork-silence-editor__preview-label fork-silence-editor__preview-label--missing fork-silence-editor__missing-label ${draftClass}`}
+                          title={draftDescription}
+                          aria-label={draftDescription}
+                        >
+                          {draftLabelName}={"<missing>"}
+                        </span>
+                      ) : null}
+                      {alert.missingLabelNames
+                        .filter((name) => name !== draftLabelName)
+                        .map((name) => (
                         <span
                           key={`${alert.id}:missing:${name}`}
                           className="badge fork-silence-editor__preview-label fork-silence-editor__preview-label--missing fork-silence-editor__missing-label"
@@ -2651,7 +2810,7 @@ const SilenceEditor: FC<{
                         >
                           {name}={"<missing>"}
                         </span>
-                      ))}
+                        ))}
                       {alert.matchedLabels
                         .filter(
                           (matched) =>
@@ -2663,8 +2822,21 @@ const SilenceEditor: FC<{
                         .map((matched) => (
                           <span
                             key={`${alert.id}:matched-only:${matched.name}:${matched.value}`}
-                            className="badge fork-silence-editor__preview-label fork-silence-editor__preview-label--matched-only"
-                            title={matcherTitle(matched.name)}
+                            className={`badge fork-silence-editor__preview-label ${
+                              draftLabelName === matched.name
+                                ? draftClass
+                                : "fork-silence-editor__preview-label--matched-only"
+                            }`}
+                            title={
+                              draftLabelName === matched.name
+                                ? draftDescription
+                                : matcherTitle(matched.name)
+                            }
+                            aria-label={
+                              draftLabelName === matched.name
+                                ? draftDescription
+                                : undefined
+                            }
                           >
                             <PreviewLabel
                               name={matched.name}
@@ -2672,6 +2844,26 @@ const SilenceEditor: FC<{
                             />
                           </span>
                         ))}
+                      {draftEvidence?.label &&
+                      !draftEvidence.isMissing &&
+                      draftLabelName !== "alertname" &&
+                      !alert.labels.some(
+                        (label) => label.name === draftLabelName,
+                      ) &&
+                      !alert.matchedLabels.some(
+                        (label) => label.name === draftLabelName,
+                      ) ? (
+                        <span
+                          className={`badge fork-silence-editor__preview-label ${draftClass}`}
+                          title={draftDescription}
+                          aria-label={draftDescription}
+                        >
+                          <PreviewLabel
+                            name={draftEvidence.label.name}
+                            value={draftEvidence.label.value}
+                          />
+                        </span>
+                      ) : null}
                     </div>
                   </article>
                 );

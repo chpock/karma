@@ -164,6 +164,19 @@ The request carries target, structured matchers, and optional cursor/snapshot/li
 The response contains exact totals, page metadata, opaque snapshot/cursor,
 `excludedNoRawLabels`, lifecycle dimensions, and matched/missing-label evidence.
 
+While a matcher is being edited, the request carries its raw expression
+separately from the complete context matcher list. The backend returns mandatory
+per-alert `editingMatcherEvidence` for that mode,
+with `matches`, `does_not_match`, or `invalid` result and actual/missing-label
+evidence. It also returns `editingMatcherValid`, which keeps submit blocked for
+a syntactically complete expression that Alertmanager/RE2 cannot evaluate. The
+editing matcher never filters candidates; see
+[Editing-Matcher Preview](silence-editor-redesign.md#q25-editing-matcher-preview-implemented).
+Preview snapshot IDs are scoped to the exact matcher set that produced them.
+The client keeps full-rule and draft-context snapshots separately; only a
+full-rule snapshot with the current canonical matcher key may be supplied to a
+submit preflight.
+
 Preview accepts at most 100 matchers and 64 KiB of JSON. One in-memory result is
 limited to 100,000 matched alerts. Expired/evicted snapshots return HTTP 409 and must
 be rebuilt. Preview fails closed if lifecycle storage is unavailable; it does not

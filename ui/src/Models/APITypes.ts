@@ -22,9 +22,14 @@ interface SilenceEditorPreviewMatcherT {
   isEqual: boolean;
 }
 
+interface SilenceEditorEditingMatcherT {
+  expression: string;
+}
+
 export interface SilenceEditorPreviewRequestT {
   target: string;
   matchers: SilenceEditorPreviewMatcherT[];
+  editingMatcher?: SilenceEditorEditingMatcherT;
   cursor?: string;
   snapshot?: string;
   limit?: number;
@@ -75,6 +80,12 @@ interface SilenceEditorMatchedLabelT {
   value: string;
 }
 
+interface SilenceEditorEditingMatcherEvidenceT {
+  result: "matches" | "does_not_match" | "invalid";
+  label?: SilenceEditorMatchedLabelT;
+  isMissing: boolean;
+}
+
 export interface SilenceEditorPreviewAlertT {
   id: string;
   state: AlertStateT;
@@ -88,6 +99,7 @@ export interface SilenceEditorPreviewAlertT {
   matchedLabels: SilenceEditorMatchedLabelT[];
   matchedLabelNames: string[];
   missingLabelNames: string[];
+  editingMatcherEvidence?: SilenceEditorEditingMatcherEvidenceT;
 }
 
 export interface SilenceEditorPreviewResponseT {
@@ -99,6 +111,7 @@ export interface SilenceEditorPreviewResponseT {
   nextCursor?: string;
   snapshot?: string;
   excludedNoRawLabels: number;
+  editingMatcherValid?: boolean;
   alerts: SilenceEditorPreviewAlertT[];
 }
 

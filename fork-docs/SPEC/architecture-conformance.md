@@ -85,6 +85,7 @@ The executable test coverage for these contracts is summarized in
 | Q22 | No raw payload preview or shareable link in new runtime | routing/components | App query-param tests | Implemented |
 | Q23 | Legacy editor remains buildable/tested but has no runtime route | modal integration/test suites | legacy suites | Implemented |
 | Q24 | Desktop fixed form + scrolling result; mobile fullscreen single scroll/sticky actions | editor CSS/modal | five-project visual suite | Implemented |
+| Q25 | Editing matcher is excluded from preview candidates; backend returns per-alert green/red draft evidence | preview request/evaluator/renderer | API, UI, delayed-response, and five-project visual tests | Implemented |
 
 ## 4. Runtime Logging
 

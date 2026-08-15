@@ -247,6 +247,87 @@ test("SilenceModalEditorPreview", async ({ page }) => {
   }
 });
 
+test("SilenceModalEditorDraftPreview", async ({ page }) => {
+  await page.clock.install({ time: new Date("2018-08-14T17:00:00Z") });
+  await page.goto("/src/e2e/stories.html#SilenceModalEditor");
+  await page.addStyleTag({
+    content: "* { caret-color: transparent !important; }",
+  });
+
+  const editors = page.locator(".fork-silence-editor");
+  const count = await editors.count();
+  const previews = page.locator(".fork-silence-editor__preview");
+  for (let index = 0; index < count; index++) {
+    const matcher = editors
+      .nth(index)
+      .locator(".fork-silence-editor__matcher-expression")
+      .first();
+    await matcher.click();
+    await matcher.fill('service="api"');
+    await page.clock.runFor(500);
+    const preview = previews.nth(index);
+    await expect(
+      preview.getByText("Preview excludes matcher being edited"),
+    ).toBeVisible();
+    await expect(
+      preview.locator(".fork-silence-editor__preview-label--draft-match"),
+    ).toHaveCount(1);
+    await expect(
+      preview.locator(".fork-silence-editor__preview-label--draft-no-match"),
+    ).toHaveCount(2);
+    const draftContrasts = await preview.evaluate((node) => {
+      const rgb = (color: string): [number, number, number] => {
+        const channels = color.match(/\d+/g);
+        if (!channels || channels.length < 3) {
+          throw new Error(`expected RGB color, got ${color}`);
+        }
+        return [Number(channels[0]), Number(channels[1]), Number(channels[2])];
+      };
+      const luminance = ([red, green, blue]: [number, number, number]) => {
+        const linear = [red, green, blue].map((channel) => {
+          const normalized = channel / 255;
+          return normalized <= 0.04045
+            ? normalized / 12.92
+            : ((normalized + 0.055) / 1.055) ** 2.4;
+        });
+        return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+      };
+      const contrast = (foreground: string, background: string) => {
+        const [first, second] = [luminance(rgb(foreground)), luminance(rgb(background))];
+        return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+      };
+      const measured = [
+        ".fork-silence-editor__preview-label--draft-match",
+        ".fork-silence-editor__preview-label--draft-no-match",
+      ].map((selector) => {
+        const label = node.querySelector<HTMLElement>(selector);
+        if (!label) {
+          throw new Error(`expected ${selector}`);
+        }
+        const styles = getComputedStyle(label);
+        return [
+          contrast(getComputedStyle(label.querySelector(".syntax-label")!).color, styles.backgroundColor),
+          contrast(getComputedStyle(label.querySelector(".syntax-operator")!).color, styles.backgroundColor),
+          contrast(getComputedStyle(label.querySelector(".syntax-value")!).color, styles.backgroundColor),
+        ];
+      });
+      return measured.flat();
+    });
+    for (const contrast of draftContrasts) {
+      expect(contrast).toBeGreaterThanOrEqual(4.5);
+    }
+    await expect(
+      preview.locator(".fork-silence-editor__preview-label--draft-match"),
+    ).toHaveScreenshot(`SilenceModalEditorDraftPreviewMatch-${index}.png`);
+    await expect(
+      preview.locator(".fork-silence-editor__preview-label--draft-no-match").first(),
+    ).toHaveScreenshot(`SilenceModalEditorDraftPreviewNoMatch-${index}.png`);
+    await expect(preview).toHaveScreenshot(
+      `SilenceModalEditorDraftPreview-${index}.png`,
+    );
+  }
+});
+
 test("SilenceModalEditorLayoutSpacing", async ({ page }) => {
   await page.goto("/src/e2e/stories.html#SilenceModalEditor");
 
@@ -455,6 +536,7 @@ test("SilenceModalEditorMatcherPlaceholder", async ({ page }) => {
       `SilenceModalEditorMatcherPlaceholder-${i}.png`,
     );
     await placeholder.click();
+    await page.clock.runFor(250);
     await expect(placeholder).toHaveScreenshot(
       `SilenceModalEditorMatcherPlaceholderFocused-${i}.png`,
     );

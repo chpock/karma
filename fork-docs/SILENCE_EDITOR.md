@@ -33,6 +33,14 @@ Preview includes current and retained alerts for the selected target. It marks
 matched labels, shows when a matcher succeeded because a label was missing, and
 reports alerts excluded because their original matching labels are unavailable.
 
+While you edit one matcher, **Affected alerts** temporarily selects alerts using
+the other complete matchers only. This lets you inspect the values of the label
+being edited before choosing a value. Karma marks that label/value on each shown
+alert: green means the current draft matches the alert; red means it does not
+match or the draft is incomplete/invalid. The preview states that the edited
+matcher is temporarily excluded. Once you confirm, revert, or remove the field,
+the normal preview using every complete matcher resumes.
+
 ## 2. Time controls
 
 Starts can be Now or an exact local date/time. Ends can be a preset duration, a

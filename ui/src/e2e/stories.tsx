@@ -181,6 +181,24 @@ window.fetch = async (
   }
 
   if (url.includes("/silence-editor/preview")) {
+    const request = JSON.parse((init?.body as string) || "{}") as {
+      editingMatcher?: { expression?: string };
+    };
+    const editingExpression = request.editingMatcher?.expression;
+    const draftEvidence = (value?: string) => {
+      if (editingExpression === undefined) {
+        return undefined;
+      }
+      const isMissing = value === undefined;
+      return {
+        result:
+          editingExpression === 'service="api"' && value === "api"
+            ? "matches"
+            : "does_not_match",
+        label: { name: "service", value: value || "<missing>" },
+        isMissing,
+      };
+    };
     return jsonResponse({
       status: "success",
       target: "am",
@@ -208,6 +226,7 @@ window.fetch = async (
           ],
           matchedLabelNames: ["alertname", "service"],
           missingLabelNames: [],
+          editingMatcherEvidence: draftEvidence("api"),
         },
         {
           id: "preview-b",
@@ -224,6 +243,7 @@ window.fetch = async (
           matchedLabels: [{ name: "service", value: "payments" }],
           matchedLabelNames: ["service"],
           missingLabelNames: ["cluster"],
+          editingMatcherEvidence: draftEvidence("payments"),
         },
         {
           id: "preview-c",
@@ -241,6 +261,7 @@ window.fetch = async (
           matchedLabels: [{ name: "instance", value: "db01" }],
           matchedLabelNames: ["instance"],
           missingLabelNames: [],
+          editingMatcherEvidence: draftEvidence(),
         },
       ],
     });

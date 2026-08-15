@@ -180,6 +180,10 @@ before submission. Q7-Q10 define calendar, duration, and edit-mode semantics.
   - resolved.
 - Labels involved in matcher evaluation are highlighted separately from other
   labels.
+- While one matcher is being edited, the preview is refreshed against every
+  other complete valid matcher. The edited matcher is shown as per-alert draft
+  evidence rather than filtering the candidate alerts. Q25 defines this
+  interaction.
 - Loading, empty, stale, and error states must be explicit.
 
 ## 6. Information Architecture
@@ -228,7 +232,7 @@ count changes. Desktop and mobile behavior must be approved using the POC.
 9. Enter or a click outside the matcher confirms a valid edit; Escape restores
    the value from before editing.
 10. Removing a matcher deletes that complete expression input.
-11. Editing any matcher expression schedules a new preview request.
+11. Editing any matcher expression schedules a draft-aware preview request.
 12. The autocomplete input exposes the WAI-ARIA combobox contract: stable
     input/listbox/option IDs, `aria-controls`, and `aria-activedescendant` track
     the keyboard-selected option.
@@ -276,10 +280,13 @@ UI/domain boundary.
 ### 7.4 Automatic preview
 
 1. Changes to target or complete matcher expressions mark the visible results stale.
-2. A debounce avoids a request for each keystroke/rapid edit.
-3. Any older in-flight request is cancelled or ignored.
-4. Existing results remain visible but are marked as refreshing.
-5. The newest successful response atomically replaces the preview list.
+2. Entering matcher edit mode immediately schedules a draft-aware refresh. While
+   it remains open, the edited matcher is excluded from candidate selection and
+   is returned as per-alert draft evidence.
+3. A debounce avoids a request for each keystroke/rapid edit.
+4. Any older in-flight request is cancelled or ignored.
+5. Existing results remain visible but are marked as refreshing.
+6. The newest successful response atomically replaces the preview list.
 
 Preview correctness must use backend matcher semantics. The browser must not
 become a second, potentially divergent Alertmanager matcher implementation.
@@ -307,6 +314,10 @@ alert:
 - the complete labels used for display,
 - names of labels participating in matcher evaluation,
 - optional Alertmanager source/cluster context needed for target scoping.
+
+When the request contains an editing matcher, each alert also contains its
+server-evaluated draft evidence as specified in Q25. It is omitted for a
+normal, non-editing preview.
 
 The endpoint is read-only despite using POST; POST is chosen for robust
 structured payloads and regexp escaping. Q15-Q16 define population and pagination.
@@ -724,12 +735,13 @@ implying data that the alert does not contain.
 
 ### Q18. Preview refresh timing (decided)
 
-Every syntactically valid matcher change schedules preview after a 350 ms
-debounce, including changes made before leaving matcher edit mode. Invalid input
-does not clear the last successful result; that result remains visible with an
-explicit stale marker. A newer generation cancels the previous request when
-possible and always ignores an older response, preventing out-of-order updates.
-Target changes and matcher add/remove use the same generation mechanism.
+Every matcher edit schedules preview after a 350 ms debounce, including changes
+made before leaving matcher edit mode. While an edit is open, the current matcher
+is excluded from candidate selection and receives the draft-evidence treatment
+defined in Q25; malformed input therefore does not freeze the list. A
+newer generation cancels the previous request when possible and always ignores
+an older response, preventing out-of-order updates. Target changes and matcher
+add/remove use the same generation mechanism.
 
 ### Q19. Submission progress and failure (decided)
 
@@ -791,3 +803,119 @@ the form itself cannot fit, the modal provides an outer-scroll fallback rather
 than clipping controls. Mobile uses a full-screen modal with one vertical scroll
 and sticky header/actions. Exact pixel spacing is implementation polish, not a
 standalone-POC contract.
+
+### Q25. Editing-Matcher Preview (implemented)
+
+#### Motivation
+
+The normal preview evaluates the complete rule. While an operator adds a new
+matcher or changes its label/value, an incomplete expression cannot be evaluated
+as part of that rule, so the old preview remains frozen. That prevents the
+operator from seeing which values of the label exist on the alerts selected by
+the rest of the rule. Autocomplete alone is not sufficient: the operator needs
+to inspect those concrete alerts and their label/value pairs before choosing a
+value.
+
+#### Candidate population
+
+From the moment an operator enters a matcher field until that edit is committed,
+reverted, removed, or the editor closes:
+
+1. The current editing matcher is excluded from preview candidate selection,
+   even if its draft text is syntactically valid.
+2. Every other complete, syntactically valid matcher remains a normal logical-AND
+   filter. A sibling matcher using the same label is not removed.
+3. The preview refreshes on entering edit mode and after subsequent draft changes
+   using the existing generation, cancellation, and debounce rules.
+4. An empty or malformed editing matcher never freezes the list and never makes
+   the preview request fail. The resulting list is fresh for the remaining
+   matcher context, not a preview of the incomplete final rule.
+5. Leaving edit mode restores normal preview semantics: every completed valid
+   matcher participates in candidate selection.
+
+This is deliberately the same exclusion rule used by contextual autocomplete,
+but it supplies alert cards and draft evidence rather than suggestion values.
+
+#### Server-evaluated draft evidence
+
+The preview request carries the editing expression separately from the complete
+context matcher list. The backend owns parsing and Alertmanager matcher
+semantics; the browser must not implement its own `=`, `!=`, `=~`, `!~`,
+missing-label, or regular-expression evaluation.
+
+For each returned alert, the response contains one mandatory
+`editingMatcherEvidence` object while an edit is open:
+
+```json
+{
+  "result": "matches | does_not_match | invalid",
+  "label": {"name": "service", "value": "api"},
+  "isMissing": false
+}
+```
+
+The response additionally carries `editingMatcherValid`. This preserves backend
+RE2 preflight: a syntactically complete but non-compilable regexp still blocks
+submission even though the draft-aware candidate list remains available.
+
+- `matches` means the current draft is complete and matches this alert under
+  Alertmanager semantics.
+- `does_not_match` means the draft is complete but does not match this alert.
+- `invalid` means the draft cannot be evaluated. It never changes the candidate
+  set.
+- `label` identifies the actual label used as evidence. For a known absent label,
+  the response represents the existing `label=<missing>` evidence token with
+  `isMissing=true`. If no valid label name can be derived from an invalid draft,
+  `label` is absent and no invented label/value token is rendered.
+
+The backend returns this evidence for every candidate alert, including a draft
+whose label also occurs in a completed sibling matcher. No user-entered matcher
+text, alert label value, comment, or raw response body is emitted to browser or
+server logs.
+
+#### Presentation and accessibility
+
+- Draft evidence has precedence over ordinary preview-label decoration for the
+  same displayed label, so one physical label/value is never duplicated merely
+  to show both committed and draft evaluation.
+- `matches` uses a clearly distinct green-accented treatment.
+- `does_not_match` and `invalid` use a clearly distinct red-accented treatment.
+  Red means that this alert is not selected by, or cannot be evaluated against,
+  the current draft; it does not turn the alert itself into an error.
+- Textual accessible labels and tooltips state `Matches draft matcher`, `Does
+  not match draft matcher`, or `Draft matcher is invalid`; color is not the only
+  carrier of meaning.
+- The preview explicitly states that the editing matcher is excluded from the
+  candidate filter while the edit is open. This avoids presenting the temporary
+  wider list as the final rule result.
+- The green/red surfaces and syntax text must be reviewed in light and dark
+  themes for resting, focused, selected, and mobile card states under the UI
+  color review gate.
+
+#### Implementation and verification
+
+1. The preview request carries the raw draft expression and response returns
+   `editingMatcherEvidence`; backend parsing/evaluation is the only matcher
+   semantics authority.
+2. Candidate selection receives only completed non-editing matchers. Evidence is
+   evaluated separately for each returned alert without altering the snapshot's
+   candidate population.
+   - `fullPreview` and `draftPreview` retain separate snapshot contexts. Each
+     context carries the canonical matcher-set key used to create it.
+   - A submit preflight may reuse only `fullPreview` with an exactly equal full
+     matcher-set key. A `draftPreview` snapshot is never eligible for submit,
+     even while its draft expression is valid.
+3. The editor's existing generation and debounce lifecycle invalidates requests
+   after Enter, typing, Escape, outside commit, removal, target replacement, and
+   modal close.
+4. The renderer shows exactly one draft-evidence token per relevant label with
+   accessible explanatory text and the specified visual precedence.
+   - Create/Update synchronously ends an active matcher interaction, cancels its
+     queued draft refresh, and validates the complete matcher set before the
+     Alertmanager mutation begins. It never depends on the delayed blur handler.
+5. Backend and UI regressions cover matching, non-matching, malformed, and
+   missing-label draft evidence. Browser regressions cover green/red evidence,
+   light/dark desktop/mobile rendering, and syntax-token contrast of at least
+   4.5:1 against each evidence surface.
+6. The user-facing [Compact Silence Editor guide](../SILENCE_EDITOR.md) explains
+   the temporary candidate filter and evidence colors.

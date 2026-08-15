@@ -61,6 +61,7 @@ const previewResponse = (
   alerts: Array<Record<string, unknown>> = [],
   nextCursor?: string,
   total = alerts.length,
+  editingMatcherValid?: boolean,
 ) =>
   new Response(
     JSON.stringify({
@@ -71,6 +72,7 @@ const previewResponse = (
       limit: 100,
       nextCursor,
       excludedNoRawLabels: 0,
+      editingMatcherValid,
       alerts,
     }),
     { status: 200, headers: { "Content-Type": "application/json" } },
@@ -1285,7 +1287,7 @@ describe("<SilenceEditor />", () => {
     ).toBeDisabled();
   });
 
-  it("keeps the last successful preview visible and marks it stale", async () => {
+  it("keeps the last successful preview visible while a draft matcher refreshes", async () => {
     const stores = createStores(false);
     global.fetch = jest.fn(async () =>
       previewResponse([previewAlert("alert-before-invalid-edit")]),
@@ -1303,7 +1305,10 @@ describe("<SilenceEditor />", () => {
     fireEvent.focus(matcher);
     fireEvent.change(matcher, { target: { value: "invalid matcher" } });
 
-    expect(screen.getByText("Stale: matcher verification failed")).toHaveClass(
+    expect(
+      screen.getByText("Preview excludes matcher being edited"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Stale: waiting to refresh preview")).toHaveClass(
       "bg-warning",
     );
     expect(
@@ -1316,6 +1321,172 @@ describe("<SilenceEditor />", () => {
     expect(
       screen.queryByText('Each matcher must use full expression format: label="value"'),
     ).not.toBeInTheDocument();
+  });
+
+  it("refreshes draft preview without filtering candidates by the editing matcher", async () => {
+    jest.useFakeTimers();
+    const stores = createStores(false);
+    const previewRequests: Array<Record<string, unknown>> = [];
+    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input.toString().includes("/silence-editor/preview")) {
+        previewRequests.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+        return previewResponse([
+          {
+            ...previewAlert("Host_Down"),
+            labels: [
+              { name: "alertname", value: "Host_Down" },
+              { name: "service", value: "api" },
+            ],
+            editingMatcherEvidence: {
+              result: "matches",
+              label: { name: "service", value: "api" },
+              isMissing: false,
+            },
+          },
+        ]);
+      }
+      return new Response(JSON.stringify({ silenceID: "unused" }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+
+    renderEditor(stores);
+    fillRequiredMetadata();
+    await act(async () => {
+      jest.advanceTimersByTime(350);
+    });
+    previewRequests.length = 0;
+
+    const matcher = screen.getByLabelText("Matcher 1 expression, resting");
+    fireEvent.focus(matcher);
+    fireEvent.change(matcher, { target: { value: 'service="api"' } });
+    await act(async () => {
+      jest.advanceTimersByTime(350);
+    });
+
+    expect(previewRequests).toHaveLength(1);
+    expect(previewRequests[0]).toMatchObject({
+      matchers: [],
+      editingMatcher: { expression: 'service="api"' },
+    });
+    expect(
+      screen.getByText("Preview excludes matcher being edited"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Matches draft matcher")).toHaveClass(
+      "fork-silence-editor__preview-label--draft-match",
+    );
+  });
+
+  it("renders invalid draft evidence as a red label without hiding the alert", async () => {
+    jest.useFakeTimers();
+    const stores = createStores(false);
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      if (input.toString().includes("/silence-editor/preview")) {
+        return previewResponse([
+          {
+            ...previewAlert("Host_Down"),
+            labels: [
+              { name: "alertname", value: "Host_Down" },
+              { name: "service", value: "api" },
+            ],
+            editingMatcherEvidence: {
+              result: "invalid",
+              label: { name: "service", value: "api" },
+              isMissing: false,
+            },
+          },
+        ], undefined, undefined, false);
+      }
+      return new Response(JSON.stringify({ silenceID: "unused" }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+
+    renderEditor(stores);
+    fillRequiredMetadata();
+    await act(async () => {
+      jest.advanceTimersByTime(350);
+    });
+    const matcher = screen.getByLabelText("Matcher 1 expression, resting");
+    fireEvent.focus(matcher);
+    fireEvent.change(matcher, { target: { value: 'service=~"["' } });
+    await act(async () => {
+      jest.advanceTimersByTime(350);
+    });
+
+    expect(screen.getByText("Host_Down")).toBeInTheDocument();
+    expect(screen.getByLabelText("Draft matcher is invalid")).toHaveClass(
+      "fork-silence-editor__preview-label--draft-no-match",
+    );
+    expect(
+      screen.getByRole("button", { name: "Create silence" }),
+    ).toBeDisabled();
+  });
+
+  it("submits a focused valid matcher through full preflight, never its draft snapshot", async () => {
+    jest.useFakeTimers();
+    const stores = createStores(false);
+    const previewRequests: Array<Record<string, unknown>> = [];
+    const previewWithSnapshot = (snapshot: string) =>
+      new Response(
+        JSON.stringify({
+          status: "success",
+          target: "am1",
+          total: 0,
+          returned: 0,
+          limit: 100,
+          snapshot,
+          excludedNoRawLabels: 0,
+          alerts: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    global.fetch = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.includes("/silence-editor/preview")) {
+        const request = JSON.parse(init?.body as string) as Record<string, unknown>;
+        previewRequests.push(request);
+        return previewWithSnapshot(
+          request.editingMatcher ? "draft-snapshot" : "full-snapshot",
+        );
+      }
+      if (url.includes("/silence-editor/submit")) {
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`unexpected request: ${url}`);
+    }) as typeof fetch;
+
+    renderEditor(stores);
+    fillRequiredMetadata();
+    await act(async () => {
+      jest.advanceTimersByTime(350);
+    });
+    const matcher = screen.getByLabelText("Matcher 1 expression, resting");
+    fireEvent.focus(matcher);
+    fireEvent.change(matcher, { target: { value: 'service="api"' } });
+    await act(async () => {
+      jest.advanceTimersByTime(350);
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create silence" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create silence" }));
+
+    await waitFor(() => expect(previewRequests).toHaveLength(3));
+    expect(previewRequests[1]).toMatchObject({
+      matchers: [],
+      editingMatcher: { expression: 'service="api"' },
+    });
+    expect(previewRequests[1]).not.toHaveProperty("snapshot");
+    expect(previewRequests[2]).toMatchObject({
+      matchers: [
+        { name: "service", value: "api", isRegex: false, isEqual: true },
+      ],
+    });
+    expect(previewRequests[2]).not.toHaveProperty("editingMatcher");
+    expect(previewRequests[2]).not.toHaveProperty("snapshot");
   });
 
   it("loads preview before author and comment are complete", async () => {
