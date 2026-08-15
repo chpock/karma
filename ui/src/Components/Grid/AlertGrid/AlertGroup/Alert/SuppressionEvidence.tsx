@@ -1,53 +1,75 @@
 import type { FC } from "react";
 
-import type { APIAlertSuppressionCauseT } from "Models/APITypes";
-import { MatcherToExpression } from "Stores/SilenceFormStore";
+import type { APIAlertSuppressionCauseT, APISilenceT } from "Models/APITypes";
+import type { AlertStore } from "Stores/AlertStore";
+import type { SilenceFormStore } from "Stores/SilenceFormStore";
+import { ManagedSilence } from "Components/ManagedSilence";
+import { RenderSilence } from "../Silences";
+
+const causeToSilence = (
+  cause: APIAlertSuppressionCauseT,
+): APISilenceT | null => {
+  if (
+    cause.resolutionStatus !== "known" ||
+    cause.startsAt === null ||
+    cause.endsAt === null
+  ) {
+    return null;
+  }
+
+  return {
+    id: cause.silenceID,
+    matchers: cause.matchers,
+    startsAt: cause.startsAt,
+    endsAt: cause.endsAt,
+    isExpired: new Date(cause.endsAt).getTime() <= Date.now(),
+    createdAt: "",
+    createdBy: cause.createdBy,
+    comment: cause.comment,
+    ticketID: "",
+    ticketURL: "",
+  };
+};
 
 const SuppressionEvidence: FC<{
   causes: APIAlertSuppressionCauseT[];
-}> = ({ causes }) => {
+  alertStore: AlertStore;
+  silenceFormStore: SilenceFormStore;
+  afterUpdate: () => void;
+}> = ({ causes, alertStore, silenceFormStore, afterUpdate }) => {
   if (causes.length === 0) return null;
 
-  return (
-    <div className="fork-suppression-evidence mt-1">
-      <div className="text-muted small mb-1">Retained suppression evidence</div>
-      {causes.map((cause) => (
-        <div
-          className="border-start border-secondary ps-2 mb-1 small"
+  return causes.map((cause) => {
+    const silence = causeToSilence(cause);
+    if (silence === null) {
+      // This follows the live rule fallback: without a complete snapshot, show a
+      // current rule if one is available and otherwise only its known ID.
+      return (
+        <RenderSilence
           key={`${cause.target}/${cause.source}/${cause.silenceID}`}
-        >
-          <div>
-            <code>{cause.silenceID}</code>{" "}
-            <span className="text-muted">
-              {cause.target} / {cause.source}
-            </span>
-          </div>
-          {cause.resolutionStatus === "known" ? (
-            <>
-              <div className="text-break">{cause.comment}</div>
-              <div className="d-flex flex-wrap gap-1">
-                {cause.matchers.map((matcher, index) => (
-                  <code
-                    key={`${index}/${matcher.name}/${matcher.value}/${matcher.isRegex}/${matcher.isEqual}`}
-                  >
-                    {MatcherToExpression(matcher)}
-                  </code>
-                ))}
-              </div>
-              <div className="text-muted">
-                {cause.createdBy ? `Author: ${cause.createdBy}. ` : null}
-                {cause.startsAt && cause.endsAt
-                  ? `${cause.startsAt} to ${cause.endsAt}`
-                  : null}
-              </div>
-            </>
-          ) : (
-            <div className="text-muted">Rule details were not available.</div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
+          alertStore={alertStore}
+          silenceFormStore={silenceFormStore}
+          afterUpdate={afterUpdate}
+          cluster={cause.target}
+          silenceID={cause.silenceID}
+        />
+      );
+    }
+
+    return (
+      <ManagedSilence
+        key={`${cause.target}/${cause.source}/${cause.silenceID}`}
+        cluster={cause.target}
+        alertCount={0}
+        alertCountAlwaysVisible={false}
+        silence={silence}
+        isExpired={silence.isExpired}
+        alertStore={alertStore}
+        silenceFormStore={silenceFormStore}
+        onDidUpdate={afterUpdate}
+      />
+    );
+  });
 };
 
 export { SuppressionEvidence };

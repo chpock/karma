@@ -374,6 +374,21 @@ describe("<ManagedSilence />", () => {
     );
   });
 
+  it("explains that an unavailable retained silence cannot be edited", async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve(new Response("silence not found", { status: 404 })),
+    ) as typeof fetch;
+    const { container } = renderManagedSilence();
+    fireEvent.click(container.querySelector("svg.text-muted.cursor-pointer")!);
+    fireEvent.click(screen.getByText("Edit"));
+    await act(async () => {});
+
+    expect(silenceFormStore.toggle.visible).toBe(false);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This silence rule is no longer available on Alertmanager.",
+    );
+  });
+
   it("call onDidUpdate if passed", () => {
     const fakeUpdate = jest.fn();
     const { container } = renderManagedSilence(fakeUpdate);

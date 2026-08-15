@@ -30,7 +30,8 @@ Implemented in fork scope:
 - per-target lifecycle state and topology retirement,
 - silence source/revision/episode history and HA consistency tracking,
 - persistent FIFO silence recheck with immutable rules/candidates and exact causes,
-- read-only effective suppression evidence on retained past-alert cards,
+- effective suppression evidence on retained past-alert cards using the ordinary
+  silence-rule presentation and actions,
 - compact create/edit/recreate silence editor with automatic preview,
 - structured runtime logging with redaction and edge-sensitive levels.
 

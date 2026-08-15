@@ -117,6 +117,10 @@ create, edit, or recreate operation.
 
 - Edit/Recreate read one deterministic physical member immediately before opening
   and again before mutation. An opaque revision token prevents known stale writes.
+- A retained non-live rule may use the browser clock only for its initial card
+  controls. The card opens without a remote request; fresh Alertmanager status is
+  still authoritative before Edit/Recreate proceeds, and browser time never
+  authorizes a mutation.
 - One mutating POST is attempted per user action; Karma never retries another HA
   member after an ambiguous write.
 - `proxy:true` is server-routed. `proxy:false` is browser-routed and therefore has

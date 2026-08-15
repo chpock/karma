@@ -20,10 +20,16 @@ Suppressed split:
 
 - `state=suppressed` + `isLive=true` -> current suppressed style.
 - `state=suppressed` + `isLive=false` -> `suppressed-past` style token.
-- A non-live suppressed card renders its read-only `suppressionCauses` evidence.
-  Known members show target/source/ID, time, Author, Comment, and matchers;
-  unresolved members show identity plus an explicit unavailable-details message.
-  Historical evidence has no Edit/Delete actions.
+- A non-live suppressed card renders known `suppressionCauses` through the same
+  silence-rule renderer and action controls as a live rule. Edit/Recreate first
+  verifies the rule with Alertmanager; a missing rule is refused rather than
+  treated as current. Unresolved members have no complete snapshot, so they use
+  the ordinary live-rule fallback: current data when available, otherwise ID only.
+- For a complete retained snapshot, the initially visible Edit/Recreate/Delete
+  controls may be derived from its saved time window with the browser clock. This
+  avoids a remote request solely to expand a historical card. It is a display hint,
+  not an authority boundary: the fresh Alertmanager status response determines the
+  operation opened by Edit/Recreate, and Alertmanager accepts or rejects Delete.
 
 ## 3. Filter contract
 

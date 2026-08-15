@@ -166,7 +166,12 @@ const Alert: FC<{
         )),
       )}
       {!alert.isLive ? (
-        <SuppressionEvidence causes={alert.suppressionCauses} />
+        <SuppressionEvidence
+          causes={alert.suppressionCauses}
+          alertStore={alertStore}
+          silenceFormStore={silenceFormStore}
+          afterUpdate={afterUpdate}
+        />
       ) : null}
     </li>
   );

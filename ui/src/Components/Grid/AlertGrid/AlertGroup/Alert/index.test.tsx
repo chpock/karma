@@ -1,6 +1,6 @@
 import { act } from "react";
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 
 import {
   MockAlert,
@@ -235,6 +235,43 @@ describe("<Alert />", () => {
     expect(container.innerHTML).toMatch(/Mocked Silence/);
   });
 
+  it("renders known retained suppression causes as actionable silences", () => {
+    const alert = MockedAlert();
+    alert.isLive = false;
+    alert.state = "suppressed";
+    alert.alertmanager = [];
+    alert.suppressionCauses = [
+      {
+        target: "default",
+        source: "default",
+        silenceID: "retained-silence",
+        resolutionStatus: "known",
+        startsAt: "2018-08-14T17:36:40.017867056Z",
+        endsAt: "2018-08-16T17:36:40.017867056Z",
+        createdBy: "operator@example.com",
+        comment: "Retained silence comment",
+        matchers: [
+          { name: "service", value: "payments", isRegex: false, isEqual: true },
+        ],
+      },
+    ];
+    const group = MockAlertGroup([], [alert], [], [], {});
+    const { container } = renderAlert(alert, group, false, false);
+
+    expect(container.querySelectorAll(".components-managed-silence")).toHaveLength(1);
+    expect(screen.queryByText("Retained suppression evidence")).not.toBeInTheDocument();
+    expect(screen.getByText("Retained silence comment")).toBeInTheDocument();
+
+    const toggle = container.querySelector(
+      ".components-managed-silence .with-click .cursor-pointer",
+    );
+    expect(toggle).not.toBeNull();
+    fireEvent.click(toggle!);
+
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+  });
+
   it("renders a fallback silence if the silence is not found in alertStore", () => {
     const alert = MockedAlert();
     alert.alertmanager[0].silencedBy = ["silence123456789"];
@@ -263,7 +300,7 @@ describe("<Alert />", () => {
     expect(container.innerHTML).toMatch(/silence123456789/);
   });
 
-  it("renders retained suppression evidence without mutation actions", () => {
+  it("renders retained suppression evidence as an actionable silence", () => {
     const alert = MockedAlert();
     alert.isLive = false;
     alert.state = "suppressed";
@@ -295,20 +332,22 @@ describe("<Alert />", () => {
       },
     ];
     const group = MockAlertGroup([], [alert], [], [], {});
-    renderAlert(alert, group, false, false);
+    const { container } = renderAlert(alert, group, false, false);
 
-    expect(screen.getByText("Retained suppression evidence")).toBeVisible();
-    expect(screen.getByText("historical-silence-id")).toBeVisible();
-    expect(screen.getByText("prod-eu / am-a")).toBeVisible();
-    expect(screen.getByText('service="api"')).toBeVisible();
+    expect(container.querySelectorAll(".components-managed-silence")).toHaveLength(1);
+    expect(screen.queryByText("Retained suppression evidence")).not.toBeInTheDocument();
     expect(screen.getByText("planned maintenance")).toBeVisible();
-    expect(screen.getByText("Rule details were not available.")).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "Edit" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Delete" }),
-    ).not.toBeInTheDocument();
+
+    const toggle = container.querySelector(
+      ".components-managed-silence .with-click .cursor-pointer",
+    );
+    expect(toggle).not.toBeNull();
+    fireEvent.click(toggle!);
+
+    expect(screen.getByRole("button", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.getByText('service="api"')).toBeVisible();
+    expect(screen.getByText("Silenced by unresolved-silence-id")).toBeVisible();
   });
 
   it("renders only one silence for HA cluster", () => {

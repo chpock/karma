@@ -471,6 +471,12 @@ upstream-owned entry points.
   monotonic replacement generation in `SilenceFormStore`; only the latest click
   may populate/remount the editor, and close/replacement invalidates pending
   generations.
+- A retained non-live alert card is the deliberate display-only exception: it may
+  use the saved snapshot time window with the browser clock to choose initial
+  Edit/Recreate/Delete controls, because fetching Alertmanager merely to expand a
+  rare historical card would add disproportionate latency and complexity. The
+  fresh status check still determines the operation that actually opens, and no
+  browser-clock result authorizes a mutation.
 - Preview uses a 350 ms debounce, stale-result indication, generation-based
   response ordering, and cursor pagination.
 - Preview and autocomplete fail closed on lifecycle store errors (HTTP 500)

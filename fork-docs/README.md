@@ -76,26 +76,36 @@ resolved past alert again through the backend is a harmless no-op.
 Resolved alerts can be found with `@state=resolved`. If a resolved alert fires again,
 it returns to the state currently reported by Alertmanager.
 
-## 5. Understanding retained suppression evidence
+## 5. Working with retained silence rules
 
-A past suppressed alert shows **Retained suppression evidence** on its card. This is
-a read-only explanation of why Karma considers that historical alert suppressed.
+A past suppressed alert retains the silence rule that caused its suppression. A
+complete retained rule is presented and operated exactly like a live silence rule.
 
 When complete rule details were available, the card shows:
 
-- logical Alertmanager target and physical source;
 - silence rule ID;
 - time window;
 - Author and Comment;
 - matchers.
 
 During Alertmanager replication lag, Karma may know the exact silence ID before the
-rule details are available. In that case the card shows the known identity and says
-that details were unavailable. It does not invent missing matchers or metadata.
+rule details are available. In that case Karma uses the ordinary live-rule lookup:
+it shows current rule data if available, otherwise only the known ID. It does not
+invent missing matchers or metadata.
 
-This evidence describes the past alert. It does not provide Edit or Delete actions
-for a current Alertmanager rule. Editing, expiry, or deletion of the rule does not
-rewrite why an already retained alert was suppressed during that past episode.
+Edit, Recreate, and Delete still use the current Alertmanager target. Before an
+edit or recreate is opened, Karma reads the rule from Alertmanager again. If the
+retained rule no longer exists, Karma refuses the action and reports the failure;
+it never treats stored evidence as proof that the rule still exists remotely.
+
+To keep a historical card immediate to open, its initial action buttons are chosen
+from the saved time window using the browser clock. This is only a display hint.
+The subsequent Alertmanager check determines whether Edit or Recreate can open,
+and Alertmanager accepts or rejects Delete. A stale card therefore cannot authorize
+an impossible action.
+
+Editing, expiry, or deletion of the rule does not rewrite why an already retained
+alert was suppressed during that past episode.
 
 ## 6. Creating and updating silence rules
 

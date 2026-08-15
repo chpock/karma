@@ -5,7 +5,7 @@ const stories: { name: string; waitFor: string }[] = [
   { name: "GridColorTitleBar", waitFor: "#root > div" },
   {
     name: "RetainedSuppressionEvidence",
-    waitFor: ".fork-suppression-evidence",
+    waitFor: ".components-managed-silence",
   },
   { name: "NavBar", waitFor: "#root > div" },
   { name: "NavBarPaused", waitFor: "#root > div" },

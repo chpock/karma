@@ -95,6 +95,11 @@ const ManagedSilence: FC<{
         { ...CommonOptions, method: "GET", signal: replacementRequest.signal },
       );
       if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error(
+            "This silence rule is no longer available on Alertmanager.",
+          );
+        }
         throw new Error(`failed to verify silence status: ${response.status}`);
       }
       status = (await response.json()) as SilenceEditorStatusResponseT;
