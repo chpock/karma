@@ -29,7 +29,9 @@ Implemented in fork scope:
 - storage and warning observability endpoints.
 - per-target lifecycle state and topology retirement,
 - silence source/revision/episode history and HA consistency tracking,
-- persistent FIFO silence recheck with immutable rules/candidates and exact causes,
+- persistent FIFO silence recheck with exact causes; immutable candidate membership
+  and candidate observation input remain known violations tracked in
+  `fork-docs/SPEC/silence-recheck-problems.md`,
 - effective suppression evidence on retained past-alert cards using the ordinary
   silence-rule presentation and actions,
 - compact create/edit/recreate silence editor with automatic preview,

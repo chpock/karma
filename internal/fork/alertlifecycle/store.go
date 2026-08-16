@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,7 @@ const schemaVersion = "1"
 
 const (
 	metaSchemaVersion            = "schema_version"
+	metaSchemaLayoutFingerprint  = "schema_layout_fingerprint"
 	metaLastHousekeepingAt       = "last_housekeeping_at"
 	metaLastIncrementalVacuumAt  = "last_incremental_vacuum_at"
 	metaGroupingFingerprint      = "grouping_fingerprint"
@@ -46,6 +48,8 @@ const (
 	metaSuggestionRevisionPrefix = "suggestion_revision/"
 )
 
+const expectedSchemaLayoutFingerprint = "sha256:8905d6aae7a3b2d0a2a2a96fc67fcca8be37aae7d3039e0df2c4e48dd9e07b04"
+
 const reasonCodeMaxLength = 64
 
 const defaultSilenceHistoryRetentionTTL = 30 * 24 * time.Hour
@@ -58,10 +62,24 @@ const (
 
 type Store struct {
 	db                         *sql.DB
+	writerConn                 *sql.Conn
+	writerTransactionStarter   writerTransactionStarter
 	path                       string
 	silenceHistoryRetentionTTL time.Duration
 	writeMu                    sync.Mutex
 	recheckBlockedJobLogged    int64
+}
+
+type writerTransactionStarter interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
+type sqlConnWriterTransactionStarter struct {
+	conn *sql.Conn
+}
+
+func (s sqlConnWriterTransactionStarter) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return s.conn.BeginTx(ctx, opts)
 }
 
 type StoreOptions struct {
@@ -90,35 +108,221 @@ func OpenStore(opts StoreOptions) (*Store, error) {
 		return nil, fmt.Errorf("failed to create sqlite directory: %w", err)
 	}
 
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=auto_vacuum(INCREMENTAL)&_pragma=busy_timeout(5000)", opts.Path)
+	dsn := fmt.Sprintf("file:%s?_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_txlock=immediate", opts.Path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	if err = db.Ping(); err != nil {
+	writerConn, err := db.Conn(context.Background())
+	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to connect to sqlite database: %w", err)
+		return nil, fmt.Errorf("failed to acquire sqlite writer connection: %w", err)
 	}
-
+	closeResources := func() {
+		_ = writerConn.Close()
+		_ = db.Close()
+	}
+	if err = writerConn.PingContext(context.Background()); err != nil {
+		closeResources()
+		return nil, fmt.Errorf("failed to connect to sqlite writer connection: %w", err)
+	}
 	silenceHistoryRetentionTTL := opts.SilenceHistoryRetentionTTL
 	if silenceHistoryRetentionTTL <= 0 {
 		silenceHistoryRetentionTTL = defaultSilenceHistoryRetentionTTL
 	}
-	store := &Store{db: db, path: opts.Path, silenceHistoryRetentionTTL: silenceHistoryRetentionTTL}
+	store := &Store{
+		db:                         db,
+		writerConn:                 writerConn,
+		writerTransactionStarter:   sqlConnWriterTransactionStarter{conn: writerConn},
+		path:                       opts.Path,
+		silenceHistoryRetentionTTL: silenceHistoryRetentionTTL,
+	}
+	if err = preflightSchemaBeforeSetup(context.Background(), writerConn); err != nil {
+		closeResources()
+		return nil, err
+	}
+	if err = configureWriterConnection(context.Background(), writerConn); err != nil {
+		closeResources()
+		return nil, err
+	}
 	if err = store.bootstrapSchema(); err != nil {
-		_ = db.Close()
+		_ = store.Close()
 		return nil, err
 	}
 
 	return store, nil
 }
 
+func preflightSchemaBeforeSetup(ctx context.Context, conn *sql.Conn) error {
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("failed to inspect sqlite schema before setup: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	empty, err := isEmptySchemaV1DatabaseTx(tx)
+	if err != nil {
+		return err
+	}
+	if empty {
+		return nil
+	}
+	return validateExistingSchemaV1Tx(tx)
+}
+
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var writerErr error
+	if s.writerConn != nil {
+		writerErr = s.writerConn.Close()
+		s.writerConn = nil
+	}
+	s.writerTransactionStarter = nil
+	dbErr := s.db.Close()
+	if writerErr != nil {
+		return writerErr
+	}
+	return dbErr
+}
+
+func configureWriterConnection(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=2`); err != nil {
+		return fmt.Errorf("failed to enable sqlite incremental auto vacuum: %w", err)
+	}
+	var autoVacuum int
+	if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
+		return fmt.Errorf("failed to verify sqlite incremental auto vacuum: %w", err)
+	}
+	if autoVacuum != 2 {
+		return fmt.Errorf("failed to enable sqlite incremental auto vacuum: got mode %d", autoVacuum)
+	}
+
+	var journalMode string
+	if err := conn.QueryRowContext(ctx, `PRAGMA journal_mode=WAL`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("failed to enable sqlite WAL mode: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(journalMode), "wal") {
+		return fmt.Errorf("failed to enable sqlite WAL mode: got %q", journalMode)
+	}
+	return verifyWriterConnection(ctx, conn)
+}
+
+func verifyWriterConnection(ctx context.Context, conn *sql.Conn) error {
+	var synchronous int
+	if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronous); err != nil {
+		return fmt.Errorf("failed to verify sqlite synchronous mode: %w", err)
+	}
+	if synchronous != 1 {
+		return fmt.Errorf("unexpected sqlite synchronous mode: got %d want 1", synchronous)
+	}
+	var busyTimeout int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		return fmt.Errorf("failed to verify sqlite busy timeout: %w", err)
+	}
+	if busyTimeout != 5000 {
+		return fmt.Errorf("unexpected sqlite busy timeout: got %d want 5000", busyTimeout)
+	}
+	var foreignKeys int
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		return fmt.Errorf("failed to verify sqlite foreign keys: %w", err)
+	}
+	if foreignKeys != 1 {
+		return fmt.Errorf("unexpected sqlite foreign keys setting: got %d want 1", foreignKeys)
+	}
+	return nil
+}
+
+func (s *Store) withWriterTx(ctx context.Context, operation func(*sql.Tx) error) (err error) {
+	_, err = withWriterTxValue(ctx, s, func(tx *sql.Tx) (struct{}, error) {
+		return struct{}{}, operation(tx)
+	})
+	return err
+}
+
+func withWriterTxValue[T any](ctx context.Context, s *Store, operation func(*sql.Tx) (T, error)) (value T, err error) {
+	if s == nil || s.db == nil || s.writerTransactionStarter == nil {
+		return value, ErrStoreNotInitialized
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return withOwnedWriterTxValue(ctx, s, operation)
+}
+
+func withOwnedWriterTxValue[T any](ctx context.Context, s *Store, operation func(*sql.Tx) (T, error)) (value T, err error) {
+	if s == nil || s.db == nil || s.writerTransactionStarter == nil {
+		return value, ErrStoreNotInitialized
+	}
+	tx, err := s.writerTransactionStarter.BeginTx(ctx, nil)
+	if err != nil {
+		return value, fmt.Errorf("failed to begin writer transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			_ = tx.Rollback()
+			panic(recovered)
+		}
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if value, err = operation(tx); err != nil {
+		return value, err
+	}
+	if err = tx.Commit(); err != nil {
+		commitErr := err
+		if replaceErr := s.replaceWriterConnectionLocked(ctx); replaceErr != nil {
+			return value, fmt.Errorf("failed to commit writer transaction: %w; failed to replace writer connection: %w", commitErr, replaceErr)
+		}
+		return value, fmt.Errorf("failed to commit writer transaction: %w", commitErr)
+	}
+	committed = true
+	return value, nil
+}
+
+type writerTupleResult struct {
+	done      bool
+	processed int
+	updated   int
+	total     int
+}
+
+func withWriterTxTuple(ctx context.Context, s *Store, operation func(*sql.Tx) (bool, int, int, int, error)) (bool, int, int, int, error) {
+	result, err := withWriterTxValue(ctx, s, func(tx *sql.Tx) (writerTupleResult, error) {
+		done, processed, updated, total, err := operation(tx)
+		return writerTupleResult{done: done, processed: processed, updated: updated, total: total}, err
+	})
+	return result.done, result.processed, result.updated, result.total, err
+}
+
+func (s *Store) replaceWriterConnectionLocked(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return ErrStoreNotInitialized
+	}
+	if s.writerConn != nil {
+		_ = s.writerConn.Raw(func(any) error { return driver.ErrBadConn })
+		_ = s.writerConn.Close()
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to replace sqlite writer connection: %w", err)
+	}
+	if err = conn.PingContext(ctx); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("failed to ping replacement sqlite writer connection: %w", err)
+	}
+	if err = verifyWriterConnection(ctx, conn); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("failed to verify replacement sqlite writer connection: %w", err)
+	}
+	s.writerConn = conn
+	s.writerTransactionStarter = sqlConnWriterTransactionStarter{conn: conn}
+	return nil
 }
 
 func (s *Store) sqlitePath() string {
@@ -557,66 +761,65 @@ CREATE INDEX IF NOT EXISTS idx_alert_suppression_members_source
   ON alert_suppression_cause_members (source_name, history_id);
 `
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin schema transaction: %w", err)
-	}
-	if err = validateSchemaV1Tx(tx); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-
-	if _, err = tx.Exec(schemaSQL); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("failed to apply schema: %w", err)
-	}
-
-	if _, err = tx.Exec(`INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)`, metaSchemaVersion, schemaVersion); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("failed to set schema version: %w", err)
-	}
-
-	defaults := map[string]string{
-		metaRegroupStatus:            regroupStatusReady,
-		metaGroupingFingerprint:      "",
-		metaRegroupTargetFingerprint: "",
-		metaRegroupError:             "",
-		metaRegroupProcessed:         "0",
-		metaRegroupTotal:             "0",
-		metaRegroupCursorRowID:       "0",
-		metaRegroupStartedAt:         "",
-		metaRegroupFinishedAt:        "",
-	}
-	for key, value := range defaults {
-		if _, err = tx.Exec(`INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)`, key, value); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("failed to seed metadata %q: %w", key, err)
+	return s.withWriterTx(context.Background(), func(tx *sql.Tx) error {
+		empty, err := isEmptySchemaV1DatabaseTx(tx)
+		if err != nil {
+			return err
 		}
-	}
+		if !empty {
+			if err = validateExistingSchemaV1Tx(tx); err != nil {
+				return err
+			}
+			return nil
+		}
 
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit schema transaction: %w", err)
-	}
+		if _, err = tx.Exec(schemaSQL); err != nil {
+			return fmt.Errorf("failed to apply schema: %w", err)
+		}
+		actualFingerprint, err := schemaLayoutFingerprintTx(tx)
+		if err != nil {
+			return err
+		}
+		if actualFingerprint != expectedSchemaLayoutFingerprint {
+			return fmt.Errorf("schema layout fingerprint mismatch for fresh database: actual=%q expected=%q", actualFingerprint, expectedSchemaLayoutFingerprint)
+		}
+		if _, err = tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?)`, metaSchemaVersion, schemaVersion); err != nil {
+			return fmt.Errorf("failed to set schema version: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?)`, metaSchemaLayoutFingerprint, actualFingerprint); err != nil {
+			return fmt.Errorf("failed to set schema layout fingerprint: %w", err)
+		}
 
-	return nil
+		defaults := map[string]string{
+			metaRegroupStatus:            regroupStatusReady,
+			metaGroupingFingerprint:      "",
+			metaRegroupTargetFingerprint: "",
+			metaRegroupError:             "",
+			metaRegroupProcessed:         "0",
+			metaRegroupTotal:             "0",
+			metaRegroupCursorRowID:       "0",
+			metaRegroupStartedAt:         "",
+			metaRegroupFinishedAt:        "",
+		}
+		for key, value := range defaults {
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)`, key, value); err != nil {
+				return fmt.Errorf("failed to seed metadata %q: %w", key, err)
+			}
+		}
+
+		return nil
+	})
 }
 
-func validateSchemaV1Tx(tx *sql.Tx) error {
-	var metadataExists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='metadata'`).Scan(&metadataExists); err != nil {
-		return fmt.Errorf("failed to inspect sqlite schema: %w", err)
+func isEmptySchemaV1DatabaseTx(tx *sql.Tx) (bool, error) {
+	var objectCount int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'`).Scan(&objectCount); err != nil {
+		return false, fmt.Errorf("failed to inspect sqlite schema: %w", err)
 	}
-	if metadataExists == 0 {
-		var tableCount int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&tableCount); err != nil {
-			return fmt.Errorf("failed to inspect sqlite tables: %w", err)
-		}
-		if tableCount != 0 {
-			return errors.New("unsupported sqlite database: lifecycle storage requires a new schema v1 database")
-		}
-		return nil
-	}
+	return objectCount == 0, nil
+}
 
+func validateExistingSchemaV1Tx(tx *sql.Tx) error {
 	var version string
 	if err := tx.QueryRow(`SELECT value FROM metadata WHERE key=?`, metaSchemaVersion).Scan(&version); err != nil {
 		return fmt.Errorf("unsupported sqlite database: missing schema version 1: %w", err)
@@ -624,15 +827,63 @@ func validateSchemaV1Tx(tx *sql.Tx) error {
 	if version != schemaVersion {
 		return fmt.Errorf("unsupported sqlite schema version %q: expected %q", version, schemaVersion)
 	}
+	var storedFingerprint string
+	if err := tx.QueryRow(`SELECT value FROM metadata WHERE key=?`, metaSchemaLayoutFingerprint).Scan(&storedFingerprint); err != nil {
+		return fmt.Errorf("unsupported sqlite database: missing schema layout fingerprint: %w", err)
+	}
+	actualFingerprint, err := schemaLayoutFingerprintTx(tx)
+	if err != nil {
+		return err
+	}
+	if storedFingerprint != actualFingerprint || actualFingerprint != expectedSchemaLayoutFingerprint {
+		return fmt.Errorf("unsupported sqlite database: schema layout fingerprint mismatch: actual=%q stored=%q expected=%q", actualFingerprint, storedFingerprint, expectedSchemaLayoutFingerprint)
+	}
 	return nil
+}
+
+type schemaLayoutObject struct {
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Table string `json:"tbl_name"`
+	SQL   string `json:"sql"`
+}
+
+func schemaLayoutFingerprintTx(tx *sql.Tx) (string, error) {
+	rows, err := tx.Query(`
+SELECT type, name, tbl_name, sql
+FROM sqlite_schema
+WHERE name NOT LIKE 'sqlite_%'
+  AND type IN ('table', 'index', 'trigger')
+  AND sql IS NOT NULL
+ORDER BY type, name, tbl_name
+`)
+	if err != nil {
+		return "", fmt.Errorf("failed to read sqlite schema layout: %w", err)
+	}
+	defer rows.Close()
+	objects := make([]schemaLayoutObject, 0)
+	for rows.Next() {
+		var object schemaLayoutObject
+		if err = rows.Scan(&object.Type, &object.Name, &object.Table, &object.SQL); err != nil {
+			return "", fmt.Errorf("failed to scan sqlite schema layout: %w", err)
+		}
+		objects = append(objects, object)
+	}
+	if err = rows.Err(); err != nil {
+		return "", fmt.Errorf("failed to iterate sqlite schema layout: %w", err)
+	}
+	raw, err := json.Marshal(objects)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode sqlite schema layout: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%x", digest), nil
 }
 
 func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 	if s == nil || s.db == nil {
 		return ErrStoreNotInitialized
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	if strings.TrimSpace(alert.GroupLabelsJSON) == "" {
 		alert.GroupLabelsJSON = "{}"
 	}
@@ -680,12 +931,12 @@ func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 		return validateErr
 	}
 
-	now := time.Now().UTC()
 	if alert.UpdatedAt.IsZero() {
-		alert.UpdatedAt = now
+		alert.UpdatedAt = time.Now().UTC()
 	}
 
-	_, err = s.db.Exec(`
+	return s.withWriterTx(context.Background(), func(tx *sql.Tx) error {
+		_, err = tx.Exec(`
 INSERT INTO alert_states(
   alert_id,
   state,
@@ -733,51 +984,49 @@ ON CONFLICT(alert_id) DO UPDATE SET
   resolved_comment=excluded.resolved_comment,
   updated_at=excluded.updated_at
 `,
-		alert.AlertID,
-		string(alert.State),
-		string(alert.RawState),
-		boolToInt(alert.IsLive),
-		boolToInt(alert.IsSuppressed),
-		boolToInt(alert.IsResolved),
-		alert.Receiver,
-		alert.GroupID,
-		alert.GroupLabelsJSON,
-		alert.LabelsJSON,
-		alert.MatchLabelsJSON,
-		alert.AnnotationsJSON,
-		alert.StartsAt.UTC().Format(time.RFC3339Nano),
-		formatNullableTime(alert.LastSeenAt),
-		alert.RelevantUpstreams,
-		alert.RelevantSources,
-		alert.SourceLinksJSON,
-		formatNullableTime(alert.SuppressionObservedAt),
-		formatNullableTime(alert.ResolvedAt),
-		alert.ResolvedBy,
-		alert.ResolvedComment,
-		alert.UpdatedAt.UTC().Format(time.RFC3339Nano),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to upsert current alert: %w", err)
-	}
-	if alert.State == StateInactive && !alert.IsLive && !alert.IsResolved && !alert.IsSuppressed && alert.MatchLabelsJSON != nil && strings.TrimSpace(*alert.MatchLabelsJSON) != "" {
-		if _, err = s.db.Exec(`
+			alert.AlertID,
+			string(alert.State),
+			string(alert.RawState),
+			boolToInt(alert.IsLive),
+			boolToInt(alert.IsSuppressed),
+			boolToInt(alert.IsResolved),
+			alert.Receiver,
+			alert.GroupID,
+			alert.GroupLabelsJSON,
+			alert.LabelsJSON,
+			alert.MatchLabelsJSON,
+			alert.AnnotationsJSON,
+			alert.StartsAt.UTC().Format(time.RFC3339Nano),
+			formatNullableTime(alert.LastSeenAt),
+			alert.RelevantUpstreams,
+			alert.RelevantSources,
+			alert.SourceLinksJSON,
+			formatNullableTime(alert.SuppressionObservedAt),
+			formatNullableTime(alert.ResolvedAt),
+			alert.ResolvedBy,
+			alert.ResolvedComment,
+			alert.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to upsert current alert: %w", err)
+		}
+		if alert.State == StateInactive && !alert.IsLive && !alert.IsResolved && !alert.IsSuppressed && alert.MatchLabelsJSON != nil && strings.TrimSpace(*alert.MatchLabelsJSON) != "" {
+			if _, err = tx.Exec(`
 INSERT OR IGNORE INTO silence_recheck_job_candidates(job_id, alert_id)
 SELECT job_id, ? FROM silence_recheck_jobs WHERE status IN ('queued','running')
 `, alert.AlertID); err != nil {
-			return fmt.Errorf("failed attaching inactive alert to open recheck jobs: %w", err)
+				return fmt.Errorf("failed attaching inactive alert to open recheck jobs: %w", err)
+			}
 		}
-	}
 
-	return nil
+		return nil
+	})
 }
 
 func (s *Store) InsertStateTransition(transition AlertStateTransition) error {
 	if s == nil || s.db == nil {
 		return ErrStoreNotInitialized
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
 	if !transition.NewRawState.IsValid() {
 		if transition.NewState == StateInactive || transition.NewState == StateResolved {
 			transition.NewRawState = StateActive
@@ -808,20 +1057,12 @@ func (s *Store) InsertStateTransition(transition AlertStateTransition) error {
 		transition.NewState = projectedState(transition.NewRawState, transition.NewIsLive, transition.NewIsSuppressed, transition.NewIsResolved)
 	}
 
-	tx, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transition transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err = insertTransitionTx(tx, transition); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transition transaction: %w", err)
-	}
-
-	return nil
+	return s.withWriterTx(context.Background(), func(tx *sql.Tx) error {
+		if err := insertTransitionTx(tx, transition); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (s *Store) GetCurrentAlert(alertID string) (*AlertCurrent, error) {
@@ -1865,8 +2106,6 @@ func (s *Store) RunHousekeepingContext(ctx context.Context, retentionTTL time.Du
 	if s == nil || s.db == nil {
 		return HousekeepingResult{}, ErrStoreNotInitialized
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	if retentionTTL <= 0 {
 		return HousekeepingResult{}, errors.New("retentionTTL must be > 0")
 	}
@@ -1877,45 +2116,45 @@ func (s *Store) RunHousekeepingContext(ctx context.Context, retentionTTL time.Du
 	runAt := time.Now().UTC()
 	cutoff := runAt.Add(-retentionTTL)
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return HousekeepingResult{}, fmt.Errorf("failed to begin housekeeping transaction: %w", err)
-	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	retention, err := withOwnedWriterTxValue(ctx, s, func(tx *sql.Tx) (housekeepingTransactionResult, error) {
+		expiredDeleted, err := deleteExpiredAlertsTx(tx, cutoff)
+		if err != nil {
+			return housekeepingTransactionResult{}, err
+		}
 
-	expiredDeleted, err := deleteExpiredAlertsTx(tx, cutoff)
+		limitDeleted, err := enforceMaxAlertsTx(tx, maxAlerts)
+		if err != nil {
+			return housekeepingTransactionResult{}, err
+		}
+
+		retention, err := runPhase2RetentionTx(ctx, tx, runAt, s.silenceHistoryRetentionTTL)
+		if err != nil {
+			return housekeepingTransactionResult{}, err
+		}
+		if err = setMetadataTx(tx, metaLastHousekeepingAt, runAt.Format(time.RFC3339Nano)); err != nil {
+			return housekeepingTransactionResult{}, err
+		}
+		return housekeepingTransactionResult{
+			expiredDeleted:         expiredDeleted,
+			limitDeleted:           limitDeleted,
+			silenceRetentionResult: retention,
+		}, nil
+	})
 	if err != nil {
-		_ = tx.Rollback()
 		return HousekeepingResult{}, err
 	}
 
-	limitDeleted, err := enforceMaxAlertsTx(tx, maxAlerts)
-	if err != nil {
-		_ = tx.Rollback()
-		return HousekeepingResult{}, err
-	}
-
-	retention, err := runPhase2RetentionTx(ctx, tx, runAt, s.silenceHistoryRetentionTTL)
-	if err != nil {
-		_ = tx.Rollback()
-		return HousekeepingResult{}, err
-	}
-
-	if err = setMetadataTx(tx, metaLastHousekeepingAt, runAt.Format(time.RFC3339Nano)); err != nil {
-		_ = tx.Rollback()
-		return HousekeepingResult{}, err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return HousekeepingResult{}, fmt.Errorf("failed to commit housekeeping transaction: %w", err)
-	}
-
-	vacuumPagesFreed, err := runIncrementalVacuum(s.db)
+	vacuumPagesFreed, err := runIncrementalVacuum(ctx, s.writerConn)
 	if err != nil {
 		return HousekeepingResult{}, err
 	}
 
 	vacuumAt := time.Now().UTC()
-	if err = s.setMetadata(metaLastIncrementalVacuumAt, vacuumAt.Format(time.RFC3339Nano)); err != nil {
+	if _, err = withOwnedWriterTxValue(ctx, s, func(tx *sql.Tx) (struct{}, error) {
+		return struct{}{}, setMetadataTx(tx, metaLastIncrementalVacuumAt, vacuumAt.Format(time.RFC3339Nano))
+	}); err != nil {
 		return HousekeepingResult{}, err
 	}
 
@@ -1925,8 +2164,8 @@ func (s *Store) RunHousekeepingContext(ctx context.Context, retentionTTL time.Du
 	}
 
 	return HousekeepingResult{
-		ExpiredDeleted:        expiredDeleted,
-		LimitDeleted:          limitDeleted,
+		ExpiredDeleted:        retention.expiredDeleted,
+		LimitDeleted:          retention.limitDeleted,
 		RecheckJobsDeleted:    retention.recheckJobs,
 		RetiredSourcesDeleted: retention.retiredSources,
 		RevisionsDeleted:      retention.revisions,
@@ -2203,8 +2442,6 @@ func (s *Store) ResolveAlertContext(ctx context.Context, alertID string, changed
 	if s == nil || s.db == nil {
 		return nil, ErrStoreNotInitialized
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	if strings.TrimSpace(alertID) == "" {
 		return nil, ErrInvalidAlertID
 	}
@@ -2214,101 +2451,93 @@ func (s *Store) ResolveAlertContext(ctx context.Context, alertID string, changed
 		ts = time.Now().UTC()
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin resolve transaction: %w", err)
-	}
-
-	current, err := getCurrentAlertTx(tx, alertID)
-	if err != nil {
-		_ = tx.Rollback()
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrAlertNotFound
+	var result *ResolveResult
+	err := s.withWriterTx(ctx, func(tx *sql.Tx) error {
+		current, err := getCurrentAlertTx(tx, alertID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrAlertNotFound
+			}
+			return err
 		}
-		return nil, err
-	}
 
-	resolvedPlan, resolveApplied := ResolveDimensions(LifecycleDimensions{
-		RawState: current.RawState, IsLive: current.IsLive,
-		IsSuppressed: current.IsSuppressed, IsResolved: current.IsResolved,
-	})
-	if !resolveApplied && current.IsResolved {
-		_ = tx.Rollback()
-		return &ResolveResult{
+		resolvedPlan, resolveApplied := ResolveDimensions(LifecycleDimensions{
+			RawState: current.RawState, IsLive: current.IsLive,
+			IsSuppressed: current.IsSuppressed, IsResolved: current.IsResolved,
+		})
+		if !resolveApplied && current.IsResolved {
+			result = &ResolveResult{
+				AlertID:   alertID,
+				OldState:  current.State,
+				NewState:  current.State,
+				Applied:   false,
+				ChangedAt: ts,
+				ChangedBy: sanitizeNullableString(changedBy),
+			}
+			return nil
+		}
+
+		if !resolveApplied {
+			return ErrResolveStateConflict
+		}
+
+		cleanChangedBy := sanitizeNullableString(changedBy)
+		cleanComment := sanitizeNullableString(reason)
+		if err = updateManualResolutionTx(tx, alertID, cleanChangedBy, cleanComment, ts); err != nil {
+			return err
+		}
+		if err = updateTargetStatesResolvedTx(tx, alertID, true, ts, "manual_mark_resolved"); err != nil {
+			return err
+		}
+
+		newRaw := resolvedPlan.RawState
+		newState := resolvedPlan.ProjectedState()
+		oldLive := current.IsLive
+		newLive := resolvedPlan.IsLive
+		oldResolved := current.IsResolved
+		newResolved := resolvedPlan.IsResolved
+		reasonCode := sanitizeReasonCode(ptrString("manual_mark_resolved"))
+		if err = insertTransitionTx(tx, AlertStateTransition{
+			AlertID:         alertID,
+			OldState:        &current.State,
+			NewState:        newState,
+			OldRawState:     &current.RawState,
+			NewRawState:     newRaw,
+			OldIsLive:       &oldLive,
+			NewIsLive:       newLive,
+			OldIsSuppressed: &current.IsSuppressed,
+			NewIsSuppressed: current.IsSuppressed,
+			OldIsResolved:   &oldResolved,
+			NewIsResolved:   newResolved,
+			ChangedAt:       ts,
+			ChangeSource:    ChangeSourceManual,
+			ChangedBy:       cleanChangedBy,
+			ReasonCode:      reasonCode,
+			ReasonText:      cleanComment,
+		}); err != nil {
+			return err
+		}
+
+		result = &ResolveResult{
 			AlertID:   alertID,
 			OldState:  current.State,
-			NewState:  current.State,
-			Applied:   false,
+			NewState:  newState,
+			Applied:   true,
 			ChangedAt: ts,
-			ChangedBy: sanitizeNullableString(changedBy),
-		}, nil
-	}
-
-	if !resolveApplied {
-		_ = tx.Rollback()
-		return nil, ErrResolveStateConflict
-	}
-
-	cleanChangedBy := sanitizeNullableString(changedBy)
-	cleanComment := sanitizeNullableString(reason)
-	if err = updateManualResolutionTx(tx, alertID, cleanChangedBy, cleanComment, ts); err != nil {
-		_ = tx.Rollback()
+			ChangedBy: cleanChangedBy,
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	if err = updateTargetStatesResolvedTx(tx, alertID, true, ts, "manual_mark_resolved"); err != nil {
-		_ = tx.Rollback()
-		return nil, err
-	}
-
-	newRaw := resolvedPlan.RawState
-	newState := resolvedPlan.ProjectedState()
-	oldLive := current.IsLive
-	newLive := resolvedPlan.IsLive
-	oldResolved := current.IsResolved
-	newResolved := resolvedPlan.IsResolved
-	reasonCode := sanitizeReasonCode(ptrString("manual_mark_resolved"))
-	if err = insertTransitionTx(tx, AlertStateTransition{
-		AlertID:         alertID,
-		OldState:        &current.State,
-		NewState:        newState,
-		OldRawState:     &current.RawState,
-		NewRawState:     newRaw,
-		OldIsLive:       &oldLive,
-		NewIsLive:       newLive,
-		OldIsSuppressed: &current.IsSuppressed,
-		NewIsSuppressed: current.IsSuppressed,
-		OldIsResolved:   &oldResolved,
-		NewIsResolved:   newResolved,
-		ChangedAt:       ts,
-		ChangeSource:    ChangeSourceManual,
-		ChangedBy:       cleanChangedBy,
-		ReasonCode:      reasonCode,
-		ReasonText:      cleanComment,
-	}); err != nil {
-		_ = tx.Rollback()
-		return nil, err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit resolve transaction: %w", err)
-	}
-
-	return &ResolveResult{
-		AlertID:   alertID,
-		OldState:  current.State,
-		NewState:  newState,
-		Applied:   true,
-		ChangedAt: ts,
-		ChangedBy: cleanChangedBy,
-	}, nil
+	return result, nil
 }
 
 func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	if s == nil || s.db == nil {
 		return PollCycleResult{}, ErrStoreNotInitialized
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 
 	now := input.Timestamp.UTC()
 	configuredSources, sourceManifestKnown := configuredSourceNames(input.SilenceSources)
@@ -2346,140 +2575,214 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	}
 
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return PollCycleResult{}, fmt.Errorf("failed to begin poll cycle transaction: %w", err)
-	}
+	txResult, err := withWriterTxValue(ctx, s, func(tx *sql.Tx) (pollTransactionResult, error) {
+		result := PollCycleResult{}
+		reconciliation, qerr := reconcileSilenceSourcesWithEventsTx(tx, input.SilenceSources, now)
+		if qerr != nil {
+			_ = tx.Rollback()
+			return pollTransactionResult{}, qerr
+		}
+		result.RecheckJobsQueued = reconciliation.queued
 
-	result := PollCycleResult{}
-	reconciliation, qerr := reconcileSilenceSourcesWithEventsTx(tx, input.SilenceSources, now)
-	if qerr != nil {
-		_ = tx.Rollback()
-		return PollCycleResult{}, qerr
-	}
-	result.RecheckJobsQueued = reconciliation.queued
+		pollEvents := append([]runtimeEvent(nil), reconciliation.events...)
+		currentByID, err := readAllCurrentAlertsTx(tx)
+		if err != nil {
+			_ = tx.Rollback()
+			return pollTransactionResult{}, err
+		}
 
-	pollEvents := append([]runtimeEvent(nil), reconciliation.events...)
-	currentByID, err := readAllCurrentAlertsTx(tx)
-	if err != nil {
-		_ = tx.Rollback()
-		return PollCycleResult{}, err
-	}
-
-	for _, inputLive := range input.LiveAlerts {
-		live := liveByID[inputLive.AlertID]
-		targets := normalizeLiveTargets(live)
-		current, found := currentByID[live.AlertID]
-		if !found {
-			if err = insertCurrentAlertTx(tx, live, now); err != nil {
-				_ = tx.Rollback()
-				return PollCycleResult{}, err
-			}
-			newProjected := projectedState(live.State, true, live.State == StateSuppressed, false)
-			newLive := true
-			newResolved := false
-			if err = insertTransitionTx(tx, AlertStateTransition{
-				AlertID:         live.AlertID,
-				OldState:        nil,
-				NewState:        newProjected,
-				OldRawState:     nil,
-				NewRawState:     live.State,
-				OldIsLive:       nil,
-				NewIsLive:       newLive,
-				OldIsSuppressed: nil,
-				NewIsSuppressed: live.State == StateSuppressed,
-				OldIsResolved:   nil,
-				NewIsResolved:   newResolved,
-				ChangedAt:       now,
-				ChangeSource:    ChangeSourcePoller,
-				ReasonCode:      sanitizeReasonCode(ptrString("poll_first_seen")),
-			}); err != nil {
-				_ = tx.Rollback()
-				return PollCycleResult{}, err
-			}
-			result.Inserted++
-			result.Transitions++
-			if err = upsertTargetStatesFromLiveTx(tx, live.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
-				_ = tx.Rollback()
-				return PollCycleResult{}, err
-			}
-			if live.State == StateSuppressed {
-				if err = insertLiveSuppressionCauseTx(tx, live.AlertID, live.SilencedBySources, now); err != nil {
+		for _, inputLive := range input.LiveAlerts {
+			live := liveByID[inputLive.AlertID]
+			targets := normalizeLiveTargets(live)
+			current, found := currentByID[live.AlertID]
+			if !found {
+				if err = insertCurrentAlertTx(tx, live, now); err != nil {
 					_ = tx.Rollback()
-					return PollCycleResult{}, err
+					return pollTransactionResult{}, err
+				}
+				newProjected := projectedState(live.State, true, live.State == StateSuppressed, false)
+				newLive := true
+				newResolved := false
+				if err = insertTransitionTx(tx, AlertStateTransition{
+					AlertID:         live.AlertID,
+					OldState:        nil,
+					NewState:        newProjected,
+					OldRawState:     nil,
+					NewRawState:     live.State,
+					OldIsLive:       nil,
+					NewIsLive:       newLive,
+					OldIsSuppressed: nil,
+					NewIsSuppressed: live.State == StateSuppressed,
+					OldIsResolved:   nil,
+					NewIsResolved:   newResolved,
+					ChangedAt:       now,
+					ChangeSource:    ChangeSourcePoller,
+					ReasonCode:      sanitizeReasonCode(ptrString("poll_first_seen")),
+				}); err != nil {
+					_ = tx.Rollback()
+					return pollTransactionResult{}, err
+				}
+				result.Inserted++
+				result.Transitions++
+				if err = upsertTargetStatesFromLiveTx(tx, live.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
+					_ = tx.Rollback()
+					return pollTransactionResult{}, err
+				}
+				if live.State == StateSuppressed {
+					if err = insertLiveSuppressionCauseTx(tx, live.AlertID, live.SilencedBySources, now); err != nil {
+						_ = tx.Rollback()
+						return pollTransactionResult{}, err
+					}
+				}
+				if err = insertLiveTargetSuppressionCausesTx(tx, live.AlertID, live.Targets, live.SilencedBySources, now); err != nil {
+					_ = tx.Rollback()
+					return pollTransactionResult{}, err
+				}
+				continue
+			}
+
+			livePlan := ObserveLive(LifecycleDimensions{
+				RawState: current.RawState, IsLive: current.IsLive,
+				IsSuppressed: current.IsSuppressed, IsResolved: current.IsResolved,
+			}, live.State)
+			newRawState := livePlan.RawState
+			newIsLive := livePlan.IsLive
+			newIsResolved := livePlan.IsResolved
+			newIsSuppressed := livePlan.IsSuppressed
+			newState := projectedState(newRawState, newIsLive, newIsSuppressed, newIsResolved)
+			if current.IsResolved {
+				result.Reactivated++
+			}
+
+			existingRelevant, parseErr := parseRelevantUpstreams(current.RelevantUpstreams)
+			if parseErr != nil {
+				existingRelevant = nil
+			}
+			storedRelevant := selectStoredRelevantUpstreams(existingRelevant, live.RelevantUpstreams, allSuccessful)
+			relevantJSON, marshalErr := marshalRelevantUpstreams(storedRelevant)
+			if marshalErr != nil {
+				_ = tx.Rollback()
+				return pollTransactionResult{}, marshalErr
+			}
+
+			existingRelevantSources, parseSourcesErr := parseRelevantSources(current.RelevantSources)
+			if parseSourcesErr != nil {
+				existingRelevantSources = nil
+			}
+			storedRelevantSources := selectStoredRelevantSources(existingRelevantSources, live.RelevantSources, allSuccessful)
+			relevantSourcesJSON, marshalSourcesErr := marshalRelevantSources(storedRelevantSources)
+			if marshalSourcesErr != nil {
+				_ = tx.Rollback()
+				return pollTransactionResult{}, marshalSourcesErr
+			}
+			sourceLinksJSON, marshalLinksErr := marshalAlertSourceLinks(live.SourceLinks)
+			if marshalLinksErr != nil {
+				_ = tx.Rollback()
+				return pollTransactionResult{}, marshalLinksErr
+			}
+
+			if err = updateCurrentAlertFromLiveTx(tx, current.AlertID, live, newRawState, newIsLive, newIsSuppressed, newIsResolved, string(relevantJSON), string(relevantSourcesJSON), string(sourceLinksJSON), now); err != nil {
+				_ = tx.Rollback()
+				return pollTransactionResult{}, err
+			}
+			result.Updated++
+			if err = upsertTargetStatesFromLiveTx(tx, current.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
+				_ = tx.Rollback()
+				return pollTransactionResult{}, err
+			}
+
+			if current.State != newState || current.RawState != newRawState || current.IsLive != newIsLive || current.IsSuppressed != newIsSuppressed || current.IsResolved != newIsResolved {
+				old := current.State
+				oldRaw := current.RawState
+				oldLive := current.IsLive
+				oldResolved := current.IsResolved
+				reasonCode := "poll_raw_state_changed"
+				if !oldLive {
+					reasonCode = "poll_live_reappeared"
+				}
+				if oldResolved {
+					reasonCode = "poll_reappear_clears_resolved"
+				}
+				if err = insertTransitionTx(tx, AlertStateTransition{
+					AlertID:         current.AlertID,
+					OldState:        &old,
+					NewState:        newState,
+					OldRawState:     &oldRaw,
+					NewRawState:     newRawState,
+					OldIsLive:       &oldLive,
+					NewIsLive:       newIsLive,
+					OldIsSuppressed: &current.IsSuppressed,
+					NewIsSuppressed: newIsSuppressed,
+					OldIsResolved:   &oldResolved,
+					NewIsResolved:   newIsResolved,
+					ChangedAt:       now,
+					ChangeSource:    ChangeSourcePoller,
+					ReasonCode:      sanitizeReasonCode(&reasonCode),
+				}); err != nil {
+					_ = tx.Rollback()
+					return pollTransactionResult{}, err
+				}
+				result.Transitions++
+			}
+			if newIsLive && newIsSuppressed {
+				if err = insertLiveSuppressionCauseTx(tx, current.AlertID, live.SilencedBySources, now); err != nil {
+					_ = tx.Rollback()
+					return pollTransactionResult{}, err
 				}
 			}
-			if err = insertLiveTargetSuppressionCausesTx(tx, live.AlertID, live.Targets, live.SilencedBySources, now); err != nil {
+			if err = insertLiveTargetSuppressionCausesTx(tx, current.AlertID, live.Targets, live.SilencedBySources, now); err != nil {
 				_ = tx.Rollback()
-				return PollCycleResult{}, err
+				return pollTransactionResult{}, err
 			}
-			continue
 		}
 
-		livePlan := ObserveLive(LifecycleDimensions{
-			RawState: current.RawState, IsLive: current.IsLive,
-			IsSuppressed: current.IsSuppressed, IsResolved: current.IsResolved,
-		}, live.State)
-		newRawState := livePlan.RawState
-		newIsLive := livePlan.IsLive
-		newIsResolved := livePlan.IsResolved
-		newIsSuppressed := livePlan.IsSuppressed
-		newState := projectedState(newRawState, newIsLive, newIsSuppressed, newIsResolved)
-		if current.IsResolved {
-			result.Reactivated++
-		}
+		for alertID, current := range currentByID {
+			if _, exists := liveByID[alertID]; exists {
+				continue
+			}
 
-		existingRelevant, parseErr := parseRelevantUpstreams(current.RelevantUpstreams)
-		if parseErr != nil {
-			existingRelevant = nil
-		}
-		storedRelevant := selectStoredRelevantUpstreams(existingRelevant, live.RelevantUpstreams, allSuccessful)
-		relevantJSON, marshalErr := marshalRelevantUpstreams(storedRelevant)
-		if marshalErr != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, marshalErr
-		}
+			if err = markMissingTargetStatesNonLiveTx(tx, current, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
+				_ = tx.Rollback()
+				return pollTransactionResult{}, err
+			}
 
-		existingRelevantSources, parseSourcesErr := parseRelevantSources(current.RelevantSources)
-		if parseSourcesErr != nil {
-			existingRelevantSources = nil
-		}
-		storedRelevantSources := selectStoredRelevantSources(existingRelevantSources, live.RelevantSources, allSuccessful)
-		relevantSourcesJSON, marshalSourcesErr := marshalRelevantSources(storedRelevantSources)
-		if marshalSourcesErr != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, marshalSourcesErr
-		}
-		sourceLinksJSON, marshalLinksErr := marshalAlertSourceLinks(live.SourceLinks)
-		if marshalLinksErr != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, marshalLinksErr
-		}
+			if !current.IsLive {
+				continue
+			}
 
-		if err = updateCurrentAlertFromLiveTx(tx, current.AlertID, live, newRawState, newIsLive, newIsSuppressed, newIsResolved, string(relevantJSON), string(relevantSourcesJSON), string(sourceLinksJSON), now); err != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, err
-		}
-		result.Updated++
-		if err = upsertTargetStatesFromLiveTx(tx, current.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, err
-		}
+			relevant, parseErr := parseRelevantUpstreams(current.RelevantUpstreams)
+			if parseErr != nil {
+				result.SkippedInactive++
+				pollEvents = append(pollEvents, runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "invalid_stored_sources")}})
+				continue
+			}
+			relevant = filterConfiguredSourceNames(relevant, configuredSources, sourceManifestKnown)
 
-		if current.State != newState || current.RawState != newRawState || current.IsLive != newIsLive || current.IsSuppressed != newIsSuppressed || current.IsResolved != newIsResolved {
+			if !allRelevantUpstreamsSuccessful(relevant, input.SuccessfulUpstreams) {
+				result.SkippedInactive++
+				pollEvents = append(pollEvents, runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "incomplete_source_coverage")}})
+				continue
+			}
+
+			absencePlan := ObserveAbsent(LifecycleDimensions{
+				RawState: current.RawState, IsLive: current.IsLive,
+				IsSuppressed: current.IsSuppressed, IsResolved: current.IsResolved,
+			})
+			newRawState := absencePlan.RawState
+			newIsLive := absencePlan.IsLive
+			newIsSuppressed := absencePlan.IsSuppressed
+			newIsResolved := absencePlan.IsResolved
+			newState := projectedState(newRawState, newIsLive, newIsSuppressed, newIsResolved)
+			if err = updateProjectedStateTx(tx, alertID, newRawState, newIsLive, newIsSuppressed, newIsResolved, now); err != nil {
+				_ = tx.Rollback()
+				return pollTransactionResult{}, err
+			}
 			old := current.State
 			oldRaw := current.RawState
 			oldLive := current.IsLive
 			oldResolved := current.IsResolved
-			reasonCode := "poll_raw_state_changed"
-			if !oldLive {
-				reasonCode = "poll_live_reappeared"
-			}
-			if oldResolved {
-				reasonCode = "poll_reappear_clears_resolved"
-			}
 			if err = insertTransitionTx(tx, AlertStateTransition{
-				AlertID:         current.AlertID,
+				AlertID:         alertID,
 				OldState:        &old,
 				NewState:        newState,
 				OldRawState:     &oldRaw,
@@ -2492,106 +2795,36 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 				NewIsResolved:   newIsResolved,
 				ChangedAt:       now,
 				ChangeSource:    ChangeSourcePoller,
-				ReasonCode:      sanitizeReasonCode(&reasonCode),
+				ReasonCode:      sanitizeReasonCode(ptrString("poll_live_disappeared")),
 			}); err != nil {
 				_ = tx.Rollback()
-				return PollCycleResult{}, err
+				return pollTransactionResult{}, err
+			}
+			if newState == StateInactive {
+				result.SetInactive++
+				if err = enqueueAlertForCurrentRecheckContextTx(tx, alertID, now); err != nil {
+					_ = tx.Rollback()
+					return pollTransactionResult{}, err
+				}
 			}
 			result.Transitions++
 		}
-		if newIsLive && newIsSuppressed {
-			if err = insertLiveSuppressionCauseTx(tx, current.AlertID, live.SilencedBySources, now); err != nil {
-				_ = tx.Rollback()
-				return PollCycleResult{}, err
-			}
-		}
-		if err = insertLiveTargetSuppressionCausesTx(tx, current.AlertID, live.Targets, live.SilencedBySources, now); err != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, err
-		}
+
+		return pollTransactionResult{result: result, events: pollEvents, changedAt: now}, nil
+	})
+	if err != nil {
+		return PollCycleResult{}, err
 	}
+	emitRuntimeEvents(txResult.events)
+	logCommittedPollEvents(s.db, txResult.changedAt)
 
-	for alertID, current := range currentByID {
-		if _, exists := liveByID[alertID]; exists {
-			continue
-		}
+	return txResult.result, nil
+}
 
-		if err = markMissingTargetStatesNonLiveTx(tx, current, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, err
-		}
-
-		if !current.IsLive {
-			continue
-		}
-
-		relevant, parseErr := parseRelevantUpstreams(current.RelevantUpstreams)
-		if parseErr != nil {
-			result.SkippedInactive++
-			pollEvents = append(pollEvents, runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "invalid_stored_sources")}})
-			continue
-		}
-		relevant = filterConfiguredSourceNames(relevant, configuredSources, sourceManifestKnown)
-
-		if !allRelevantUpstreamsSuccessful(relevant, input.SuccessfulUpstreams) {
-			result.SkippedInactive++
-			pollEvents = append(pollEvents, runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "incomplete_source_coverage")}})
-			continue
-		}
-
-		absencePlan := ObserveAbsent(LifecycleDimensions{
-			RawState: current.RawState, IsLive: current.IsLive,
-			IsSuppressed: current.IsSuppressed, IsResolved: current.IsResolved,
-		})
-		newRawState := absencePlan.RawState
-		newIsLive := absencePlan.IsLive
-		newIsSuppressed := absencePlan.IsSuppressed
-		newIsResolved := absencePlan.IsResolved
-		newState := projectedState(newRawState, newIsLive, newIsSuppressed, newIsResolved)
-		if err = updateProjectedStateTx(tx, alertID, newRawState, newIsLive, newIsSuppressed, newIsResolved, now); err != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, err
-		}
-		old := current.State
-		oldRaw := current.RawState
-		oldLive := current.IsLive
-		oldResolved := current.IsResolved
-		if err = insertTransitionTx(tx, AlertStateTransition{
-			AlertID:         alertID,
-			OldState:        &old,
-			NewState:        newState,
-			OldRawState:     &oldRaw,
-			NewRawState:     newRawState,
-			OldIsLive:       &oldLive,
-			NewIsLive:       newIsLive,
-			OldIsSuppressed: &current.IsSuppressed,
-			NewIsSuppressed: newIsSuppressed,
-			OldIsResolved:   &oldResolved,
-			NewIsResolved:   newIsResolved,
-			ChangedAt:       now,
-			ChangeSource:    ChangeSourcePoller,
-			ReasonCode:      sanitizeReasonCode(ptrString("poll_live_disappeared")),
-		}); err != nil {
-			_ = tx.Rollback()
-			return PollCycleResult{}, err
-		}
-		if newState == StateInactive {
-			result.SetInactive++
-			if err = enqueueAlertForCurrentRecheckContextTx(tx, alertID, now); err != nil {
-				_ = tx.Rollback()
-				return PollCycleResult{}, err
-			}
-		}
-		result.Transitions++
-	}
-
-	if err = tx.Commit(); err != nil {
-		return PollCycleResult{}, fmt.Errorf("failed to commit poll cycle transaction: %w", err)
-	}
-	emitRuntimeEvents(pollEvents)
-	logCommittedPollEvents(s.db, now)
-
-	return result, nil
+type pollTransactionResult struct {
+	result    PollCycleResult
+	events    []runtimeEvent
+	changedAt time.Time
 }
 
 type runtimeEvent struct {
@@ -2811,91 +3044,84 @@ func (s *Store) RunRegroupToConfig(ctx context.Context, cfg GroupingConfig, batc
 }
 
 func (s *Store) beginOrResumeRegroup(ctx context.Context, targetFingerprint string) (bool, bool, int, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
 	now := time.Now().UTC()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, false, 0, fmt.Errorf("failed to begin regroup transaction: %w", err)
-	}
-
-	currentFingerprint, err := readMetadataStringTx(tx, metaGroupingFingerprint)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
-	status, err := readMetadataStringTx(tx, metaRegroupStatus)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
-	status = strings.TrimSpace(status)
-	if status == "" {
-		status = regroupStatusReady
-	}
-	activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
-
-	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, fmt.Errorf("failed to count rows for regroup: %w", err)
-	}
-
-	if strings.TrimSpace(currentFingerprint) == targetFingerprint && status == regroupStatusReady {
-		if err = tx.Commit(); err != nil {
-			return false, false, 0, fmt.Errorf("failed to commit regroup readiness check: %w", err)
-		}
-		return false, false, totalRows, nil
-	}
-
-	resume := status == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint
-	if !resume {
-		if err = setMetadataIntTx(tx, metaRegroupProcessed, 0); err != nil {
+	result, err := withWriterTxValue(ctx, s, func(tx *sql.Tx) (regroupStartResult, error) {
+		currentFingerprint, err := readMetadataStringTx(tx, metaGroupingFingerprint)
+		if err != nil {
 			_ = tx.Rollback()
-			return false, false, 0, err
+			return regroupStartResult{}, err
 		}
-		if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
+		status, err := readMetadataStringTx(tx, metaRegroupStatus)
+		if err != nil {
 			_ = tx.Rollback()
-			return false, false, 0, err
+			return regroupStartResult{}, err
 		}
-		if err = setMetadataTimeTx(tx, metaRegroupStartedAt, &now); err != nil {
+		status = strings.TrimSpace(status)
+		if status == "" {
+			status = regroupStatusReady
+		}
+		activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
+		if err != nil {
 			_ = tx.Rollback()
-			return false, false, 0, err
+			return regroupStartResult{}, err
 		}
-	}
 
-	if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusRunning); err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
-	if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
-	if err = setMetadataTx(tx, metaRegroupTargetFingerprint, targetFingerprint); err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
-	if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
-	if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, nil); err != nil {
-		_ = tx.Rollback()
-		return false, false, 0, err
-	}
+		totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
+		if err != nil {
+			_ = tx.Rollback()
+			return regroupStartResult{}, fmt.Errorf("failed to count rows for regroup: %w", err)
+		}
 
-	if err = tx.Commit(); err != nil {
-		return false, false, 0, fmt.Errorf("failed to commit regroup metadata transaction: %w", err)
-	}
+		if strings.TrimSpace(currentFingerprint) == targetFingerprint && status == regroupStatusReady {
+			return regroupStartResult{total: totalRows}, nil
+		}
 
-	return true, resume, totalRows, nil
+		resume := status == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint
+		if !resume {
+			if err = setMetadataIntTx(tx, metaRegroupProcessed, 0); err != nil {
+				_ = tx.Rollback()
+				return regroupStartResult{}, err
+			}
+			if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
+				_ = tx.Rollback()
+				return regroupStartResult{}, err
+			}
+			if err = setMetadataTimeTx(tx, metaRegroupStartedAt, &now); err != nil {
+				_ = tx.Rollback()
+				return regroupStartResult{}, err
+			}
+		}
+
+		if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusRunning); err != nil {
+			_ = tx.Rollback()
+			return regroupStartResult{}, err
+		}
+		if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
+			_ = tx.Rollback()
+			return regroupStartResult{}, err
+		}
+		if err = setMetadataTx(tx, metaRegroupTargetFingerprint, targetFingerprint); err != nil {
+			_ = tx.Rollback()
+			return regroupStartResult{}, err
+		}
+		if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
+			_ = tx.Rollback()
+			return regroupStartResult{}, err
+		}
+		if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, nil); err != nil {
+			_ = tx.Rollback()
+			return regroupStartResult{}, err
+		}
+
+		return regroupStartResult{started: true, resumed: resume, total: totalRows}, nil
+	})
+	return result.started, result.resumed, result.total, err
+}
+
+type regroupStartResult struct {
+	started bool
+	resumed bool
+	total   int
 }
 
 type regroupRow struct {
@@ -2937,204 +3163,180 @@ func compileGroupingConfig(cfg GroupingConfig) (compiledGroupingConfig, error) {
 }
 
 func (s *Store) runRegroupBatch(ctx context.Context, targetFingerprint string, cfg compiledGroupingConfig, batchSize int) (bool, int, int, int, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	return withWriterTxTuple(ctx, s, func(tx *sql.Tx) (bool, int, int, int, error) {
+		status, err := readMetadataStringTx(tx, metaRegroupStatus)
+		if err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if strings.TrimSpace(status) != regroupStatusRunning {
+			return true, 0, 0, 0, nil
+		}
+		activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
+		if err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		if strings.TrimSpace(activeTarget) != targetFingerprint {
+			return true, 0, 0, 0, nil
+		}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, 0, 0, 0, fmt.Errorf("failed to begin regroup batch transaction: %w", err)
-	}
+		cursor, err := readMetadataInt64Tx(tx, metaRegroupCursorRowID)
+		if err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		processed, err := readMetadataIntTx(tx, metaRegroupProcessed)
+		if err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, err
+		}
+		totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
+		if err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, fmt.Errorf("failed to count rows in regroup batch: %w", err)
+		}
 
-	status, err := readMetadataStringTx(tx, metaRegroupStatus)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, 0, err
-	}
-	if strings.TrimSpace(status) != regroupStatusRunning {
-		_ = tx.Rollback()
-		return true, 0, 0, 0, nil
-	}
-	activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, 0, err
-	}
-	if strings.TrimSpace(activeTarget) != targetFingerprint {
-		_ = tx.Rollback()
-		return true, 0, 0, 0, nil
-	}
-
-	cursor, err := readMetadataInt64Tx(tx, metaRegroupCursorRowID)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, 0, err
-	}
-	processed, err := readMetadataIntTx(tx, metaRegroupProcessed)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, 0, err
-	}
-	totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, 0, fmt.Errorf("failed to count rows in regroup batch: %w", err)
-	}
-
-	rows, err := tx.Query(`
+		rows, err := tx.Query(`
 SELECT rowid, alert_id, receiver, labels_json
 FROM alert_states
 WHERE rowid > ?
 ORDER BY rowid ASC
 LIMIT ?
 `, cursor, batchSize)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, 0, fmt.Errorf("failed to select regroup batch rows: %w", err)
-	}
+		if err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, 0, fmt.Errorf("failed to select regroup batch rows: %w", err)
+		}
 
-	batch := make([]regroupRow, 0, batchSize)
-	for rows.Next() {
-		var row regroupRow
-		if scanErr := rows.Scan(&row.RowID, &row.AlertID, &row.Receiver, &row.LabelsJSON); scanErr != nil {
+		batch := make([]regroupRow, 0, batchSize)
+		for rows.Next() {
+			var row regroupRow
+			if scanErr := rows.Scan(&row.RowID, &row.AlertID, &row.Receiver, &row.LabelsJSON); scanErr != nil {
+				rows.Close()
+				_ = tx.Rollback()
+				return false, 0, 0, 0, fmt.Errorf("failed to scan regroup row: %w", scanErr)
+			}
+			batch = append(batch, row)
+		}
+		if err = rows.Err(); err != nil {
 			rows.Close()
 			_ = tx.Rollback()
-			return false, 0, 0, 0, fmt.Errorf("failed to scan regroup row: %w", scanErr)
+			return false, 0, 0, 0, fmt.Errorf("failed to iterate regroup rows: %w", err)
 		}
-		batch = append(batch, row)
-	}
-	if err = rows.Err(); err != nil {
 		rows.Close()
-		_ = tx.Rollback()
-		return false, 0, 0, 0, fmt.Errorf("failed to iterate regroup rows: %w", err)
-	}
-	rows.Close()
 
-	if len(batch) == 0 {
-		now := time.Now().UTC()
-		if err = setMetadataTx(tx, metaGroupingFingerprint, targetFingerprint); err != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, 0, err
-		}
-		if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusReady); err != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, 0, err
-		}
-		if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, 0, err
-		}
-		if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, 0, err
-		}
-		if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, 0, err
-		}
-		if err = setMetadataIntTx(tx, metaRegroupProcessed, totalRows); err != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, 0, err
-		}
-		if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, 0, err
-		}
-		if err = tx.Commit(); err != nil {
-			return false, 0, 0, 0, fmt.Errorf("failed to commit regroup finalize: %w", err)
-		}
-		return true, 0, 0, totalRows, nil
-	}
-
-	updated := 0
-	lastRowID := cursor
-	for _, row := range batch {
-		groupID, groupLabelsJSON, computeErr := computeGroupFromAlertLabels(row.Receiver, row.LabelsJSON, cfg)
-		if computeErr != nil {
-			_ = tx.Rollback()
-			return false, 0, 0, totalRows, fmt.Errorf("failed to regroup alert %s: %w", row.AlertID, computeErr)
+		if len(batch) == 0 {
+			now := time.Now().UTC()
+			if err = setMetadataTx(tx, metaGroupingFingerprint, targetFingerprint); err != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, 0, err
+			}
+			if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusReady); err != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, 0, err
+			}
+			if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, 0, err
+			}
+			if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, 0, err
+			}
+			if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, 0, err
+			}
+			if err = setMetadataIntTx(tx, metaRegroupProcessed, totalRows); err != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, 0, err
+			}
+			if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, 0, err
+			}
+			return true, 0, 0, totalRows, nil
 		}
 
-		updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
-		res, updateErr := tx.Exec(`
+		updated := 0
+		lastRowID := cursor
+		for _, row := range batch {
+			groupID, groupLabelsJSON, computeErr := computeGroupFromAlertLabels(row.Receiver, row.LabelsJSON, cfg)
+			if computeErr != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, totalRows, fmt.Errorf("failed to regroup alert %s: %w", row.AlertID, computeErr)
+			}
+
+			updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+			res, updateErr := tx.Exec(`
 UPDATE alert_states
 SET group_id = ?, group_labels_json = ?, updated_at = ?
 WHERE rowid = ?
 `, groupID, groupLabelsJSON, updatedAt, row.RowID)
-		if updateErr != nil {
+			if updateErr != nil {
+				_ = tx.Rollback()
+				return false, 0, 0, totalRows, fmt.Errorf("failed to update regrouped row: %w", updateErr)
+			}
+			affected, _ := res.RowsAffected()
+			if affected > 0 {
+				updated++
+			}
+			lastRowID = row.RowID
+		}
+
+		processed += len(batch)
+		if processed > totalRows {
+			totalRows = processed
+		}
+
+		if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, lastRowID); err != nil {
 			_ = tx.Rollback()
-			return false, 0, 0, totalRows, fmt.Errorf("failed to update regrouped row: %w", updateErr)
+			return false, 0, 0, totalRows, err
 		}
-		affected, _ := res.RowsAffected()
-		if affected > 0 {
-			updated++
+		if err = setMetadataIntTx(tx, metaRegroupProcessed, processed); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, totalRows, err
 		}
-		lastRowID = row.RowID
-	}
+		if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
+			_ = tx.Rollback()
+			return false, 0, 0, totalRows, err
+		}
 
-	processed += len(batch)
-	if processed > totalRows {
-		totalRows = processed
-	}
-
-	if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, lastRowID); err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, totalRows, err
-	}
-	if err = setMetadataIntTx(tx, metaRegroupProcessed, processed); err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, totalRows, err
-	}
-	if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
-		_ = tx.Rollback()
-		return false, 0, 0, totalRows, err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return false, 0, 0, totalRows, fmt.Errorf("failed to commit regroup batch: %w", err)
-	}
-
-	return false, len(batch), updated, totalRows, nil
+		return false, len(batch), updated, totalRows, nil
+	})
 }
 
 func (s *Store) failRegroup(ctx context.Context, targetFingerprint, reason string) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-
-	status, readErr := readMetadataStringTx(tx, metaRegroupStatus)
-	if readErr != nil {
-		_ = tx.Rollback()
-		return readErr
-	}
-	activeTarget, readErr := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
-	if readErr != nil {
-		_ = tx.Rollback()
-		return readErr
-	}
-	if strings.TrimSpace(status) == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint {
-		now := time.Now().UTC()
-		if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusError); err != nil {
+	return s.withWriterTx(ctx, func(tx *sql.Tx) error {
+		status, readErr := readMetadataStringTx(tx, metaRegroupStatus)
+		if readErr != nil {
 			_ = tx.Rollback()
-			return err
+			return readErr
 		}
-		if err = setMetadataTx(tx, metaRegroupError, strings.TrimSpace(reason)); err != nil {
+		activeTarget, readErr := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
+		if readErr != nil {
 			_ = tx.Rollback()
-			return err
+			return readErr
 		}
-		if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
-			_ = tx.Rollback()
-			return err
+		if strings.TrimSpace(status) == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint {
+			now := time.Now().UTC()
+			if err := setMetadataTx(tx, metaRegroupStatus, regroupStatusError); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			if err := setMetadataTx(tx, metaRegroupError, strings.TrimSpace(reason)); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			if err := setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
 		}
-	}
 
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	return nil
+		return nil
+	})
 }
 
 func computeGroupFromAlertLabels(receiver, labelsJSON string, cfg compiledGroupingConfig) (string, string, error) {
@@ -4402,303 +4604,287 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 	if s == nil || s.db == nil {
 		return 0, ErrStoreNotInitialized
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
 	var selectedJobID int64
 	startedAt := time.Now()
-	defer func() {
-		if resultErr == nil || selectedJobID == 0 {
-			return
-		}
-		nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
-		_, _ = s.db.ExecContext(ctx, `
-UPDATE silence_recheck_jobs
-SET status='failed', last_error=COALESCE(last_error, ?), finished_at=COALESCE(finished_at, ?)
-WHERE job_id=? AND status IN ('queued','running','failed')
-`, resultErr.Error(), nowRaw, selectedJobID)
-		runtimeLog.ErrorContext(ctx, "silence_recheck", "job_failed", "Silence recheck job failed", slog.Int64("job_id", selectedJobID), slog.String("stage", "worker"), slog.Any("error", resultErr), slog.Duration("duration", time.Since(startedAt)))
-	}()
+	var committedDecisions []runtimeEvent
+	var committedJobID int64
+	var committedStatus string
+	var committedStarted bool
+	var committedPriorProcessed, committedTotalCandidates, committedPromoted, committedProcessed, committedStale, committedMissing, committedIneligible, committedIncomplete int
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("failed to begin silence recheck transaction: %w", err)
-	}
-
-	jobID, cursor, status, err := selectNextRecheckJobTx(tx)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	if jobID == 0 {
-		_ = tx.Rollback()
-		s.recheckBlockedJobLogged = 0
-		runtimeLog.DebugContext(ctx, "silence_recheck", "queue_empty", "Silence recheck queue is empty")
-		return 0, nil
-	}
-	queueDepth, queueErr := queryInt(tx, `SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','failed')`)
-	if queueErr != nil {
-		queueDepth = -1
-		runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to count silence recheck queue for logging", slog.Int64("job_id", jobID), slog.Any("error", queueErr))
-	}
-	var priorProcessed, totalCandidates int
-	if queryErr := tx.QueryRow(`SELECT processed_candidates, total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&priorProcessed, &totalCandidates); queryErr != nil {
-		priorProcessed = -1
-		totalCandidates = -1
-		runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to read silence recheck job progress for logging", slog.Int64("job_id", jobID), slog.Any("error", queryErr))
-	}
-	runtimeLog.DebugContext(ctx, "silence_recheck", "job_selected", "Silence recheck job selected", slog.Int64("job_id", jobID), slog.String("status", status), slog.Int("queue_depth", queueDepth), slog.Int("batch_size", batchSize))
-	if !RecheckJobCanRun(status, false) {
-		var lastError sql.NullString
-		_ = tx.QueryRow(`SELECT last_error FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&lastError)
-		_ = tx.Rollback()
-		if s.recheckBlockedJobLogged != jobID {
-			runtimeLog.WarnContext(ctx, "silence_recheck", "failed_job_blocks_queue", "Failed silence recheck job blocks the queue", slog.Int64("job_id", jobID), slog.Int("queue_depth", queueDepth))
-			s.recheckBlockedJobLogged = jobID
-		} else {
-			runtimeLog.DebugContext(ctx, "silence_recheck", "failed_job_blocks_queue", "Failed silence recheck job still blocks the queue", slog.Int64("job_id", jobID), slog.Int("queue_depth", queueDepth))
-		}
-		return 0, fmt.Errorf("silence recheck job %d is failed and blocks later jobs: %s", jobID, lastError.String)
-	}
-	s.recheckBlockedJobLogged = 0
-	selectedJobID = jobID
-
-	now := time.Now().UTC()
-	nowRaw := now.Format(time.RFC3339Nano)
-	if status == "queued" {
-		if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='running', started_at=COALESCE(started_at, ?) WHERE job_id = ?`, nowRaw, jobID); err != nil {
+	promotedResult, resultErr = withWriterTxValue(ctx, s, func(tx *sql.Tx) (int, error) {
+		jobID, cursor, status, err := selectNextRecheckJobTx(tx)
+		if err != nil {
 			_ = tx.Rollback()
-			return 0, fmt.Errorf("failed to mark recheck job running: %w", err)
+			return 0, err
 		}
-	}
-
-	rules, err := loadRecheckJobRulesTx(tx, jobID)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	sourceStatuses, err := loadRecheckJobSourceStatusesTx(tx, jobID)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	if err = attachEligibleRecheckCandidatesTx(tx, jobID); err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-
-	candidates, err := loadRecheckCandidatesTx(tx, jobID, batchSize)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-	if len(candidates) == 0 {
-		if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='completed', open_context_fingerprint=NULL, finished_at=?, last_error=NULL WHERE job_id = ?`, nowRaw, jobID); err != nil {
+		if jobID == 0 {
+			s.recheckBlockedJobLogged = 0
+			runtimeLog.DebugContext(ctx, "silence_recheck", "queue_empty", "Silence recheck queue is empty")
+			return 0, nil
+		}
+		queueDepth, queueErr := queryInt(tx, `SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','failed')`)
+		if queueErr != nil {
+			queueDepth = -1
+			runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to count silence recheck queue for logging", slog.Int64("job_id", jobID), slog.Any("error", queueErr))
+		}
+		var priorProcessed, totalCandidates int
+		if queryErr := tx.QueryRow(`SELECT processed_candidates, total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&priorProcessed, &totalCandidates); queryErr != nil {
+			priorProcessed = -1
+			totalCandidates = -1
+			runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to read silence recheck job progress for logging", slog.Int64("job_id", jobID), slog.Any("error", queryErr))
+		}
+		runtimeLog.DebugContext(ctx, "silence_recheck", "job_selected", "Silence recheck job selected", slog.Int64("job_id", jobID), slog.String("status", status), slog.Int("queue_depth", queueDepth), slog.Int("batch_size", batchSize))
+		if !RecheckJobCanRun(status, false) {
+			var lastError sql.NullString
+			_ = tx.QueryRow(`SELECT last_error FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&lastError)
 			_ = tx.Rollback()
-			return 0, fmt.Errorf("failed to mark recheck job completed: %w", err)
-		}
-		if err = tx.Commit(); err != nil {
-			return 0, fmt.Errorf("failed to commit recheck completion: %w", err)
-		}
-		logCompletedRecheckJob(ctx, s.db, jobID, time.Since(startedAt))
-		return 0, nil
-	}
-
-	processed := 0
-	promoted := 0
-	stale := 0
-	missing := 0
-	ineligible := 0
-	incompleteSources := 0
-	lastCursor := cursor
-	decisions := make([]runtimeEvent, 0, len(candidates))
-	appendDecision := func(event runtimeEvent) { decisions = append(decisions, event) }
-
-	for _, cand := range candidates {
-		processed++
-		lastCursor = &cand.AlertID
-		if _, err = tx.Exec(`UPDATE silence_recheck_job_candidates SET processed_at=? WHERE job_id=? AND alert_id=?`, nowRaw, jobID, cand.AlertID); err != nil {
-			_ = tx.Rollback()
-			return 0, fmt.Errorf("failed marking recheck candidate processed: %w", err)
-		}
-		if strings.TrimSpace(cand.MatchLabelsJSON) == "" {
-			counter, _ := ClassifyRecheckCandidate(true, RecheckCandidateMissingLabels)
-			if counter == "missing_labels" {
-				missing++
+			if s.recheckBlockedJobLogged != jobID {
+				runtimeLog.WarnContext(ctx, "silence_recheck", "failed_job_blocks_queue", "Failed silence recheck job blocks the queue", slog.Int64("job_id", jobID), slog.Int("queue_depth", queueDepth))
+				s.recheckBlockedJobLogged = jobID
+			} else {
+				runtimeLog.DebugContext(ctx, "silence_recheck", "failed_job_blocks_queue", "Failed silence recheck job still blocks the queue", slog.Int64("job_id", jobID), slog.Int("queue_depth", queueDepth))
 			}
-			appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "missing_labels"))
-			continue
+			return 0, fmt.Errorf("silence recheck job %d is failed and blocks later jobs: %s", jobID, lastError.String)
 		}
-		labels := map[string]string{}
-		if err = json.Unmarshal([]byte(cand.MatchLabelsJSON), &labels); err != nil {
-			missing++
-			appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "invalid_labels"))
-			continue
-		}
-		relevant, rerr := parseRelevantSourceNames(cand.RelevantSourcesJSON, cand.RelevantUpstreamsJSON)
-		if rerr != nil || len(relevant) == 0 {
-			ineligible++
-			appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "invalid_sources"))
-			continue
+		s.recheckBlockedJobLogged = 0
+		selectedJobID = jobID
+
+		now := time.Now().UTC()
+		nowRaw := now.Format(time.RFC3339Nano)
+		if status == "queued" {
+			if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='running', started_at=COALESCE(started_at, ?) WHERE job_id = ?`, nowRaw, jobID); err != nil {
+				_ = tx.Rollback()
+				return 0, fmt.Errorf("failed to mark recheck job running: %w", err)
+			}
 		}
 
-		targetRows, terr := readTargetStatesTx(tx, cand.AlertID)
-		if terr != nil {
+		rules, err := loadRecheckJobRulesTx(tx, jobID)
+		if err != nil {
 			_ = tx.Rollback()
-			return 0, terr
+			return 0, err
 		}
-		if len(targetRows) == 0 {
-			matched, complete := evaluateRecheckRules(rules, sourceStatuses, nil, relevant, labels)
-			if len(matched) == 0 {
-				counter, _ := ClassifyRecheckCandidate(complete, RecheckCandidateNonmatch)
-				switch counter {
-				case "ineligible":
-					ineligible++
-				case "incomplete_sources":
+		sourceStatuses, err := loadRecheckJobSourceStatusesTx(tx, jobID)
+		if err != nil {
+			_ = tx.Rollback()
+			return 0, err
+		}
+		if err = attachEligibleRecheckCandidatesTx(tx, jobID); err != nil {
+			_ = tx.Rollback()
+			return 0, err
+		}
+
+		candidates, err := loadRecheckCandidatesTx(tx, jobID, batchSize)
+		if err != nil {
+			_ = tx.Rollback()
+			return 0, err
+		}
+		if len(candidates) == 0 {
+			if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='completed', open_context_fingerprint=NULL, finished_at=?, last_error=NULL WHERE job_id = ?`, nowRaw, jobID); err != nil {
+				_ = tx.Rollback()
+				return 0, fmt.Errorf("failed to mark recheck job completed: %w", err)
+			}
+			committedJobID = jobID
+			committedStatus = status
+			return 0, nil
+		}
+
+		processed := 0
+		promoted := 0
+		stale := 0
+		missing := 0
+		ineligible := 0
+		incompleteSources := 0
+		lastCursor := cursor
+		decisions := make([]runtimeEvent, 0, len(candidates))
+		appendDecision := func(event runtimeEvent) { decisions = append(decisions, event) }
+
+		for _, cand := range candidates {
+			processed++
+			lastCursor = &cand.AlertID
+			if _, err = tx.Exec(`UPDATE silence_recheck_job_candidates SET processed_at=? WHERE job_id=? AND alert_id=?`, nowRaw, jobID, cand.AlertID); err != nil {
+				_ = tx.Rollback()
+				return 0, fmt.Errorf("failed marking recheck candidate processed: %w", err)
+			}
+			if strings.TrimSpace(cand.MatchLabelsJSON) == "" {
+				counter, _ := ClassifyRecheckCandidate(true, RecheckCandidateMissingLabels)
+				if counter == "missing_labels" {
+					missing++
+				}
+				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "missing_labels"))
+				continue
+			}
+			labels := map[string]string{}
+			if err = json.Unmarshal([]byte(cand.MatchLabelsJSON), &labels); err != nil {
+				missing++
+				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "invalid_labels"))
+				continue
+			}
+			relevant, rerr := parseRelevantSourceNames(cand.RelevantSourcesJSON, cand.RelevantUpstreamsJSON)
+			if rerr != nil || len(relevant) == 0 {
+				ineligible++
+				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "invalid_sources"))
+				continue
+			}
+
+			targetRows, terr := readTargetStatesTx(tx, cand.AlertID)
+			if terr != nil {
+				_ = tx.Rollback()
+				return 0, terr
+			}
+			if len(targetRows) == 0 {
+				matched, complete := evaluateRecheckRules(rules, sourceStatuses, nil, relevant, labels)
+				if len(matched) == 0 {
+					counter, _ := ClassifyRecheckCandidate(complete, RecheckCandidateNonmatch)
+					switch counter {
+					case "ineligible":
+						ineligible++
+					case "incomplete_sources":
+						incompleteSources++
+					}
+					reason := "ineligible"
+					if !complete {
+						reason = "incomplete_sources"
+					}
+					appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, reason))
+					continue
+				}
+				updated, transitionID, uerr := promoteAlertSuppressedCAS(tx, cand, now)
+				if uerr != nil {
+					_ = tx.Rollback()
+					return 0, uerr
+				}
+				if !updated {
+					counter, _ := ClassifyRecheckCandidate(true, RecheckCandidateStaleCAS)
+					if counter == "stale_conflicts" {
+						stale++
+					}
+					appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
+					continue
+				}
+				promoted++
+				appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID)}})
+				if err = insertSuppressionCauseHistoryTx(tx, cand.AlertID, transitionID, jobID, now, matched); err != nil {
+					_ = tx.Rollback()
+					return 0, err
+				}
+				continue
+			}
+
+			anyTargetEvidence := false
+			anyTargetApplied := false
+			allTargetsSuppressed := true
+			candidateIncompleteSources := false
+			targetCauseHistoryIDs := make([]int64, 0, len(targetRows))
+
+			for _, row := range targetRows {
+				if row.RetiredAt != nil {
+					continue
+				}
+				if row.IsLive || row.IsResolved {
+					if row.IsLive || !row.IsSuppressed {
+						allTargetsSuppressed = false
+					}
+					continue
+				}
+				if row.IsSuppressed {
+					historyID, found, causeErr := latestTargetSuppressionCauseHistoryTx(tx, cand.AlertID, row.Target)
+					if causeErr != nil {
+						_ = tx.Rollback()
+						return 0, causeErr
+					}
+					if !found {
+						allTargetsSuppressed = false
+						continue
+					}
+					anyTargetEvidence = true
+					targetCauseHistoryIDs = append(targetCauseHistoryIDs, historyID)
+					continue
+				}
+				targetSources := sourceSetFromMembers(row.SourceMembers)
+				if len(targetSources) == 0 {
+					if !row.IsSuppressed {
+						allTargetsSuppressed = false
+					}
+					continue
+				}
+				matched, complete := evaluateRecheckRules(rules, sourceStatuses, &row.Target, targetSources, labels)
+				if len(matched) == 0 {
+					if !complete {
+						candidateIncompleteSources = true
+					}
+					if !row.IsSuppressed {
+						allTargetsSuppressed = false
+					}
+					continue
+				}
+				anyTargetEvidence = true
+
+				applied, eventID, perr := promoteTargetSuppressedCASTx(tx, cand.AlertID, row, now, "silence_match_promoted")
+				if perr != nil {
+					_ = tx.Rollback()
+					return 0, perr
+				}
+				if applied {
+					anyTargetApplied = true
+					historyID, causeErr := insertTargetRecheckSuppressionCauseTx(tx, cand.AlertID, row.Target, eventID, jobID, now, matched)
+					if causeErr != nil {
+						_ = tx.Rollback()
+						return 0, causeErr
+					}
+					targetCauseHistoryIDs = append(targetCauseHistoryIDs, historyID)
+					appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck target candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID), slog.String("target", row.Target)}})
+				} else {
+					allTargetsSuppressed = false
+				}
+			}
+
+			if !anyTargetEvidence {
+				if candidateIncompleteSources {
 					incompleteSources++
+				} else {
+					ineligible++
 				}
 				reason := "ineligible"
-				if !complete {
+				if candidateIncompleteSources {
 					reason = "incomplete_sources"
 				}
 				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, reason))
 				continue
 			}
+			if !allTargetsSuppressed {
+				if anyTargetApplied {
+					promoted++
+				} else {
+					stale++
+				}
+				if !anyTargetApplied {
+					appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
+				}
+				continue
+			}
+
 			updated, transitionID, uerr := promoteAlertSuppressedCAS(tx, cand, now)
 			if uerr != nil {
 				_ = tx.Rollback()
 				return 0, uerr
 			}
 			if !updated {
-				counter, _ := ClassifyRecheckCandidate(true, RecheckCandidateStaleCAS)
-				if counter == "stale_conflicts" {
-					stale++
-				}
+				stale++
 				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
 				continue
 			}
 			promoted++
 			appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID)}})
-			if err = insertSuppressionCauseHistoryTx(tx, cand.AlertID, transitionID, jobID, now, matched); err != nil {
+			if err = insertTargetAggregateSuppressionCauseTx(tx, cand.AlertID, transitionID, now, targetCauseHistoryIDs); err != nil {
 				_ = tx.Rollback()
 				return 0, err
 			}
-			continue
 		}
-
-		anyTargetEvidence := false
-		anyTargetApplied := false
-		allTargetsSuppressed := true
-		candidateIncompleteSources := false
-		targetCauseHistoryIDs := make([]int64, 0, len(targetRows))
-
-		for _, row := range targetRows {
-			if row.RetiredAt != nil {
-				continue
-			}
-			if row.IsLive || row.IsResolved {
-				if row.IsLive || !row.IsSuppressed {
-					allTargetsSuppressed = false
-				}
-				continue
-			}
-			if row.IsSuppressed {
-				historyID, found, causeErr := latestTargetSuppressionCauseHistoryTx(tx, cand.AlertID, row.Target)
-				if causeErr != nil {
-					_ = tx.Rollback()
-					return 0, causeErr
-				}
-				if !found {
-					allTargetsSuppressed = false
-					continue
-				}
-				anyTargetEvidence = true
-				targetCauseHistoryIDs = append(targetCauseHistoryIDs, historyID)
-				continue
-			}
-			targetSources := sourceSetFromMembers(row.SourceMembers)
-			if len(targetSources) == 0 {
-				if !row.IsSuppressed {
-					allTargetsSuppressed = false
-				}
-				continue
-			}
-			matched, complete := evaluateRecheckRules(rules, sourceStatuses, &row.Target, targetSources, labels)
-			if len(matched) == 0 {
-				if !complete {
-					candidateIncompleteSources = true
-				}
-				if !row.IsSuppressed {
-					allTargetsSuppressed = false
-				}
-				continue
-			}
-			anyTargetEvidence = true
-
-			applied, eventID, perr := promoteTargetSuppressedCASTx(tx, cand.AlertID, row, now, "silence_match_promoted")
-			if perr != nil {
-				_ = tx.Rollback()
-				return 0, perr
-			}
-			if applied {
-				anyTargetApplied = true
-				historyID, causeErr := insertTargetRecheckSuppressionCauseTx(tx, cand.AlertID, row.Target, eventID, jobID, now, matched)
-				if causeErr != nil {
-					_ = tx.Rollback()
-					return 0, causeErr
-				}
-				targetCauseHistoryIDs = append(targetCauseHistoryIDs, historyID)
-				appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck target candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID), slog.String("target", row.Target)}})
-			} else {
-				allTargetsSuppressed = false
-			}
-		}
-
-		if !anyTargetEvidence {
-			if candidateIncompleteSources {
-				incompleteSources++
-			} else {
-				ineligible++
-			}
-			reason := "ineligible"
-			if candidateIncompleteSources {
-				reason = "incomplete_sources"
-			}
-			appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, reason))
-			continue
-		}
-		if !allTargetsSuppressed {
-			if anyTargetApplied {
-				promoted++
-			} else {
-				stale++
-			}
-			if !anyTargetApplied {
-				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
-			}
-			continue
-		}
-
-		updated, transitionID, uerr := promoteAlertSuppressedCAS(tx, cand, now)
-		if uerr != nil {
-			_ = tx.Rollback()
-			return 0, uerr
-		}
-		if !updated {
-			stale++
-			appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
-			continue
-		}
-		promoted++
-		appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID)}})
-		if err = insertTargetAggregateSuppressionCauseTx(tx, cand.AlertID, transitionID, now, targetCauseHistoryIDs); err != nil {
-			_ = tx.Rollback()
-			return 0, err
-		}
-	}
-	if _, err = tx.Exec(`
+		if _, err = tx.Exec(`
 UPDATE silence_recheck_jobs
 SET cursor_alert_id = ?,
     processed_candidates = processed_candidates + ?,
@@ -4709,26 +4895,62 @@ SET cursor_alert_id = ?,
     stale_conflicts = stale_conflicts + ?
 WHERE job_id = ?
 `, lastCursor, processed, promoted, missing, ineligible, incompleteSources, stale, jobID); err != nil {
-		_ = tx.Rollback()
-		return 0, fmt.Errorf("failed to update recheck job progress: %w", err)
+			_ = tx.Rollback()
+			return 0, fmt.Errorf("failed to update recheck job progress: %w", err)
+		}
+
+		committedDecisions = decisions
+		committedJobID = jobID
+		committedStatus = status
+		committedStarted = true
+		committedPriorProcessed = priorProcessed
+		committedTotalCandidates = totalCandidates
+		committedPromoted = promoted
+		committedProcessed = processed
+		committedStale = stale
+		committedMissing = missing
+		committedIneligible = ineligible
+		committedIncomplete = incompleteSources
+		return promoted, nil
+	})
+
+	if resultErr != nil && selectedJobID != 0 {
+		nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
+		_, persistErr := withWriterTxValue(ctx, s, func(tx *sql.Tx) (struct{}, error) {
+			_, err := tx.Exec(`
+UPDATE silence_recheck_jobs
+SET status='failed', last_error=COALESCE(last_error, ?), finished_at=COALESCE(finished_at, ?)
+WHERE job_id=? AND status IN ('queued','running','failed')
+`, resultErr.Error(), nowRaw, selectedJobID)
+			return struct{}{}, err
+		})
+		if persistErr != nil {
+			runtimeLog.ErrorContext(ctx, "silence_recheck", "job_failure_persistence_failed", "Failed to persist silence recheck job failure", slog.Int64("job_id", selectedJobID), slog.Any("error", persistErr), slog.Duration("duration", time.Since(startedAt)))
+		}
+		runtimeLog.ErrorContext(ctx, "silence_recheck", "job_failed", "Silence recheck job failed", slog.Int64("job_id", selectedJobID), slog.String("stage", "worker"), slog.Any("error", resultErr), slog.Duration("duration", time.Since(startedAt)))
+		return promotedResult, resultErr
 	}
 
-	if err = tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit recheck batch: %w", err)
+	if resultErr == nil && committedJobID != 0 {
+		if committedStarted && committedStatus == "queued" {
+			runtimeLog.InfoContext(ctx, "silence_recheck", "job_started", "Silence recheck job started", slog.Int64("job_id", committedJobID), slog.Int("candidate_count", committedTotalCandidates))
+		} else if committedStarted {
+			runtimeLog.InfoContext(ctx, "silence_recheck", "job_resumed", "Silence recheck job resumed", slog.Int64("job_id", committedJobID), slog.Int("prior_processed", committedPriorProcessed), slog.Int("candidate_count", committedTotalCandidates))
+		}
+		if len(committedDecisions) > 0 {
+			emitRuntimeEventsContext(ctx, committedDecisions)
+		}
+		if committedProcessed == 0 && committedTotalCandidates == 0 {
+			logCompletedRecheckJob(ctx, s.db, committedJobID, time.Since(startedAt))
+		} else {
+			level := slog.LevelDebug
+			if committedPromoted > 0 {
+				level = slog.LevelInfo
+			}
+			runtimeLog.Event(ctx, level, "silence_recheck", "batch_completed", "Silence recheck batch completed", slog.Int64("job_id", committedJobID), slog.Int("processed", committedProcessed), slog.Int("promoted", committedPromoted), slog.Int("stale", committedStale), slog.Int("missing_labels", committedMissing), slog.Int("ineligible", committedIneligible), slog.Int("incomplete_sources", committedIncomplete), slog.Duration("duration", time.Since(startedAt)))
+		}
 	}
-	if status == "queued" {
-		runtimeLog.InfoContext(ctx, "silence_recheck", "job_started", "Silence recheck job started", slog.Int64("job_id", jobID), slog.Int("candidate_count", totalCandidates), slog.Int("pinned_rule_count", len(rules)), slog.Int("source_count", len(sourceStatuses)))
-	} else {
-		runtimeLog.InfoContext(ctx, "silence_recheck", "job_resumed", "Silence recheck job resumed", slog.Int64("job_id", jobID), slog.Int("prior_processed", priorProcessed), slog.Int("candidate_count", totalCandidates))
-	}
-	emitRuntimeEventsContext(ctx, decisions)
-	level := slog.LevelDebug
-	if promoted > 0 {
-		level = slog.LevelInfo
-	}
-	runtimeLog.Event(ctx, level, "silence_recheck", "batch_completed", "Silence recheck batch completed", slog.Int64("job_id", jobID), slog.Int("processed", processed), slog.Int("promoted", promoted), slog.Int("stale", stale), slog.Int("missing_labels", missing), slog.Int("ineligible", ineligible), slog.Int("incomplete_sources", incompleteSources), slog.Duration("duration", time.Since(startedAt)))
-
-	return promoted, nil
+	return promotedResult, resultErr
 }
 
 func recheckCandidateSkippedEvent(jobID int64, alertID, reason string) runtimeEvent {
@@ -5852,6 +6074,12 @@ WHERE last_seen_at IS NOT NULL
 	return int(clampInt64ToInt(deleted)), nil
 }
 
+type housekeepingTransactionResult struct {
+	expiredDeleted int
+	limitDeleted   int
+	silenceRetentionResult
+}
+
 type silenceRetentionResult struct {
 	recheckJobs    int
 	retiredSources int
@@ -5991,17 +6219,20 @@ WHERE alert_id IN (
 	return int(clampInt64ToInt(deleted)), nil
 }
 
-func runIncrementalVacuum(db *sql.DB) (int, error) {
-	before, err := queryInt(db, `PRAGMA freelist_count`)
+func runIncrementalVacuum(ctx context.Context, conn *sql.Conn) (int, error) {
+	if conn == nil {
+		return 0, ErrStoreNotInitialized
+	}
+	before, err := queryIntContext(ctx, conn, `PRAGMA freelist_count`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read freelist_count before vacuum: %w", err)
 	}
 
-	if _, err = db.Exec(`PRAGMA incremental_vacuum`); err != nil {
+	if _, err = conn.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
 		return 0, fmt.Errorf("failed to run incremental vacuum: %w", err)
 	}
 
-	after, err := queryInt(db, `PRAGMA freelist_count`)
+	after, err := queryIntContext(ctx, conn, `PRAGMA freelist_count`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read freelist_count after vacuum: %w", err)
 	}
@@ -6818,14 +7049,6 @@ UPDATE silence_recheck_jobs SET total_candidates=(
 	return nil
 }
 
-func (s *Store) setMetadata(key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
-	if err != nil {
-		return fmt.Errorf("failed to upsert metadata key %q: %w", key, err)
-	}
-	return nil
-}
-
 func setMetadataTx(tx *sql.Tx, key, value string) error {
 	_, err := tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	if err != nil {
@@ -6859,6 +7082,21 @@ func queryInt(q interface {
 ) (int, error) {
 	var out int
 	if err := q.QueryRow(query, args...).Scan(&out); err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+func queryIntContext(
+	ctx context.Context,
+	q interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	},
+	query string,
+	args ...any,
+) (int, error) {
+	var out int
+	if err := q.QueryRowContext(ctx, query, args...).Scan(&out); err != nil {
 		return 0, err
 	}
 	return out, nil

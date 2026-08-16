@@ -12,9 +12,14 @@
 - Pragmas:
   - `journal_mode=WAL`
   - `synchronous=NORMAL`
-  - `foreign_keys=ON`
-  - `auto_vacuum=INCREMENTAL`
-  - `busy_timeout=5000` (milliseconds)
+- `foreign_keys=ON`
+- `auto_vacuum=INCREMENTAL`
+- `busy_timeout=5000` (milliseconds)
+- `_txlock=immediate` for the Store-owned writer connection
+
+`journal_mode=WAL` and `auto_vacuum=INCREMENTAL` are applied and verified once
+through the owned writer connection before schema bootstrap. They are not setup
+PRAGMAs in the shared read-pool DSN.
 
 ## 3. Core tables
 
@@ -89,7 +94,8 @@ FK:
 - `key TEXT PRIMARY KEY`
 - `value TEXT NOT NULL`
 
-Used for schema version, housekeeping timestamps, regroup status/progress/fingerprints.
+Used for schema version, the compile-time-checked `schema_layout_fingerprint`,
+housekeeping timestamps, regroup status/progress/fingerprints.
 
 ## 4. Versioning
 
@@ -99,7 +105,10 @@ Current schema version:
 
 This preview project supports only schema v1. Startup creates schema v1 in an empty
 database and reopens an existing v1 database without changing its shape. Any other
-schema version or unrecognized non-empty database is rejected without modification.
+schema version, missing layout fingerprint, or layout fingerprint mismatch is
+rejected without modification. The application-owned `sqlite_schema` rows are
+canonicalized and hashed; fresh bootstrap stores the expected hash and existing
+databases must match both the stored and compile-time hash.
 
 Design references:
 

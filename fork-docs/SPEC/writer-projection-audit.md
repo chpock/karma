@@ -1,6 +1,7 @@
 # Writer and Projection Inventory
 
-Status: implemented reference.
+Status: reference with known recheck-input violations; see
+`silence-recheck-problems.md`.
 
 This inventory follows writes into every observable projection. It is organized
 by domain transaction, not by source file.
@@ -9,7 +10,8 @@ by domain transaction, not by source file.
 
 - Authority: one merged poll observation plus successful-member map and current
   configured source manifest.
-- Transaction: one `ApplyPollCycle` SQL transaction after all network reads.
+- Transaction: one Store-owned `BEGIN IMMEDIATE` transaction after all network
+  reads; the writer is acquired before lifecycle rows are read.
 - Current rows: `alert_states`, `alert_target_states`, `alertmanager_sources`,
   `alertmanager_source_silences`, `alertmanager_cluster_consistency`.
 - Append-only rows: `alert_events`, `alert_target_events`, silence episodes and
@@ -28,10 +30,12 @@ by domain transaction, not by source file.
 
 ## W2: Recheck worker
 
-- Authority: oldest non-completed job's immutable source context, target-qualified
-  pinned rules, and immutable candidate membership.
-- Transaction: each batch updates candidate progress, target/global CAS projection,
-  events, and exact causes atomically.
+- Authority: oldest non-completed job's source context, pinned rules, and current
+  candidate rows. Immutable candidate membership and candidate observation input
+  are the approved Problem 2 replacement, not the current implementation.
+- Transaction: each batch uses one Store-owned `BEGIN IMMEDIATE` transaction to
+  update candidate progress, target/global CAS projection, events, and exact causes
+  atomically. Writer ownership is released between batches.
 - Current rows: `alert_target_states`, `alert_states`, job status/counters and
   `silence_recheck_job_candidates.processed_at`.
 - Append-only rows: target/global transition events, target cause histories and
@@ -39,16 +43,18 @@ by domain transaction, not by source file.
 - Readers: alert APIs, preview, warning/stats, next worker invocation,
   housekeeping.
 - Failure: first persisted error is immutable; failed predecessor blocks FIFO;
-  stale CAS is a counted no-op; incomplete source context cannot promote.
-- Restart: queued/running per-candidate progress resumes; eligibility transitions
-  attach specific alerts without a mutable-state keyset gap; rule/status context
-  never reads mutable current relations.
+  stale CAS is a counted no-op; incomplete source context cannot promote. The
+  current pre-replacement path can persist a transient worker error as a failed
+  predecessor and can attach late candidates.
+- Restart: queued/running per-candidate progress resumes, but current candidate
+  membership and observation reads are not yet fully immutable. Problem 2 replaces
+  this behavior with pinned candidate input and successor jobs.
 
 ## W3: Manual resolve
 
 - Authority: manual request for a stored non-live alert.
-- Transaction: global and every target dimension plus transition events commit
-  atomically.
+- Transaction: one Store-owned `BEGIN IMMEDIATE` transaction commits global and every
+  target dimension plus transition events atomically.
 - Current rows: `alert_states`, `alert_target_states`.
 - Append-only rows: global and target events; existing suppression evidence is
   not rewritten.
@@ -59,8 +65,9 @@ by domain transaction, not by source file.
 ## W4: Housekeeping
 
 - Authority: server clock, alert TTL/max count, silence-history TTL.
-- Order: alert TTL, max-count, phase-2 reference-safe retention, incremental
-  vacuum.
+- Transaction/order: Store writer ownership spans alert TTL, max-count, phase-2
+  reference-safe retention, incremental vacuum, and vacuum metadata. The order is
+  alert TTL, max-count, phase-2 retention, incremental vacuum.
 - Deletes: alert rows through cascades, unreferenced old completed jobs/rule pins,
   retired sources and unreferenced rule/episode/revision history.
 - Protected: current source relations, non-completed/latest jobs, and all job/
@@ -72,8 +79,8 @@ by domain transaction, not by source file.
 ## W5: Regroup
 
 - Authority: grouping config fingerprint and stored raw labels.
-- Transaction: bounded batches update only receiver/group ID/group-label snapshot
-  and regroup metadata.
+- Transaction: each bounded batch uses one Store-owned `BEGIN IMMEDIATE` transaction
+  to update only receiver/group ID/group-label snapshot and regroup metadata.
 - Forbidden: lifecycle dimensions, targets, evidence, raw match labels, source
   relations, or event history change.
 - Readers: merged alert APIs and regroup warning.

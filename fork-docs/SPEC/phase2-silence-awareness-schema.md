@@ -71,18 +71,26 @@ status-only or repeated observations do not.
 
 ### 2.4 Persistent recheck input and progress
 
+The immutable candidate table described below is the approved replacement contract,
+not the current runtime behavior. The current implementation can attach eligible
+alerts after job creation and reads some correctness-critical observation data from
+mutable current rows. These are known violations tracked in
+`silence-recheck-problems.md` and must not be described as implemented until Problem
+2 passes its production sequence tests.
+
 | Table | Identity | Ownership |
 |---|---|---|
 | `silence_recheck_jobs` | `job_id` | FIFO context, status, counters, timing, preserved root error |
 | `silence_recheck_job_rules` | `(job_id, source_name, rule_id)` | Immutable successful-source, target-qualified revision set |
-| `silence_recheck_job_candidates` | `(job_id, alert_id)` | Immutable candidate membership with nullable `processed_at` |
+| `silence_recheck_job_candidates` | `(job_id, alert_id)` | Planned immutable candidate decision input with nullable `processed_at` |
 
-Job creation pins both the complete decision rules and candidate membership. The
-worker never discovers its correctness-critical page by scanning mutable rows with
-a keyset cursor. It reads unprocessed candidate rows, revalidates current eligibility,
-and marks each terminal outcome in the same batch transaction. `cursor_alert_id` in
-the job parent is only a persisted diagnostic last-processed marker; candidate
-membership and `processed_at` own resume correctness.
+The approved replacement will pin both the complete decision rules and candidate
+membership at job creation. Until Problem 2 is implemented, late candidate
+attachment and fresh reads of mutable observation data remain known violations. The
+replacement worker will read unprocessed candidate rows and mark each terminal
+outcome in the same batch transaction. `cursor_alert_id` in the job parent is only a
+persisted diagnostic last-processed marker; the replacement candidate membership and
+`processed_at` will own resume correctness.
 
 Jobs are strict FIFO. A failed predecessor keeps its first `last_error` and blocks
 later jobs. Crash/restart resumes the same pinned rules and remaining candidates.

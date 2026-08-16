@@ -64,7 +64,20 @@ Required checks for this model:
 
 ## 8. Write and transaction contract
 
-- All lifecycle Store writers are serialized inside one process; background regroup, housekeeping, poll, resolve, and silence recheck must not race as independent SQLite writers.
+- All lifecycle Store writers are serialized inside one process through one
+  Store-owned SQLite writer connection. The writer boundary starts
+  `BEGIN IMMEDIATE` before background regroup, housekeeping, poll, resolve, or
+  silence recheck reads mutable lifecycle state.
+- `Store.db` remains a multi-connection read pool. Read-only preview, autocomplete,
+  merge, stats, and warning queries do not wait on `Store.writeMu` merely because a
+  writer transaction exists.
+- Writer transaction callbacks commit exactly once on success and roll back on
+  callback errors and panic paths. An uncertain commit discards the writer
+  connection and replaces it under writer ownership before another mutation.
+- `journal_mode(WAL)` and `auto_vacuum(INCREMENTAL)` are persistent setup PRAGMAs
+  executed and verified only through the owned writer connection before schema
+  bootstrap. They are never run by read-pool connections or on connection
+  replacement.
 - Long-running regroup/recheck work is split into transactions so the writer lock is released between batches.
 - Poll transaction order is source/silence reconciliation first, then alert state/events/live cause history, then commit.
 - A failed source refresh updates health only and preserves the last successful source set and fingerprint.

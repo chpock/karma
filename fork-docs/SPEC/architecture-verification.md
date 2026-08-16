@@ -13,7 +13,25 @@ go test ./cmd/karma -timeout 600s
 
 Coverage includes pure/fuzz lifecycle invariants, target topology, sticky multi-job
 causes, FIFO failure blocking, HA inconsistency, fresh schema v1 bootstrap/reopen,
-restart, and the recorded traffic replay.
+restart, schema-layout fingerprint validation, and the recorded traffic replay.
+
+SQLite writer ownership is covered by:
+
+- `TestDeferredTransactionReturnsBusyCodeWhenWriterIsHeld` and
+  `TestDeferredTransactionReturnsSnapshotCodeAfterWriterCommit`, which distinguish
+  SQLite primary code `5` from extended snapshot code `517`;
+- `TestWALReaderContinuesWhileImmediateWriterIsOpen`, which preserves read
+  concurrency;
+- `TestConfiguredStoreWriterTransactionsStartImmediately`,
+  `TestRecheckWaitsForWriterBeforeSelectingJob`, and
+  `TestRecheckCannotSelectJobBeforeWriterTransactionStarts`, which verify immediate
+  acquisition before queue selection;
+- `TestRecheckWriterAcquisitionFailureLeavesQueuedJobUntouched`, which proves a
+  pre-selection failure cannot poison a job; and
+- `TestWriterConnectionReplacementReestablishesConnectionLocalSettings`,
+  `TestWriterTransactionRollsBackOnCallbackError`, and
+  `TestWriterTransactionRollsBackOnPanic`, which cover replacement and transaction
+  cleanup.
 
 Effective suppression explainability is covered by:
 

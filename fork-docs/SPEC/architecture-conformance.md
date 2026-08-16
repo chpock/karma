@@ -1,6 +1,7 @@
 # Architecture Conformance Matrix
 
-Status: implemented.
+Status: implemented except for rows explicitly marked `Known violation; tracked by
+silence-recheck-problems.md`.
 
 This document is the finite traceability contract for the alert lifecycle and
 silence editor work. A decision is not implemented merely because a schema field
@@ -44,11 +45,11 @@ The executable test coverage for these contracts is summarized in
 | D7 | Preserve HA member disagreement including silence identity; persistent warning until convergence | identity-aware cluster fingerprint, Stats/warning | HA ID/payload/failure/convergence sequence | Implemented |
 | D8 | `is_suppression_retained` proposal is superseded | N/A | schema absence | Superseded by D13 |
 | D9 | Match only original raw labels; missing labels remain unknown | raw-label index, `match_labels_json` | raw-label exclusion tests | Implemented |
-| D10 | Persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats | exhaustive source matrix, cursor-transition, reassignment, FIFO tests | Implemented |
+| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats | planned Problem 2-4 sequence matrix | Known violation; tracked by `silence-recheck-problems.md` |
 | D11 | Earlier many-to-many event linkage proposal is superseded | N/A | schema absence | Superseded by D15/D20 |
 | D12 | Revision only on normalized content/updatedAt/new episode; not repeated/status-only poll | latest-revision boundary and HA-wide episode closure | revision sequence and `TestSilenceEpisodeClosesOnlyAfterConfirmedHAWideAbsence` | Implemented; A→B→A appends and reappearance starts a new episode |
 | D13 | One normalized `is_suppressed` axis with strict live invariant | projection/live validation | projection tests | Implemented |
-| D14 | Recheck promotion CAS uses expected `last_seen_at` plus semantic predicates | global and target promotion SQL | `TestGlobalAndTargetPromotionCASRejectStaleObservation` | Implemented |
+| D14 | Required contract: recheck promotion CAS uses the candidate's expected `last_seen_at` plus semantic predicates | global and target promotion SQL | planned Problem 2 immutable-input sequence tests | Known violation; tracked by `silence-recheck-problems.md` |
 | D15 | Recheck only eligible inactive states; exact immutable cause set; no later re-match | target cause histories + aggregate links + effective-cause merge reader | target-only/multi-job/restart evidence and retained-card tests | Implemented |
 | D16 | Missing live silence payload stores unresolved member, never synthetic revision | live cause writer | `TestLiveSuppressionCauseResolvesLaterWithoutRewritingHistory` | Implemented |
 | D17 | One mutable current source set; immutable copy only per meaningful evaluation context | evaluation-aware source fingerprint and pinned job rules | open-predecessor matcher-successor test | Implemented |
@@ -56,7 +57,7 @@ The executable test coverage for these contracts is summarized in
 | D19 | Enqueue only promotion-capable context, including failed/invalid→success recovery | previous/next evaluation-state diff | recovery and `TestRecheckEnqueueUsesPromotionCapableEvaluationChangesOnly` | Implemented |
 | D20 | One event links directly to one complete cause set | global/target event-cause transactions | FK, multi-job and restart tests | Implemented |
 | D21 | Retain non-completed/referenced/latest completed jobs; clean older unreferenced | housekeeping | `TestRunHousekeepingCleansCompletedUnreferencedJobs` | Implemented |
-| D22 | Lease/fencing deferred; all derived writes pass one reconciler transaction boundary | runtime integration | writer-serialization test | Implemented |
+| D22 | Lease/fencing deferred; all derived writes pass one Store-owned immediate-writer transaction boundary | runtime integration | `TestStoreSerializesConcurrentWriters`, writer ownership regression matrix | Implemented |
 
 ## 3. Silence Editor Decisions Q1-Q24
 
@@ -105,11 +106,11 @@ boundary without claiming success.
 
 Lifecycle writers:
 
-- `Store.ApplyPollCycle`: live/global/target observation, disappearance, source reconciliation, job enqueue, live causes.
-- `Store.RunSilenceRecheckBatch`: target/global promotion CAS, events, recheck causes.
-- `Store.ResolveAlert`: global/target manual resolution and events.
-- `Store.RunHousekeeping`: lifecycle/silence/job retention and vacuum.
-- `Store.RunRegroupBatch`: grouping metadata only; must not change matching/lifecycle dimensions.
+- `Store.ApplyPollCycle`: live/global/target observation, disappearance, source reconciliation, job enqueue, live causes; one Store-owned immediate writer transaction.
+- `Store.RunSilenceRecheckBatch`: target/global promotion CAS, events, recheck causes; one immediate writer transaction per batch.
+- `Store.ResolveAlert`: global/target manual resolution and events; one immediate writer transaction.
+- `Store.RunHousekeeping`: lifecycle/silence/job retention and vacuum; writer ownership spans cleanup, vacuum, and vacuum metadata.
+- `Store.RunRegroupBatch`: grouping metadata only; must not change matching/lifecycle dimensions; one immediate writer transaction per batch.
 
 Lifecycle readers:
 
@@ -130,14 +131,15 @@ adding its invariant/test mapping.
 
 ## 6. Transaction And Failure Invariants
 
-1. Poll fetches occur outside the database; one short transaction applies one complete observation.
-2. State row, transition event, cause parent, cause members, and job references commit atomically.
-3. Failed source fetch updates health only and preserves last-confirmed relations/fingerprint.
-4. Stale recheck CAS is a successful no-op, never an error requiring compensating writes.
-5. Manual resolve and live reappearance cannot be overwritten by an old recheck job.
-6. A mutating silence request is attempted exactly once per user action; ambiguous outcomes block retry in the current modal until close.
-7. A failed/stale status request cannot fill or open the compact editor.
-8. Process restart may discard preview RAM state, but not job input/progress/domain state.
+1. Poll fetches occur outside the database; one short immediate-writer transaction applies one complete observation.
+2. Every lifecycle mutation starts on the Store-owned writer connection in immediate mode before mutable-state reads; read-only queries use the multi-connection pool.
+3. State row, transition event, cause parent, cause members, and job references commit atomically.
+4. Failed source fetch updates health only and preserves last-confirmed relations/fingerprint.
+5. Stale recheck CAS is a successful no-op, never an error requiring compensating writes.
+6. Manual resolve and live reappearance cannot be overwritten by an old recheck job.
+7. A mutating silence request is attempted exactly once per user action; ambiguous outcomes block retry in the current modal until close.
+8. A failed/stale status request cannot fill or open the compact editor.
+9. Process restart may discard preview RAM state, but not job input/progress/domain state.
 
 ## 7. Consolidation Evidence
 

@@ -80,6 +80,19 @@ Operationally:
 
 ## 7. SQLite writer contract
 
+- Runtime mutations use one Store-owned SQLite writer connection and one writer
+  ownership boundary. The boundary acquires `Store.writeMu` and starts
+  `BEGIN IMMEDIATE` before the operation reads mutable lifecycle state.
+- The shared `database/sql` pool remains multi-connection for read-only operations;
+  preview, autocomplete, merge, stats, and warning reads are not serialized behind
+  the writer mutex.
+- The writer connection is acquired during Store startup, retained for the Store
+  lifetime, closed before the read pool, and replaced under writer ownership when
+  transaction completion leaves its driver state uncertain.
+- Runtime setup applies and verifies `journal_mode=WAL` and
+  `auto_vacuum=INCREMENTAL` only through the owned writer connection. The shared DSN
+  contains connection-local settings and `_txlock=immediate`, but no write-capable
+  setup PRAGMAs.
 - Runtime write operations are serialized by the lifecycle Store.
 - Regroup and silence recheck release the writer between batches, so poll/resolve/housekeeping can make progress.
 - SQLite also uses a 5-second busy timeout for brief locks outside the Store process.

@@ -44,6 +44,107 @@ func TestOpenStoreBootstrapsSchema(t *testing.T) {
 	if busyTimeout != 5000 {
 		t.Fatalf("unexpected busy_timeout: got=%d want=5000", busyTimeout)
 	}
+	var fingerprint string
+	if err = store.db.QueryRow(`SELECT value FROM metadata WHERE key=?`, metaSchemaLayoutFingerprint).Scan(&fingerprint); err != nil {
+		t.Fatalf("failed reading schema layout fingerprint: %v", err)
+	}
+	if fingerprint != expectedSchemaLayoutFingerprint {
+		t.Fatalf("unexpected schema layout fingerprint: got=%q want=%q", fingerprint, expectedSchemaLayoutFingerprint)
+	}
+}
+
+func TestOpenStoreReopensMatchingSchemaLayout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatalf("OpenStore() did not reopen matching schema: %v", err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenStoreRejectsSchemaLayoutDriftWithoutChangingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE unexpected_layout_change(value TEXT NOT NULL)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = OpenStore(StoreOptions{Path: path})
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "schema layout fingerprint mismatch") {
+		t.Fatalf("expected schema layout mismatch, got %v", err)
+	}
+
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='unexpected_layout_change'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("schema drift marker was not preserved: count=%d", count)
+	}
+}
+
+func TestOpenStoreRejectsSchemaLayoutMetadataRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`DELETE FROM metadata WHERE key='schema_layout_fingerprint'`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = OpenStore(StoreOptions{Path: path})
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "missing schema layout fingerprint") {
+		t.Fatalf("expected missing schema layout fingerprint error, got %v", err)
+	}
 }
 
 func TestOpenStoreRejectsNonV1SchemaWithoutChangingIt(t *testing.T) {
@@ -52,7 +153,7 @@ func TestOpenStoreRejectsNonV1SchemaWithoutChangingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO metadata(key, value) VALUES('schema_version', '2')`); err != nil {
+	if _, err = db.Exec(`PRAGMA auto_vacuum=2; CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO metadata(key, value) VALUES('schema_version', '2')`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
