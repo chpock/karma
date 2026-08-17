@@ -3,7 +3,8 @@ http response prometheus /api/v1/query_range 200 {"status":"success","data":{"re
 http start prometheus 127.0.0.1:9108
 
 exec bash -x ./test.sh &
-exec karma --pid-file=karma.pid --config.file=karma.yaml
+! exists karma-state
+exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid --config.file=karma.yaml
 ! stdout .
 cmp stderr stderr.txt
 wait
@@ -26,8 +27,8 @@ level=INFO msg="Collection completed"
 level=INFO msg="Done, starting HTTP server"
 level=INFO msg="Starting HTTP server" address=127.0.0.1:8108
 level=INFO msg="Shutting down HTTP server" signal=terminated
-level=INFO msg="HTTP server shut down"
 level=INFO msg="Removing PID file" path=karma.pid
+level=INFO msg="HTTP server shut down"
 -- query.json --
 {
     "sources": [
@@ -54,7 +55,9 @@ history:
       uri: '$1'
       proxy_url: http://127.0.0.1:9108
 -- test.sh --
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 2s
 sleep 5
 curl -s -f -o /dev/null -XPOST -d @query.json http://127.0.0.1:8108/history.json
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state

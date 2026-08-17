@@ -29,9 +29,124 @@ SQLite writer ownership is covered by:
 - `TestRecheckWriterAcquisitionFailureLeavesQueuedJobUntouched`, which proves a
   pre-selection failure cannot poison a job; and
 - `TestWriterConnectionReplacementReestablishesConnectionLocalSettings`,
-  `TestWriterTransactionRollsBackOnCallbackError`, and
-  `TestWriterTransactionRollsBackOnPanic`, which cover replacement and transaction
-  cleanup.
+  `TestWriterTransactionRollsBackOnCallbackError`,
+  `TestWriterTransactionRollsBackOnPanic`,
+  `TestWriterRollbackIsOwnedByHelperExactlyOnce`,
+  `TestWriterCommitErrorWithDurableTokenReconcilesAsSuccess`,
+  `TestWriterCommitErrorWithoutDurableTokenIsNotUnknown`,
+  `TestWriterCommitLookupFailureBlocksMutationUntilLaterReconciliation`, and
+  `TestCloseWaitsForWriterAndRejectsLaterMutation`, which cover replacement,
+  typed commit outcomes, reconciliation blocking, rollback ownership, and lifecycle
+  cleanup;
+- `TestHousekeepingCleanupAndVacuumUseSeparateWriterTransactions`,
+  `TestRegroupBeginBatchAndCompletionUseRealWriterPhases`,
+  `TestRegroupResumePreservesCursorAndProgress`,
+  `TestRegroupFailureWritesErrorMetadataThroughWriter`,
+  and `TestResolveWriterPhaseUpdatesGlobalAndAllTargetRows`, which exercise real
+  mutation phases with separate transaction-start barriers;
+- `TestOpenStorePartialFailuresCloseAcquiredResourcesInOrder`, which verifies
+  partial startup cleanup after each acquired resource;
+- `TestWriterCommitLedgerUsesExplicitHousekeepingRetention` and
+  `TestOpenStoreRejectsUnknownApplicationView`, which cover ledger retention and
+  view-aware schema fingerprint rejection;
+- `TestRecheckUnknownCommitDoesNotPersistFalseFailedJob`, which proves an unknown
+  commit cannot be converted into a persisted failed job or a duplicate mutation.
+- `TestRegroupWriterAcquisitionFailureDoesNotPersistDomainFailure`, the recheck
+  acquisition aggregate regression, and the bad-connection/cancellation acquisition
+  tests, which preserve domain state and classify writer acquisition as infrastructure;
+- `TestWriterCancellationBeforeLedgerInsertWithoutHookDoesNotCommit`, together with
+  the hook-boundary cancellation regression, which proves the production no-hook path
+  uses the same rollback contract and context-bound ledger insert;
+- `TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID`, which manually releases
+  the startup deadline after a causal child-start signal and verifies force-kill, reap,
+  and timeout diagnostics.
+
+The writer smoke test is not matrix evidence. The mutation-specific evidence is:
+
+- fresh bootstrap/schema fingerprint: `TestOpenStoreBootstrapsSchema` and
+  `TestOpenStoreBootstrapsPhase2Tables`;
+- upsert and current-state side effects: `TestUpsertAndReadCurrentAlert`;
+- transition insert: `TestInsertStateTransition`;
+- poll and immutable transaction-local event payloads:
+  `TestPollEventPayloadOrderingIsStableAcrossAlertsTargetsSourcesAndSilences` and
+  `TestPollEventsAreOwnedByTheirTransactionWhenTimestampsMatch`;
+- resolve: `TestResolveAlertSuccessFromInactive` and
+  `TestResolveWriterPhaseUpdatesGlobalAndAllTargetRows`;
+- housekeeping cleanup/retention/vacuum:
+  `TestHousekeepingCleanupAndVacuumUseSeparateWriterTransactions`;
+- regroup begin/resume/batch/completion/failure:
+  `TestRegroupBeginBatchAndCompletionUseRealWriterPhases`,
+  `TestRegroupResumesAfterDelayedBeginCommitReconciliation`,
+  `TestRegroupResumesAfterDelayedBatchCommitReconciliation`, and
+  `TestRegroupFailureWritesErrorMetadataThroughWriter`;
+- recheck batch/completion/failure: `TestRecheckZeroCandidateJobEmitsStartThenCompletion`,
+  `TestRecheckFailurePersistenceIsSeparateWriterPhase`, and
+  `TestRecheckCancellationBeforeLedgerInsertDoesNotCommit`.
+
+Delayed-reconciliation and shutdown coverage additionally includes:
+
+- `TestRegroupResumesAfterDelayedBeginCommitReconciliation` and
+  `TestRegroupResumesAfterDelayedBatchCommitReconciliation`, which prove delayed
+  commit handoff resumes the same regroup owner without rerunning a committed phase;
+- `TestRecheckWriterInvariantAfterSelectionDoesNotFailJob` and the zero-candidate
+  queued/running tests, which keep writer infrastructure errors out of job failure
+  state and preserve start/resume before completion events;
+- `TestPollEventsAreOwnedByTheirTransactionWhenTimestampsMatch`, which proves a
+  delayed poll finalizer cannot replay another transaction's rows;
+- `TestApplicationShutdownDrainsHTTPBeforeHistoryAndStore`,
+  `TestApplicationShutdownTimeoutDoesNotCloseHistoryOrStore`, and
+  `TestApplicationShutdownPropagatesStoreCloseError`, which cover the post-poll
+  grace-period boundary and close-error propagation; and
+- `TestHistoryPollerStartupReportsStopWinner`, which verifies startup readiness is
+  an explicit result rather than a signal-only channel.
+
+Problem 1 remediation is complete and independently accepted. The verification below
+names PID ownership, exact regroup severity, deterministic ordering, and real-component
+coverage.
+
+Additional writer/shutdown evidence includes:
+
+- `TestPIDLeaseRejectsExistingPathWithoutChangingIt`,
+  `TestPIDLeaseDoesNotFollowSymlinkOrDirectory`,
+  `TestPIDLeaseAcquireWriteRelease`, replacement detection, partial-write cleanup,
+  identity-retry cleanup, and startup cleanup with an unowned pre-existing file;
+- `TestRegroupInfrastructureReasonSeverityUsesExactPairs`, the structured expected
+  shutdown/external cancellation logs, and exact stage/reason validation;
+- `TestRegroupOwnerStopJoinsWorkerWithoutElapsedOrderingProof` and concurrent-stop
+  arbitration, plus real command-owner start/join tests;
+- `TestStoreWorkersCancellationAtWriterBoundaryDoesNotPersistFailure` for regroup and
+  housekeeping, `TestRecheckCancellationBeforeLedgerInsertDoesNotCommit`, and the
+  transaction-local poll permutation test covering alerts, targets, sources, and
+  silences without mutating caller input; and
+- the native Windows PID lease test job in `.github/workflows/test.yml`, which accepts
+  an explicit review SHA, prints and verifies the checked-out tree identity, and runs
+  the Windows filesystem tests.
+
+The accepted Problem 1 commit gate is reproducible with:
+
+```sh
+go test -race ./cmd/karma \
+  -run TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID -count=100 -timeout 180s
+go test -race ./cmd/karma \
+  -run 'TestScripts/(096_tls_client|098_proxy_url_request)' \
+  -count=5 -timeout 300s
+go test -race ./internal/fork/alertlifecycle \
+  -run 'TestWriterCommitRecoveryDoesNotUseCanceledOperationContext|TestRegroupWriterAcquisitionFailureDoesNotPersistDomainFailure|TestRecheckWriterAcquisitionFailureLeavesQueuedJobUntouched|TestWriterCancellationBeforeLedgerInsertWithoutHookDoesNotCommit' \
+  -count=50 -timeout 180s
+go test ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test ./cmd/karma -count=1 -timeout 180s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test -race ./cmd/karma -count=1 -timeout 180s
+go test ./... -count=1 -timeout 180s
+make lint
+git diff --check
+GOOS=windows GOARCH=amd64 go test -c ./cmd/karma \
+  -o /tmp/karma-cmd-windows.test.exe
+rm -f /tmp/karma-cmd-windows.test.exe
+```
+
+The Windows command is local cross-compilation only; native Windows execution is not a
+Problem 1 completion requirement.
 
 Effective suppression explainability is covered by:
 

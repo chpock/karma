@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/prymitive/karma/internal/alertmanager"
 )
@@ -12,6 +13,27 @@ import (
 const (
 	maxTries = 2
 )
+
+type alertPollLoop struct {
+	mu       sync.Mutex
+	stopping bool
+}
+
+func newAlertPollLoop() *alertPollLoop {
+	return &alertPollLoop{}
+}
+
+func (p *alertPollLoop) beginPoll() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.stopping
+}
+
+func (p *alertPollLoop) stop() {
+	p.mu.Lock()
+	p.stopping = true
+	p.mu.Unlock()
+}
 
 func pullFromAlertmanager() {
 	// always flush cache once we're done
@@ -67,8 +89,18 @@ func pullFromAlertmanager() {
 }
 
 // Tick is the background timer used to call PullFromAlertmanager
-func Tick() {
-	for range ticker.C {
-		pullFromAlertmanager()
+
+func Tick(loop *alertPollLoop, ticks <-chan time.Time, stop <-chan struct{}, done chan<- struct{}, pull func()) {
+	defer close(done)
+	for {
+		select {
+		case <-ticks:
+			if !loop.beginPoll() {
+				return
+			}
+			pull()
+		case <-stop:
+			return
+		}
 	}
 }

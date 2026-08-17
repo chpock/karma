@@ -14,9 +14,7 @@ import (
 
 var lifecycleStore *alertlifecycle.Store
 
-var lifecycleRegroup struct {
-	cancel context.CancelFunc
-}
+var lifecycleRegroup regroupOwner
 
 func setupAlertLifecycleStorage() error {
 	if !config.Config.AlertLifecycle.Enabled {
@@ -49,18 +47,17 @@ func setupAlertLifecycleStorage() error {
 	return nil
 }
 
-func closeAlertLifecycleStorage() {
-	stopAlertLifecycleBackgroundRegroup()
-	stopAlertLifecycleHousekeeping()
-
+func closeAlertLifecycleStore() error {
 	if lifecycleStore == nil {
-		return
+		return nil
 	}
-	if err := lifecycleStore.Close(); err != nil {
+	err := lifecycleStore.Close()
+	if err != nil {
 		runtimeLog.Error("alert_lifecycle", "storage_close_failed", "Failed to close alert lifecycle storage", slog.Any("error", err))
 	}
 	lifecycleStore = nil
 	runtimeLog.Debug("alert_lifecycle", "background_workers_stopped", "Alert lifecycle background workers stopped")
+	return err
 }
 
 func startAlertLifecycleBackgroundRegroup() {
@@ -75,37 +72,61 @@ func startAlertLifecycleBackgroundRegroup() {
 		LabelsStripRegex: append([]string{}, config.Config.Labels.StripRegex...),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	lifecycleRegroup.cancel = cancel
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan struct{})
+	if !lifecycleRegroup.start(done, regroupOwnerDependencies(cancel, done)) {
+		cancel(alertlifecycle.ErrRegroupExpectedShutdown)
+		return
+	}
 
 	go func() {
+		defer close(done)
 		startedAt := time.Now()
 		result, err := lifecycleStore.RunRegroupToConfig(ctx, cfg, 1000)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				runtimeLog.Event(ctx, slog.LevelDebug, "lifecycle_regroup", "regroup_cancelled", "Alert lifecycle regroup cancelled", slog.Duration("duration", time.Since(startedAt)))
-				return
-			}
-			runtimeLog.Event(ctx, slog.LevelError, "lifecycle_regroup", "regroup_failed", "Alert lifecycle background regroup failed", slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
-			return
-		}
-		if result.Processed == 0 && result.Updated == 0 {
-			runtimeLog.Event(ctx, slog.LevelDebug, "lifecycle_regroup", "regroup_not_required", "Alert lifecycle regroup is not required", slog.Int("total", result.Total), slog.Duration("duration", time.Since(startedAt)))
-			return
-		}
-		runtimeLog.Event(ctx, slog.LevelInfo,
-			"lifecycle_regroup", "regroup_completed", "Alert lifecycle background regroup completed",
-			slog.Int("processed", result.Processed),
-			slog.Int("updated", result.Updated),
-			slog.Int("total", result.Total),
-			slog.Duration("duration", time.Since(startedAt)),
-		)
+		logAlertLifecycleRegroupResult(ctx, cfg, startedAt, result, err)
 	}()
 }
 
-func stopAlertLifecycleBackgroundRegroup() {
-	if lifecycleRegroup.cancel != nil {
-		lifecycleRegroup.cancel()
-		lifecycleRegroup.cancel = nil
+func logAlertLifecycleRegroupResult(ctx context.Context, cfg alertlifecycle.GroupingConfig, startedAt time.Time, result alertlifecycle.RegroupResult, err error) {
+	if err != nil {
+		var infrastructureErr *alertlifecycle.RegroupInfrastructureError
+		if errors.As(err, &infrastructureErr) {
+			if !infrastructureErr.Valid() {
+				runtimeLog.ErrorContext(ctx, "lifecycle_regroup", "regroup_infrastructure_contract_violation", "Invalid regroup infrastructure contract", slog.String("stage", string(infrastructureErr.Stage)), slog.String("reason_code", string(infrastructureErr.ReasonCode)), slog.Any("error", errors.Join(alertlifecycle.ErrRegroupInfrastructureContract, err)))
+				return
+			}
+			if isDirectRegroupCancellation(infrastructureErr.Stage, infrastructureErr.ReasonCode) {
+				level := regroupInfrastructureLogLevel(infrastructureErr.Stage, infrastructureErr.ReasonCode, infrastructureErr.ExpectedShutdown)
+				runtimeLog.Event(ctx, level, "lifecycle_regroup", "regroup_cancelled", "Alert lifecycle regroup cancelled", slog.String("reason_code", string(infrastructureErr.ReasonCode)), slog.Bool("expected_shutdown", infrastructureErr.ExpectedShutdown), slog.Duration("duration", time.Since(startedAt)))
+				return
+			}
+			level := regroupInfrastructureLogLevel(infrastructureErr.Stage, infrastructureErr.ReasonCode, infrastructureErr.ExpectedShutdown)
+			runtimeLog.Event(ctx, level, "lifecycle_regroup", "regroup_infrastructure_blocked", "Alert lifecycle regroup infrastructure blocked progress", slog.String("target_fingerprint", alertlifecycle.BuildGroupingFingerprint(cfg)), slog.String("stage", string(infrastructureErr.Stage)), slog.String("reason_code", string(infrastructureErr.ReasonCode)), slog.Int("processed", infrastructureErr.Processed), slog.Int("total", infrastructureErr.Total), slog.Any("error", infrastructureErr), slog.Duration("duration", time.Since(startedAt)))
+			return
+		}
+		if errors.Is(err, alertlifecycle.ErrRegroupFailurePersisted) {
+			return
+		}
+		if errors.Is(err, context.Canceled) {
+			runtimeLog.Event(ctx, slog.LevelWarn, "lifecycle_regroup", "regroup_cancelled", "Alert lifecycle regroup cancelled", slog.Bool("expected_shutdown", false), slog.Duration("duration", time.Since(startedAt)))
+			return
+		}
+		runtimeLog.Event(ctx, slog.LevelError, "lifecycle_regroup", "regroup_infrastructure_blocked", "Alert lifecycle regroup returned an unclassified error", slog.String("target_fingerprint", alertlifecycle.BuildGroupingFingerprint(cfg)), slog.String("stage", "unknown"), slog.String("reason_code", string(alertlifecycle.RegroupReasonUnclassifiedError)), slog.Int("processed", result.Processed), slog.Int("total", result.Total), slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
+		return
 	}
+	if result.Processed == 0 && result.Updated == 0 {
+		runtimeLog.Event(ctx, slog.LevelDebug, "lifecycle_regroup", "regroup_not_required", "Alert lifecycle regroup is not required", slog.Int("total", result.Total), slog.Duration("duration", time.Since(startedAt)))
+		return
+	}
+	runtimeLog.Event(ctx, slog.LevelInfo,
+		"lifecycle_regroup", "regroup_completed", "Alert lifecycle background regroup completed",
+		slog.Int("processed", result.Processed),
+		slog.Int("updated", result.Updated),
+		slog.Int("total", result.Total),
+		slog.Duration("duration", time.Since(startedAt)),
+	)
+}
+
+func stopAlertLifecycleBackgroundRegroup() {
+	lifecycleRegroup.stop(alertlifecycle.ErrRegroupExpectedShutdown)
 }

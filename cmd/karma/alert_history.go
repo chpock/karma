@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -62,8 +63,11 @@ func alertHistory(historyPoller *historyPoller, w http.ResponseWriter, r *http.R
 	errors := []string{}
 
 	for _, source := range payload.Sources {
-		results := make(chan historyQueryResult)
-		historyPoller.submit(source, payload.Labels, results)
+		results := make(chan historyQueryResult, 1)
+		if err := historyPoller.submit(source, payload.Labels, results); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %s", source, err))
+			continue
+		}
 		r := <-results
 		if r.err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %s", source, r.err))
@@ -126,11 +130,19 @@ type knownBadUpstream struct {
 
 type historyPoller struct {
 	queue        chan historyJob
+	stopCh       chan struct{}
+	done         chan struct{}
+	startResult  chan error
 	knownBad     *lru.Cache[string, *knownBadUpstream]
 	cache        *lru.Cache[string, *cachedOffsets]
 	queryTimeout time.Duration
 	isRunning    atomic.Bool
+	runStarted   atomic.Bool
+	stopOnce     sync.Once
+	submitMu     sync.RWMutex
 }
+
+var errHistoryPollerStopped = errors.New("history poller is stopped")
 
 func newHistoryPoller(queueSize int, queryTimeout time.Duration) *historyPoller {
 	slog.Debug("Starting history poller", slog.Int("queue", queueSize), slog.Duration("timeout", queryTimeout))
@@ -138,6 +150,9 @@ func newHistoryPoller(queueSize int, queryTimeout time.Duration) *historyPoller 
 	knownBad, _ := lru.New[string, *knownBadUpstream](100)
 	return &historyPoller{
 		queue:        make(chan historyJob, queueSize),
+		stopCh:       make(chan struct{}),
+		done:         make(chan struct{}),
+		startResult:  make(chan error, 1),
 		queryTimeout: queryTimeout,
 		knownBad:     knownBad,
 		cache:        cache,
@@ -145,25 +160,64 @@ func newHistoryPoller(queueSize int, queryTimeout time.Duration) *historyPoller 
 }
 
 func (hp *historyPoller) run(workers int) {
-	hp.isRunning.Store(true)
-	wg := sync.WaitGroup{}
-	for w := 1; w <= workers; w++ {
-		wg.Go(func() {
-			hp.startWorker(w)
-		})
+	if !hp.runStarted.CompareAndSwap(false, true) {
+		return
 	}
+	defer close(hp.done)
+	defer hp.isRunning.Store(false)
+	wg := sync.WaitGroup{}
+	hp.submitMu.Lock()
+	select {
+	case <-hp.stopCh:
+		hp.submitMu.Unlock()
+		hp.startResult <- errHistoryPollerStopped
+		return
+	default:
+		hp.isRunning.Store(true)
+		for w := 1; w <= workers; w++ {
+			wg.Go(func() {
+				hp.startWorker(w)
+			})
+		}
+		hp.submitMu.Unlock()
+	}
+	hp.startResult <- nil
 	wg.Wait()
 }
 
 func (hp *historyPoller) stop() {
-	slog.Debug("Stopping history poller")
-	hp.isRunning.Store(false)
-	close(hp.queue)
+	hp.stopWithLog(true)
 }
 
-func (hp *historyPoller) submit(uri string, labels map[string]string, result chan<- historyQueryResult) {
-	if hp.isRunning.Load() {
-		hp.queue <- historyJob{uri: uri, labels: labels, result: result}
+func (hp *historyPoller) stopQuiet() {
+	hp.stopWithLog(false)
+}
+
+func (hp *historyPoller) stopWithLog(logStop bool) {
+	if logStop {
+		slog.Debug("Stopping history poller")
+	}
+	hp.submitMu.Lock()
+	hp.isRunning.Store(false)
+	hp.stopOnce.Do(func() { close(hp.stopCh) })
+	hp.submitMu.Unlock()
+	if hp.runStarted.Load() {
+		<-hp.done
+	}
+}
+
+func (hp *historyPoller) submit(uri string, labels map[string]string, result chan<- historyQueryResult) error {
+	hp.submitMu.RLock()
+	defer hp.submitMu.RUnlock()
+	if !hp.isRunning.Load() {
+		return errHistoryPollerStopped
+	}
+	job := historyJob{uri: uri, labels: labels, result: result}
+	select {
+	case <-hp.stopCh:
+		return errHistoryPollerStopped
+	case hp.queue <- job:
+		return nil
 	}
 }
 
@@ -191,7 +245,14 @@ func (hp *historyPoller) knownBadLookup(key string) (*knownBadUpstream, bool) {
 
 func (hp *historyPoller) startWorker(wid int) {
 	slog.Debug("Starting history poller", slog.Int("worker", wid), slog.Int("queue", cap(hp.queue)), slog.Duration("timeout", hp.queryTimeout))
-	for j := range hp.queue {
+	for {
+		var j historyJob
+		select {
+		case <-hp.stopCh:
+			hp.rejectQueuedJobs()
+			return
+		case j = <-hp.queue:
+		}
 		sourceURI, headers := rewriteSource(config.Config.History.Rewrite, j.uri)
 		expiredAt := time.Now().Add(time.Minute * -5)
 		key := hashQuery(sourceURI, j.labels)
@@ -243,6 +304,17 @@ func (hp *historyPoller) startWorker(wid int) {
 			hp.cacheSave(key, values)
 		}
 		j.result <- historyQueryResult{values: values, err: err}
+	}
+}
+
+func (hp *historyPoller) rejectQueuedJobs() {
+	for {
+		select {
+		case job := <-hp.queue:
+			job.result <- historyQueryResult{err: errHistoryPollerStopped}
+		default:
+			return
+		}
 	}
 }
 

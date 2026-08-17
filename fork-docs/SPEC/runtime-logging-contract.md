@@ -93,6 +93,7 @@ Allowed component names:
 - `silence_recheck`;
 - `lifecycle_housekeeping`;
 - `lifecycle_regroup`;
+- `lifecycle_writer`;
 - `silence_editor`;
 - `silence_preview`.
 
@@ -100,6 +101,7 @@ Common fields, when available:
 
 - `alert_id`, `silence_id`, `job_id`, `target`, `member`, `source`;
 - `operation` (`create|edit|recreate|resolve`);
+- `writer_operation` for lifecycle-writer operations (`schema_bootstrap|upsert_current_alert|insert_state_transition|housekeeping_cleanup|housekeeping_vacuum|resolve_alert|apply_poll_cycle|regroup_begin|regroup_batch|regroup_failure|recheck_batch|recheck_failure`);
 - `operator` for authenticated operator identity;
 - `mode` (`server_routed|browser_routed`);
 - `http_status`, `reason_code`, `count`, `duration`;
@@ -163,6 +165,14 @@ Repeated unchanged alerts must not produce per-alert messages. Per-transition de
 records are expected at `debug`, even for a large cycle; aggregate counts remain the
 normal `info` view.
 
+Poll transition, target, silence, episode, revision, and recheck-queue events are
+captured as immutable payloads by a transaction-local collector. The collector assigns
+an internal monotonically increasing sequence after canonical input traversal; the
+committed poll finalizer emits that payload set without reloading rows by timestamp or
+current mutable state. A metadata-collection failure is warning-level, uses a safe
+default such as `queue_depth=-1` where applicable, and never changes the transaction's
+domain outcome.
+
 ### 6.3 Manual resolve
 
 | Event | Level | Required fields and behavior |
@@ -190,6 +200,7 @@ normal `info` view.
 | `ha_disagreement_unchanged` | `debug` | Target and member count. |
 | `ha_converged` | `info` | Target and previous disagreement duration when known. |
 | `recheck_job_queued` | `info` | Job ID, opaque context ID, candidate count, queue depth, reason code. |
+| `observability_collection_failed` | `warning` | For transaction-local poll metadata only: `stage=queue_depth|event_payload`, exact `event_family`, and error; emit best-effort and never change poll outcome. |
 
 An invalid individual silence entry is absent from the successful source snapshot.
 The warning is logged once per poll occurrence. It must not create a revision,
@@ -209,6 +220,10 @@ warning.
 | `candidate_promoted` | `debug` | Job ID, alert ID, target if target-only, transition ID. |
 | `job_completed` | `info` | Job ID, total counters, total duration. |
 | `job_failed` | `error` on transition | Job ID, stage, preserved root error. |
+| `job_commit_outcome_unknown` | `error` | `writer_operation=recheck_batch`, job ID, status, queue depth, retry count, `stage=commit_reconcile`, duration. Do not persist a false failed-job state. |
+| `job_commit_reconciled` | `info` | `writer_operation` and duration when a prior durable commit is found; no callback is re-run. |
+| `job_infrastructure_blocked` | `error` except the registered cancellation/deadline and Store lifecycle classes at `debug` | `writer_operation=recheck_batch|recheck_failure`, `stage=batch|failure_persistence`, job ID, exact stage-specific reason code, error; no job failure mutation for infrastructure errors. Batch reasons are `commit_not_committed`, `writer_invariant`, `rollback_failed`, `worker_cancelled`, and `worker_deadline`. Failure-persistence reasons are `failure_persistence_commit_unknown`, `failure_persistence_not_committed`, `failure_persistence_sql_error`, `failure_persistence_rollback_failed`, `failure_persistence_writer_invariant`, `failure_persistence_writer_unavailable`, `failure_persistence_store_closing`, `failure_persistence_store_closed`, `failure_persistence_cancelled`, and `failure_persistence_deadline`. |
+| `job_infrastructure_contract_violation` | `error` | Job ID when selected, supplied stage/reason, and invariant error. Invalid stage/reason pairs are never normalized and do not mutate job state. |
 | `failed_job_blocks_queue` | `warning` once, then `debug` while unchanged | Failed job ID and queue depth. Do not overwrite the persisted root error. |
 | `queue_empty` | `debug` | Emitted at most once per worker invocation, not per candidate. |
 
@@ -229,8 +244,23 @@ warning.
 - `regroup_resumed` (`info`): target fingerprint and persisted progress.
 - `regroup_batch_completed` (`debug`): processed, updated, total, duration.
 - `regroup_completed` (`info`): totals and duration.
-- `regroup_cancelled` (`debug` during normal shutdown, otherwise `warning`).
+- `regroup_cancelled` (`debug` only for the explicit expected-shutdown cause, otherwise
+  `warning`): exact direct cancellation reason and `expected_shutdown`.
 - `regroup_failed` (`error`): target fingerprint, persisted progress, error.
+- `regroup_infrastructure_blocked` (`error`, or `debug` for Store closing/closed and
+  cancellation/deadline only when the expected-shutdown cause is present; otherwise
+  `warning`): target fingerprint, stage, exact registered reason code, persisted progress
+  when available, duration, error.
+- `regroup_infrastructure_contract_violation` (`error`): supplied stage/reason and
+  invariant error. Invalid pairs are not normalized.
+
+Lifecycle-writer events:
+
+- `writer_commit_reconciled` (`info`): `writer_operation`; no commit token.
+- `observability_collection_failed` (`error`): `writer_operation`, stage, error. Allowed stages are `panic_rollback_recovery|rollback_recovery|after_commit_handoff|after_commit_run`.
+
+Lifecycle-writer errors never log operation tokens. The `operation` field remains reserved
+for silence-editor create/edit/recreate/resolve semantics.
 
 ## 10. Silence Editor Events
 

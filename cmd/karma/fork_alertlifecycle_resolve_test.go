@@ -121,7 +121,7 @@ func setupLifecycleStoreForResolveTest(t *testing.T) *alertlifecycle.Store {
 	}
 	lifecycleStore = store
 	t.Cleanup(func() {
-		closeAlertLifecycleStorage()
+		_ = closeAlertLifecycleStore()
 	})
 
 	return store

@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"path"
 	"regexp"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,7 +36,8 @@ import (
 )
 
 var (
-	version = "dev"
+	version              = "dev"
+	runningHistoryPoller *historyPoller
 
 	// ticker is a timer used by background loop that will keep pulling
 	// data from Alertmanager
@@ -344,6 +344,7 @@ func mainSetup(errorHandling pflag.ErrorHandling) (*chi.Mux, *historyPoller, err
 	router := chi.NewRouter()
 
 	historyPoller := newHistoryPoller(100, config.Config.History.Timeout)
+	runningHistoryPoller = historyPoller
 	setupRouter(router, historyPoller)
 
 	if *validateConfig {
@@ -354,30 +355,7 @@ func mainSetup(errorHandling pflag.ErrorHandling) (*chi.Mux, *historyPoller, err
 	return router, historyPoller, nil
 }
 
-func writePidFile() error {
-	if pidFile != "" {
-		slog.Info("Writing PID file", slog.String("path", pidFile))
-		pid := os.Getpid()
-		err := os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o644)
-		if err != nil {
-			return fmt.Errorf("failed to write a PID file: %w", err)
-		}
-	}
-	return nil
-}
-
-func removePidFile() error {
-	if pidFile != "" {
-		slog.Info("Removing PID file", slog.String("path", pidFile))
-		err := os.Remove(pidFile)
-		if err != nil {
-			return fmt.Errorf("failed to remove PID file: %w", err)
-		}
-	}
-	return nil
-}
-
-func serve(errorHandling pflag.ErrorHandling) error {
+func serve(errorHandling pflag.ErrorHandling) (serveErr error) {
 	router, historyPoller, err := mainSetup(errorHandling)
 	if err != nil {
 		return err
@@ -385,29 +363,56 @@ func serve(errorHandling pflag.ErrorHandling) error {
 	if router == nil {
 		return nil
 	}
+	startupCleanupArmed := true
+	pidLease := newPIDFileLease(nil)
+	releasePID := func() error {
+		if !pidLease.Owned() {
+			return nil
+		}
+		slog.Info("Removing PID file", slog.String("path", pidLease.configuredPath))
+		return pidLease.Release()
+	}
+	startupResources := startupCleanup{
+		stopHistory:      historyPoller.stopQuiet,
+		releasePID:       releasePID,
+		stopHousekeeping: stopAlertLifecycleHousekeeping,
+		stopRegroup:      stopAlertLifecycleBackgroundRegroup,
+		closeStore:       closeAlertLifecycleStore,
+	}
+	defer func() {
+		if !startupCleanupArmed {
+			return
+		}
+		serveErr = joinStartupCleanupError(serveErr, startupResources)
+	}()
 
 	err = setupAlertLifecycleStorage()
 	if err != nil {
 		return err
 	}
 
-	err = writePidFile()
+	if pidFile != "" {
+		slog.Info("Writing PID file", slog.String("path", pidFile))
+	}
+	err = pidLease.Acquire(pidFile, os.Getpid())
 	if err != nil {
 		return err
 	}
 
 	if config.Config.History.Enabled {
+		if config.Config.History.Workers < 1 {
+			return errors.New("history worker count must be positive")
+		}
 		go historyPoller.run(config.Config.History.Workers)
+		if err = <-historyPoller.startResult; err != nil {
+			return fmt.Errorf("failed to start history poller: %w", err)
+		}
 	}
 
 	// before we start try to fetch data from Alertmanager
 	slog.Info("Initial Alertmanager collection")
 	pullFromAlertmanager()
 	slog.Info("Done, starting HTTP server")
-
-	// background loop that will fetch updates from Alertmanager
-	ticker = time.NewTicker(config.Config.Alertmanager.Interval)
-	go Tick()
 
 	listen := fmt.Sprintf("%s:%d", config.Config.Listen.Address, config.Config.Listen.Port)
 	listener, err := net.Listen("tcp", listen)
@@ -422,7 +427,15 @@ func serve(errorHandling pflag.ErrorHandling) error {
 		WriteTimeout: config.Config.Listen.Timeout.Write,
 	}
 
+	// Start the periodic poll only after the listener and shutdown resources exist.
+	ticker = time.NewTicker(config.Config.Alertmanager.Interval)
+	pollLoop := newAlertPollLoop()
+	pollStop := make(chan struct{})
+	pollDone := make(chan struct{})
+	go Tick(pollLoop, ticker.C, pollStop, pollDone, pullFromAlertmanager)
+
 	quit := make(chan os.Signal, 1)
+	defer signal.Stop(quit)
 
 	if config.Config.Listen.TLS.Cert != "" {
 		slog.Info("Starting HTTPS server", slog.String("address", listener.Addr().String()))
@@ -445,21 +458,36 @@ func serve(errorHandling pflag.ErrorHandling) error {
 	}
 
 	signal.Notify(quit, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	startupCleanupArmed = false
 	s := <-quit
 	slog.Info("Shutting down HTTP server", slog.Any("signal", s))
 
-	historyPoller.stop()
-	closeAlertLifecycleStorage()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(ctx); err != nil {
-		_ = removePidFile()
-		return fmt.Errorf("shutdown error: %w", err)
+	shutdownErr := (applicationShutdown{
+		markPollStopping: pollLoop.stop,
+		stopTicker:       ticker.Stop,
+		closePollStop:    func() { close(pollStop) },
+		waitPoll:         func() { <-pollDone },
+		newHTTPContext: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 20*time.Second)
+		},
+		shutdownHTTP:     httpServer.Shutdown,
+		closeHTTP:        httpServer.Close,
+		stopHistory:      historyPoller.stop,
+		stopRegroup:      stopAlertLifecycleBackgroundRegroup,
+		stopHousekeeping: stopAlertLifecycleHousekeeping,
+		closeStore:       closeAlertLifecycleStore,
+		releasePID:       releasePID,
+	}).run()
+	if shutdownErr != nil {
+		return fmt.Errorf("shutdown error: %w", shutdownErr)
 	}
 
 	slog.Info("HTTP server shut down")
-	return removePidFile()
+	return nil
+}
+
+func joinStartupCleanupError(startupErr error, cleanup startupCleanup) error {
+	return errors.Join(startupErr, cleanup.run())
 }
 
 func main() {

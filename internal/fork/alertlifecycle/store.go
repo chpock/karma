@@ -2,6 +2,7 @@ package alertlifecycle
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
@@ -48,7 +49,16 @@ const (
 	metaSuggestionRevisionPrefix = "suggestion_revision/"
 )
 
-const expectedSchemaLayoutFingerprint = "sha256:8905d6aae7a3b2d0a2a2a96fc67fcca8be37aae7d3039e0df2c4e48dd9e07b04"
+const expectedSchemaLayoutFingerprint = "sha256:a870b06456dd20d9e16ba807f791e2f3b91abbd277f6caf53d01ab1e8d2846f7"
+
+var (
+	ErrStoreClosing               = errors.New("lifecycle store is closing")
+	ErrStoreClosed                = errors.New("lifecycle store is closed")
+	ErrWriterUnavailable          = errors.New("lifecycle writer is unavailable")
+	ErrWriterCommitOutcomeUnknown = errors.New("lifecycle writer commit outcome is unknown")
+	ErrWriterCommitReconciled     = errors.New("lifecycle writer commit was reconciled")
+	ErrWriterOperationInvariant   = errors.New("lifecycle writer operation invariant failed")
+)
 
 const reasonCodeMaxLength = 64
 
@@ -64,11 +74,139 @@ type Store struct {
 	db                         *sql.DB
 	writerConn                 *sql.Conn
 	writerTransactionStarter   writerTransactionStarter
+	writerConnectionAcquirer   func(context.Context) (*sql.Conn, error)
+	writerCommit               func(*sql.Tx) error
+	writerRollback             func(*sql.Tx) error
+	writerCommitLookup         func(context.Context, string, string) (bool, error)
+	writerTransactionFinished  func(string)
+	beforeCommitLedgerInsert   func(context.Context, string)
+	lifecycleTestHooks         *storeLifecycleTestHooks
+	writerClose                func(*sql.Conn) error
+	dbClose                    func(*sql.DB) error
 	path                       string
 	silenceHistoryRetentionTTL time.Duration
 	writeMu                    sync.Mutex
 	recheckBlockedJobLogged    int64
+	lifecycleState             lifecycleState
+	writerRecoveryState        writerRecoveryState
+	pendingWriterCommit        *pendingWriterCommit
 }
+
+type lifecycleState uint8
+
+type storeLifecycleTestHooks struct {
+	mu              sync.Mutex
+	closeEntered    chan struct{}
+	writerFinishing chan struct{}
+	closingStateSet chan struct{}
+}
+
+func (s *Store) signalLifecycleHook(signal chan struct{}) {
+	if s == nil || s.lifecycleTestHooks == nil || signal == nil {
+		return
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	defer s.lifecycleTestHooks.mu.Unlock()
+	select {
+	case <-signal:
+	default:
+		close(signal)
+	}
+}
+
+const (
+	lifecycleStateOpen lifecycleState = iota
+	lifecycleStateClosing
+	lifecycleStateClosed
+)
+
+type writerRecoveryState uint8
+
+const (
+	writerRecoveryHealthy writerRecoveryState = iota
+	writerRecoveryUnavailable
+	writerRecoveryCommitUnknown
+	writerRecoveryInvariant
+)
+
+const (
+	writerOperationSchemaBootstrap    = "schema_bootstrap"
+	writerOperationUpsertCurrentAlert = "upsert_current_alert"
+	writerOperationStateTransition    = "insert_state_transition"
+	writerOperationHousekeeping       = "housekeeping_cleanup"
+	writerOperationVacuum             = "housekeeping_vacuum"
+	writerOperationResolve            = "resolve_alert"
+	writerOperationPoll               = "apply_poll_cycle"
+	writerOperationRegroupBegin       = "regroup_begin"
+	writerOperationRegroupBatch       = "regroup_batch"
+	writerOperationRegroupFailure     = "regroup_failure"
+	writerOperationRecheckBatch       = "recheck_batch"
+	writerOperationRecheckFailure     = "recheck_failure"
+)
+
+var validWriterOperationKinds = map[string]struct{}{
+	writerOperationSchemaBootstrap:    {},
+	writerOperationUpsertCurrentAlert: {},
+	writerOperationStateTransition:    {},
+	writerOperationHousekeeping:       {},
+	writerOperationVacuum:             {},
+	writerOperationResolve:            {},
+	writerOperationPoll:               {},
+	writerOperationRegroupBegin:       {},
+	writerOperationRegroupBatch:       {},
+	writerOperationRegroupFailure:     {},
+	writerOperationRecheckBatch:       {},
+	writerOperationRecheckFailure:     {},
+}
+
+type pendingWriterCommit struct {
+	token     string
+	kind      string
+	finalizer *writerAfterCommitFinalizer
+}
+
+type writerAfterCommitFinalizer struct {
+	ctx            context.Context
+	operationKind  string
+	reconciled     bool
+	handoff        func(bool)
+	onHandoffError func(error)
+	handoffDone    bool
+	handoffErr     error
+	run            func(bool)
+}
+
+type writerCommitOutcome uint8
+
+const (
+	writerCommitOutcomeNotCommitted writerCommitOutcome = iota
+	writerCommitOutcomeCommitted
+	writerCommitOutcomeUnknown
+)
+
+type writerCommitOutcomeError struct {
+	outcome writerCommitOutcome
+	err     error
+}
+
+type writerAcquisitionError struct {
+	operation string
+	err       error
+}
+
+func (e *writerAcquisitionError) Error() string {
+	return fmt.Sprintf("failed to acquire writer transaction for %s: %v", e.operation, e.err)
+}
+
+func (e *writerAcquisitionError) Unwrap() error { return e.err }
+
+func (e *writerCommitOutcomeError) Error() string { return e.err.Error() }
+
+func (e *writerCommitOutcomeError) Unwrap() error { return e.err }
+
+const writerRecoveryTimeout = 5 * time.Second
+
+const writerCommitLedgerRetention = 30 * 24 * time.Hour
 
 type writerTransactionStarter interface {
 	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
@@ -87,6 +225,17 @@ type StoreOptions struct {
 	SilenceHistoryRetentionTTL time.Duration
 }
 
+type storeOpenDependencies struct {
+	openDB        func(string) (*sql.DB, error)
+	acquireWriter func(context.Context, *sql.DB) (*sql.Conn, error)
+	pingWriter    func(context.Context, *sql.Conn) error
+	preflight     func(context.Context, *sql.Conn) error
+	configure     func(context.Context, *sql.Conn) error
+	bootstrap     func(*Store) error
+	closeWriter   func(*sql.Conn) error
+	closeDatabase func(*sql.DB) error
+}
+
 type GroupingConfig struct {
 	LabelsKeep          []string
 	LabelsKeepRegex     []string
@@ -99,6 +248,17 @@ type GroupingConfig struct {
 }
 
 func OpenStore(opts StoreOptions) (*Store, error) {
+	return openStoreWithDependencies(opts, storeOpenDependencies{
+		openDB:        func(dsn string) (*sql.DB, error) { return sql.Open("sqlite", dsn) },
+		acquireWriter: func(ctx context.Context, db *sql.DB) (*sql.Conn, error) { return db.Conn(ctx) },
+		pingWriter:    func(ctx context.Context, conn *sql.Conn) error { return conn.PingContext(ctx) },
+		preflight:     preflightSchemaBeforeSetup,
+		configure:     configureWriterConnection,
+		bootstrap:     func(store *Store) error { return store.bootstrapSchema() },
+	})
+}
+
+func openStoreWithDependencies(opts StoreOptions, deps storeOpenDependencies) (*Store, error) {
 	if strings.TrimSpace(opts.Path) == "" {
 		return nil, errors.New("sqlite path cannot be empty")
 	}
@@ -109,21 +269,52 @@ func OpenStore(opts StoreOptions) (*Store, error) {
 	}
 
 	dsn := fmt.Sprintf("file:%s?_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_txlock=immediate", opts.Path)
-	db, err := sql.Open("sqlite", dsn)
+	if deps.openDB == nil {
+		deps.openDB = func(dsn string) (*sql.DB, error) { return sql.Open("sqlite", dsn) }
+	}
+	if deps.acquireWriter == nil {
+		deps.acquireWriter = func(ctx context.Context, db *sql.DB) (*sql.Conn, error) { return db.Conn(ctx) }
+	}
+	if deps.pingWriter == nil {
+		deps.pingWriter = func(ctx context.Context, conn *sql.Conn) error { return conn.PingContext(ctx) }
+	}
+	if deps.preflight == nil {
+		deps.preflight = preflightSchemaBeforeSetup
+	}
+	if deps.configure == nil {
+		deps.configure = configureWriterConnection
+	}
+	if deps.bootstrap == nil {
+		deps.bootstrap = func(store *Store) error { return store.bootstrapSchema() }
+	}
+
+	db, err := deps.openDB(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	writerConn, err := db.Conn(context.Background())
+	writerConn, err := deps.acquireWriter(context.Background(), db)
 	if err != nil {
-		_ = db.Close()
+		if deps.closeDatabase != nil {
+			_ = deps.closeDatabase(db)
+		} else {
+			_ = db.Close()
+		}
 		return nil, fmt.Errorf("failed to acquire sqlite writer connection: %w", err)
 	}
 	closeResources := func() {
-		_ = writerConn.Close()
-		_ = db.Close()
+		if deps.closeWriter != nil {
+			_ = deps.closeWriter(writerConn)
+		} else {
+			_ = writerConn.Close()
+		}
+		if deps.closeDatabase != nil {
+			_ = deps.closeDatabase(db)
+		} else {
+			_ = db.Close()
+		}
 	}
-	if err = writerConn.PingContext(context.Background()); err != nil {
+	if err = deps.pingWriter(context.Background(), writerConn); err != nil {
 		closeResources()
 		return nil, fmt.Errorf("failed to connect to sqlite writer connection: %w", err)
 	}
@@ -135,18 +326,21 @@ func OpenStore(opts StoreOptions) (*Store, error) {
 		db:                         db,
 		writerConn:                 writerConn,
 		writerTransactionStarter:   sqlConnWriterTransactionStarter{conn: writerConn},
+		writerConnectionAcquirer:   db.Conn,
+		writerClose:                deps.closeWriter,
+		dbClose:                    deps.closeDatabase,
 		path:                       opts.Path,
 		silenceHistoryRetentionTTL: silenceHistoryRetentionTTL,
 	}
-	if err = preflightSchemaBeforeSetup(context.Background(), writerConn); err != nil {
+	if err = deps.preflight(context.Background(), writerConn); err != nil {
 		closeResources()
 		return nil, err
 	}
-	if err = configureWriterConnection(context.Background(), writerConn); err != nil {
+	if err = deps.configure(context.Background(), writerConn); err != nil {
 		closeResources()
 		return nil, err
 	}
-	if err = store.bootstrapSchema(); err != nil {
+	if err = deps.bootstrap(store); err != nil {
 		_ = store.Close()
 		return nil, err
 	}
@@ -171,22 +365,58 @@ func preflightSchemaBeforeSetup(ctx context.Context, conn *sql.Conn) error {
 }
 
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
+	s.signalLifecycleHook(func() chan struct{} {
+		if s.lifecycleTestHooks == nil {
+			return nil
+		}
+		return s.lifecycleTestHooks.closeEntered
+	}())
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+	if s.lifecycleState == lifecycleStateClosed {
+		return nil
+	}
+	if s.db == nil && s.writerConn == nil {
+		s.writerTransactionStarter = nil
+		s.lifecycleState = lifecycleStateClosed
+		return nil
+	}
+	s.lifecycleState = lifecycleStateClosing
+	if s.lifecycleTestHooks != nil {
+		s.signalLifecycleHook(s.lifecycleTestHooks.closingStateSet)
+	}
 	var writerErr error
 	if s.writerConn != nil {
-		writerErr = s.writerConn.Close()
+		if s.writerClose != nil {
+			writerErr = s.writerClose(s.writerConn)
+		} else {
+			writerErr = s.writerConn.Close()
+		}
 		s.writerConn = nil
 	}
 	s.writerTransactionStarter = nil
-	dbErr := s.db.Close()
-	if writerErr != nil {
-		return writerErr
+	var dbErr error
+	switch {
+	case s.db == nil:
+	case s.dbClose != nil:
+		dbErr = s.dbClose(s.db)
+	default:
+		dbErr = s.db.Close()
 	}
-	return dbErr
+	s.lifecycleState = lifecycleStateClosed
+	return errors.Join(writerErr, dbErr)
+}
+
+const schemaRecreateInstruction = "stop Karma and recreate the disposable lifecycle database, including its -wal and -shm sidecar files; automatic migration is not supported"
+
+func schemaIncompatibleError(message string, cause error) error {
+	if cause != nil {
+		return fmt.Errorf("unsupported sqlite database: %s: %w; %s", message, cause, schemaRecreateInstruction)
+	}
+	return fmt.Errorf("unsupported sqlite database: %s; %s", message, schemaRecreateInstruction)
 }
 
 func configureWriterConnection(ctx context.Context, conn *sql.Conn) error {
@@ -236,53 +466,150 @@ func verifyWriterConnection(ctx context.Context, conn *sql.Conn) error {
 	return nil
 }
 
-func (s *Store) withWriterTx(ctx context.Context, operation func(*sql.Tx) error) (err error) {
-	_, err = withWriterTxValue(ctx, s, func(tx *sql.Tx) (struct{}, error) {
+func (s *Store) withWriterTx(ctx context.Context, operationKind string, operation func(*sql.Tx) error) (err error) {
+	_, err = withWriterTxValue(ctx, s, operationKind, func(tx *sql.Tx) (struct{}, error) {
 		return struct{}{}, operation(tx)
 	})
 	return err
 }
 
-func withWriterTxValue[T any](ctx context.Context, s *Store, operation func(*sql.Tx) (T, error)) (value T, err error) {
-	if s == nil || s.db == nil || s.writerTransactionStarter == nil {
+func withWriterTxValue[T any](ctx context.Context, s *Store, operationKind string, operation func(*sql.Tx) (T, error)) (value T, err error) {
+	return withWriterTxValueAfterCommit(ctx, s, operationKind, operation, nil)
+}
+
+func withWriterTxValueAfterCommit[T any](ctx context.Context, s *Store, operationKind string, operation func(*sql.Tx) (T, error), finalizer *writerAfterCommitFinalizer) (value T, err error) {
+	if s == nil {
 		return value, ErrStoreNotInitialized
 	}
 	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return withOwnedWriterTxValue(ctx, s, operation)
+	var detachedFinalizer *writerAfterCommitFinalizer
+	defer func() {
+		if s.lifecycleTestHooks != nil {
+			s.signalLifecycleHook(s.lifecycleTestHooks.writerFinishing)
+		}
+		s.writeMu.Unlock()
+		runWriterFinalizer(detachedFinalizer)
+	}()
+	var readyFinalizer *writerAfterCommitFinalizer
+	if readyFinalizer, err = s.ensureWriterReadyLocked(ctx); err != nil {
+		detachedFinalizer = readyFinalizer
+		return value, err
+	}
+	value, detachedFinalizer, err = withOwnedWriterTxValueAfterCommit(ctx, s, operationKind, operation, finalizer)
+	return value, err
 }
 
-func withOwnedWriterTxValue[T any](ctx context.Context, s *Store, operation func(*sql.Tx) (T, error)) (value T, err error) {
-	if s == nil || s.db == nil || s.writerTransactionStarter == nil {
-		return value, ErrStoreNotInitialized
+func withOwnedWriterTxValueAfterCommit[T any](ctx context.Context, s *Store, operationKind string, operation func(*sql.Tx) (T, error), finalizer *writerAfterCommitFinalizer) (value T, detachedFinalizer *writerAfterCommitFinalizer, err error) {
+	if s == nil {
+		return value, nil, ErrStoreNotInitialized
+	}
+	var readyFinalizer *writerAfterCommitFinalizer
+	if readyFinalizer, err = s.ensureWriterReadyLocked(ctx); err != nil {
+		return value, readyFinalizer, err
+	}
+	if err = validateWriterOperationKind(operationKind); err != nil {
+		return value, nil, err
+	}
+	token, err := newWriterOperationToken()
+	if err != nil {
+		return value, nil, fmt.Errorf("failed to create writer operation token: %w", err)
 	}
 	tx, err := s.writerTransactionStarter.BeginTx(ctx, nil)
 	if err != nil {
-		return value, fmt.Errorf("failed to begin writer transaction: %w", err)
+		acquisitionErr := &writerAcquisitionError{operation: operationKind, err: err}
+		if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
+			if recoveryErr := s.recoverWriterConnectionLocked(ctx); recoveryErr != nil {
+				return value, nil, errors.Join(acquisitionErr, recoveryErr)
+			}
+		}
+		return value, nil, acquisitionErr
 	}
-	committed := false
+	commitAttempted := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			_ = tx.Rollback()
+			if !commitAttempted {
+				if rollbackErr := s.rollbackWriterTxLocked(tx); rollbackErr != nil {
+					if recoveryErr := s.discardWriterAfterFailureLocked(ctx); recoveryErr != nil {
+						runtimeLog.ErrorContext(ctx, "lifecycle_writer", "observability_collection_failed", "Writer panic cleanup could not recover the writer connection", slog.String("writer_operation", operationKind), slog.String("stage", "panic_rollback_recovery"), slog.Any("error", recoveryErr))
+					}
+				}
+			} else {
+				s.markWriterCommitUnknownLocked(token, operationKind, finalizer)
+				if recoveryErr := s.recoverWriterConnectionLocked(ctx); recoveryErr != nil {
+					s.writerRecoveryState = writerRecoveryUnavailable
+				}
+			}
 			panic(recovered)
-		}
-		if !committed {
-			_ = tx.Rollback()
 		}
 	}()
 
 	if value, err = operation(tx); err != nil {
-		return value, err
+		return value, nil, s.finishWriterCallbackErrorLocked(ctx, tx, operationKind, err)
 	}
-	if err = tx.Commit(); err != nil {
-		commitErr := err
-		if replaceErr := s.replaceWriterConnectionLocked(ctx); replaceErr != nil {
-			return value, fmt.Errorf("failed to commit writer transaction: %w; failed to replace writer connection: %w", commitErr, replaceErr)
+	if s.writerTransactionFinished != nil {
+		s.writerTransactionFinished(operationKind)
+	}
+	if s.beforeCommitLedgerInsert != nil {
+		s.beforeCommitLedgerInsert(ctx, operationKind)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return value, nil, s.finishWriterCallbackErrorLocked(ctx, tx, operationKind, cause)
+	}
+	insertLedger := func() error {
+		_, execErr := tx.ExecContext(ctx, `
+INSERT INTO lifecycle_writer_commits(operation_token, operation_kind, committed_at)
+VALUES(?, ?, ?)
+`, token, operationKind, time.Now().UTC().Format(time.RFC3339Nano))
+		return execErr
+	}
+	if err = insertLedger(); err != nil {
+		return value, nil, s.finishWriterCallbackErrorLocked(ctx, tx, operationKind, fmt.Errorf("failed to record writer commit: %w", err))
+	}
+	commitAttempted = true
+	commitFn := s.writerCommit
+	if commitFn == nil {
+		commitFn = func(tx *sql.Tx) error { return tx.Commit() }
+	}
+	commitErr := commitFn(tx)
+	if commitErr == nil {
+		if handoffErr := runWriterHandoffLocked(finalizer, false); handoffErr != nil {
+			s.writerRecoveryState = writerRecoveryInvariant
+			return value, finalizer, errors.Join(ErrWriterOperationInvariant, handoffErr)
 		}
-		return value, fmt.Errorf("failed to commit writer transaction: %w", commitErr)
+		return value, finalizer, nil
 	}
-	committed = true
-	return value, nil
+	// Release the connection before replacement. After a successful commit this
+	// is ErrTxDone; after an ambiguous/failed commit it closes any open tx.
+	_ = s.rollbackWriterTxLocked(tx)
+
+	s.markWriterCommitUnknownLocked(token, operationKind, finalizer)
+	if recoveryErr := s.recoverWriterConnectionLocked(ctx); recoveryErr != nil {
+		return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: failed to recover after commit error: %w", ErrWriterCommitOutcomeUnknown, recoveryErr)}
+	}
+	recoveryCtx, cancel := newWriterRecoveryContext(ctx)
+	committed, lookupErr := s.lookupWriterCommitLocked(recoveryCtx, token, operationKind)
+	cancel()
+	if lookupErr != nil {
+		if errors.Is(lookupErr, ErrWriterOperationInvariant) {
+			s.writerRecoveryState = writerRecoveryInvariant
+			return value, nil, lookupErr
+		}
+		return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: failed to reconcile commit: %w", ErrWriterCommitOutcomeUnknown, lookupErr)}
+	}
+	if committed {
+		detachedFinalizer = s.pendingWriterCommit.finalizer
+		if detachedFinalizer != nil {
+			detachedFinalizer.reconciled = true
+			if handoffErr := runWriterHandoffLocked(detachedFinalizer, true); handoffErr != nil {
+				s.writerRecoveryState = writerRecoveryInvariant
+				return value, detachedFinalizer, errors.Join(ErrWriterOperationInvariant, handoffErr)
+			}
+		}
+		s.clearPendingWriterCommitLocked()
+		return value, detachedFinalizer, nil
+	}
+	s.clearPendingWriterCommitLocked()
+	return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeNotCommitted, err: fmt.Errorf("failed to commit writer transaction: %w", commitErr)}
 }
 
 type writerTupleResult struct {
@@ -292,36 +619,242 @@ type writerTupleResult struct {
 	total     int
 }
 
-func withWriterTxTuple(ctx context.Context, s *Store, operation func(*sql.Tx) (bool, int, int, int, error)) (bool, int, int, int, error) {
-	result, err := withWriterTxValue(ctx, s, func(tx *sql.Tx) (writerTupleResult, error) {
+func newWriterOperationToken() (string, error) {
+	var raw [16]byte
+	if _, err := cryptorand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func validateWriterOperationKind(kind string) error {
+	if _, ok := validWriterOperationKinds[kind]; !ok {
+		return fmt.Errorf("%w: unknown operation kind %q", ErrWriterOperationInvariant, kind)
+	}
+	return nil
+}
+
+func runWriterFinalizer(finalizer *writerAfterCommitFinalizer) {
+	if finalizer == nil {
+		return
+	}
+	if finalizer.handoffErr != nil {
+		runtimeLog.ErrorContext(finalizer.ctx, "lifecycle_writer", "observability_collection_failed", "Writer post-commit handoff failed", slog.String("writer_operation", finalizer.operationKind), slog.String("stage", "after_commit_handoff"), slog.Any("error", finalizer.handoffErr))
+		return
+	}
+	if finalizer.run == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			runtimeLog.ErrorContext(finalizer.ctx, "lifecycle_writer", "observability_collection_failed", "Writer post-commit finalizer panicked", slog.String("writer_operation", finalizer.operationKind), slog.String("stage", "after_commit_run"), slog.Any("error", recovered))
+		}
+	}()
+	if finalizer.reconciled {
+		runtimeLog.InfoContext(finalizer.ctx, "lifecycle_writer", "writer_commit_reconciled", "Writer commit was reconciled from the durable ledger", slog.String("writer_operation", finalizer.operationKind))
+	}
+	finalizer.run(finalizer.reconciled)
+}
+
+func runWriterHandoffLocked(finalizer *writerAfterCommitFinalizer, reconciled bool) (handoffErr error) {
+	if finalizer == nil || finalizer.handoffDone {
+		if finalizer == nil {
+			return nil
+		}
+		return finalizer.handoffErr
+	}
+	finalizer.handoffDone = true
+	if finalizer.handoff == nil {
+		return nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			handoffErr = fmt.Errorf("writer post-commit handoff panicked: %v", recovered)
+			finalizer.handoffErr = handoffErr
+			if finalizer.onHandoffError != nil {
+				func() {
+					defer func() { _ = recover() }()
+					finalizer.onHandoffError(handoffErr)
+				}()
+			}
+		}
+	}()
+	finalizer.handoff(reconciled)
+	return nil
+}
+
+func (s *Store) ensureWriterReadyLocked(ctx context.Context) (*writerAfterCommitFinalizer, error) {
+	if s.writerRecoveryState == writerRecoveryInvariant {
+		return nil, ErrWriterOperationInvariant
+	}
+	if s.lifecycleState == lifecycleStateClosing {
+		return nil, ErrStoreClosing
+	}
+	if s.lifecycleState == lifecycleStateClosed {
+		return nil, ErrStoreClosed
+	}
+	if s.db == nil {
+		return nil, ErrStoreNotInitialized
+	}
+	if s.pendingWriterCommit != nil || s.writerRecoveryState == writerRecoveryCommitUnknown {
+		if s.pendingWriterCommit == nil {
+			return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: ErrWriterCommitOutcomeUnknown}
+		}
+		if s.writerConn == nil || s.writerTransactionStarter == nil {
+			if err := s.recoverWriterConnectionLocked(ctx); err != nil {
+				return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: %w", ErrWriterCommitOutcomeUnknown, err)}
+			}
+		}
+		recoveryCtx, cancel := newWriterRecoveryContext(ctx)
+		committed, err := s.lookupWriterCommitLocked(recoveryCtx, s.pendingWriterCommit.token, s.pendingWriterCommit.kind)
+		cancel()
+		if err != nil {
+			if errors.Is(err, ErrWriterOperationInvariant) {
+				s.writerRecoveryState = writerRecoveryInvariant
+				return nil, err
+			}
+			return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: %w", ErrWriterCommitOutcomeUnknown, err)}
+		}
+		if committed {
+			detachedFinalizer := s.pendingWriterCommit.finalizer
+			if detachedFinalizer != nil {
+				detachedFinalizer.reconciled = true
+				if handoffErr := runWriterHandoffLocked(detachedFinalizer, true); handoffErr != nil {
+					s.writerRecoveryState = writerRecoveryInvariant
+					return detachedFinalizer, errors.Join(ErrWriterOperationInvariant, handoffErr)
+				}
+			}
+			s.clearPendingWriterCommitLocked()
+			return detachedFinalizer, &writerCommitOutcomeError{outcome: writerCommitOutcomeCommitted, err: ErrWriterCommitReconciled}
+		}
+		s.clearPendingWriterCommitLocked()
+	}
+	if s.writerRecoveryState == writerRecoveryUnavailable || s.writerConn == nil || s.writerTransactionStarter == nil {
+		if err := s.recoverWriterConnectionLocked(ctx); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrWriterUnavailable, err)
+		}
+	}
+	return nil, nil
+}
+
+func (s *Store) rollbackWriterTxLocked(tx *sql.Tx) error {
+	if s.writerRollback != nil {
+		return s.writerRollback(tx)
+	}
+	return tx.Rollback()
+}
+
+func (s *Store) finishWriterCallbackErrorLocked(ctx context.Context, tx *sql.Tx, operationKind string, operationErr error) error {
+	if s.writerTransactionFinished != nil {
+		defer s.writerTransactionFinished(operationKind)
+	}
+	rollbackErr := s.rollbackWriterTxLocked(tx)
+	if rollbackErr == nil {
+		return operationErr
+	}
+	recoveryErr := s.discardWriterAfterFailureLocked(ctx)
+	if recoveryErr == nil {
+		return errors.Join(operationErr, errWriterRollbackFailed, rollbackErr)
+	}
+	runtimeLog.ErrorContext(ctx, "lifecycle_writer", "observability_collection_failed", "Writer rollback cleanup could not recover the writer connection", slog.String("writer_operation", operationKind), slog.String("stage", "rollback_recovery"), slog.Any("error", recoveryErr))
+	return errors.Join(operationErr, errWriterRollbackFailed, rollbackErr, ErrWriterUnavailable, recoveryErr)
+}
+
+func (s *Store) markWriterCommitUnknownLocked(token, kind string, finalizer *writerAfterCommitFinalizer) {
+	s.pendingWriterCommit = &pendingWriterCommit{token: token, kind: kind, finalizer: finalizer}
+	s.writerRecoveryState = writerRecoveryCommitUnknown
+}
+
+func (s *Store) clearPendingWriterCommitLocked() {
+	s.pendingWriterCommit = nil
+	s.writerRecoveryState = writerRecoveryHealthy
+}
+
+func (s *Store) discardWriterAfterFailureLocked(ctx context.Context) error {
+	if err := s.recoverWriterConnectionLocked(ctx); err != nil {
+		s.writerRecoveryState = writerRecoveryUnavailable
+		return fmt.Errorf("%w: %w", ErrWriterUnavailable, err)
+	}
+	return nil
+}
+
+func newWriterRecoveryContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), writerRecoveryTimeout)
+}
+
+func (s *Store) recoverWriterConnectionLocked(parent context.Context) error {
+	ctx, cancel := newWriterRecoveryContext(parent)
+	defer cancel()
+	return s.replaceWriterConnectionLocked(ctx)
+}
+
+func (s *Store) lookupWriterCommitLocked(ctx context.Context, token, kind string) (bool, error) {
+	if s.writerCommitLookup != nil {
+		return s.writerCommitLookup(ctx, token, kind)
+	}
+	if s.writerConn == nil {
+		return false, ErrWriterUnavailable
+	}
+	var storedKind string
+	err := s.writerConn.QueryRowContext(ctx, `
+SELECT operation_kind FROM lifecycle_writer_commits WHERE operation_token=?
+`, token).Scan(&storedKind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if storedKind != kind {
+		return false, fmt.Errorf("%w: writer commit token has operation kind %q, expected %q", ErrWriterOperationInvariant, storedKind, kind)
+	}
+	return true, nil
+}
+
+func withWriterTxTupleAfterCommit(ctx context.Context, s *Store, operationKind string, operation func(*sql.Tx) (bool, int, int, int, error), finalizer *writerAfterCommitFinalizer) (writerTupleResult, error) {
+	return withWriterTxValueAfterCommit(ctx, s, operationKind, func(tx *sql.Tx) (writerTupleResult, error) {
 		done, processed, updated, total, err := operation(tx)
 		return writerTupleResult{done: done, processed: processed, updated: updated, total: total}, err
-	})
-	return result.done, result.processed, result.updated, result.total, err
+	}, finalizer)
 }
 
 func (s *Store) replaceWriterConnectionLocked(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return ErrStoreNotInitialized
 	}
-	if s.writerConn != nil {
-		_ = s.writerConn.Raw(func(any) error { return driver.ErrBadConn })
-		_ = s.writerConn.Close()
+	oldConn := s.writerConn
+	s.writerConn = nil
+	s.writerTransactionStarter = nil
+	if oldConn != nil {
+		_ = oldConn.Raw(func(any) error { return driver.ErrBadConn })
+		_ = oldConn.Close()
 	}
-	conn, err := s.db.Conn(ctx)
+	acquire := s.writerConnectionAcquirer
+	if acquire == nil {
+		acquire = s.db.Conn
+	}
+	conn, err := acquire(ctx)
 	if err != nil {
+		s.writerRecoveryState = writerRecoveryUnavailable
 		return fmt.Errorf("failed to replace sqlite writer connection: %w", err)
 	}
 	if err = conn.PingContext(ctx); err != nil {
 		_ = conn.Close()
+		s.writerRecoveryState = writerRecoveryUnavailable
 		return fmt.Errorf("failed to ping replacement sqlite writer connection: %w", err)
 	}
 	if err = verifyWriterConnection(ctx, conn); err != nil {
 		_ = conn.Close()
+		s.writerRecoveryState = writerRecoveryUnavailable
 		return fmt.Errorf("failed to verify replacement sqlite writer connection: %w", err)
 	}
 	s.writerConn = conn
 	s.writerTransactionStarter = sqlConnWriterTransactionStarter{conn: conn}
+	if s.pendingWriterCommit != nil {
+		s.writerRecoveryState = writerRecoveryCommitUnknown
+	} else {
+		s.writerRecoveryState = writerRecoveryHealthy
+	}
 	return nil
 }
 
@@ -463,6 +996,15 @@ CREATE TABLE IF NOT EXISTS metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS lifecycle_writer_commits (
+  operation_token TEXT PRIMARY KEY,
+  operation_kind TEXT NOT NULL,
+  committed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_writer_commits_committed_at
+  ON lifecycle_writer_commits (committed_at);
 
 CREATE TABLE IF NOT EXISTS alertmanager_sources (
   source_name TEXT PRIMARY KEY,
@@ -761,7 +1303,7 @@ CREATE INDEX IF NOT EXISTS idx_alert_suppression_members_source
   ON alert_suppression_cause_members (source_name, history_id);
 `
 
-	return s.withWriterTx(context.Background(), func(tx *sql.Tx) error {
+	return s.withWriterTx(context.Background(), writerOperationSchemaBootstrap, func(tx *sql.Tx) error {
 		empty, err := isEmptySchemaV1DatabaseTx(tx)
 		if err != nil {
 			return err
@@ -781,7 +1323,7 @@ CREATE INDEX IF NOT EXISTS idx_alert_suppression_members_source
 			return err
 		}
 		if actualFingerprint != expectedSchemaLayoutFingerprint {
-			return fmt.Errorf("schema layout fingerprint mismatch for fresh database: actual=%q expected=%q", actualFingerprint, expectedSchemaLayoutFingerprint)
+			return schemaIncompatibleError(fmt.Sprintf("schema layout fingerprint mismatch for fresh database: actual=%q expected=%q", actualFingerprint, expectedSchemaLayoutFingerprint), nil)
 		}
 		if _, err = tx.Exec(`INSERT INTO metadata(key, value) VALUES(?, ?)`, metaSchemaVersion, schemaVersion); err != nil {
 			return fmt.Errorf("failed to set schema version: %w", err)
@@ -822,21 +1364,21 @@ func isEmptySchemaV1DatabaseTx(tx *sql.Tx) (bool, error) {
 func validateExistingSchemaV1Tx(tx *sql.Tx) error {
 	var version string
 	if err := tx.QueryRow(`SELECT value FROM metadata WHERE key=?`, metaSchemaVersion).Scan(&version); err != nil {
-		return fmt.Errorf("unsupported sqlite database: missing schema version 1: %w", err)
+		return schemaIncompatibleError("missing schema version 1", err)
 	}
 	if version != schemaVersion {
-		return fmt.Errorf("unsupported sqlite schema version %q: expected %q", version, schemaVersion)
+		return schemaIncompatibleError(fmt.Sprintf("unsupported sqlite schema version %q: expected %q", version, schemaVersion), nil)
 	}
 	var storedFingerprint string
 	if err := tx.QueryRow(`SELECT value FROM metadata WHERE key=?`, metaSchemaLayoutFingerprint).Scan(&storedFingerprint); err != nil {
-		return fmt.Errorf("unsupported sqlite database: missing schema layout fingerprint: %w", err)
+		return schemaIncompatibleError("missing schema layout fingerprint", err)
 	}
 	actualFingerprint, err := schemaLayoutFingerprintTx(tx)
 	if err != nil {
 		return err
 	}
 	if storedFingerprint != actualFingerprint || actualFingerprint != expectedSchemaLayoutFingerprint {
-		return fmt.Errorf("unsupported sqlite database: schema layout fingerprint mismatch: actual=%q stored=%q expected=%q", actualFingerprint, storedFingerprint, expectedSchemaLayoutFingerprint)
+		return schemaIncompatibleError(fmt.Sprintf("schema layout fingerprint mismatch: actual=%q stored=%q expected=%q", actualFingerprint, storedFingerprint, expectedSchemaLayoutFingerprint), nil)
 	}
 	return nil
 }
@@ -853,7 +1395,6 @@ func schemaLayoutFingerprintTx(tx *sql.Tx) (string, error) {
 SELECT type, name, tbl_name, sql
 FROM sqlite_schema
 WHERE name NOT LIKE 'sqlite_%'
-  AND type IN ('table', 'index', 'trigger')
   AND sql IS NOT NULL
 ORDER BY type, name, tbl_name
 `)
@@ -935,7 +1476,7 @@ func (s *Store) UpsertCurrentAlert(alert AlertCurrent) error {
 		alert.UpdatedAt = time.Now().UTC()
 	}
 
-	return s.withWriterTx(context.Background(), func(tx *sql.Tx) error {
+	return s.withWriterTx(context.Background(), writerOperationUpsertCurrentAlert, func(tx *sql.Tx) error {
 		_, err = tx.Exec(`
 INSERT INTO alert_states(
   alert_id,
@@ -1057,7 +1598,7 @@ func (s *Store) InsertStateTransition(transition AlertStateTransition) error {
 		transition.NewState = projectedState(transition.NewRawState, transition.NewIsLive, transition.NewIsSuppressed, transition.NewIsResolved)
 	}
 
-	return s.withWriterTx(context.Background(), func(tx *sql.Tx) error {
+	return s.withWriterTx(context.Background(), writerOperationStateTransition, func(tx *sql.Tx) error {
 		if err := insertTransitionTx(tx, transition); err != nil {
 			return err
 		}
@@ -2117,8 +2658,14 @@ func (s *Store) RunHousekeepingContext(ctx context.Context, retentionTTL time.Du
 	cutoff := runAt.Add(-retentionTTL)
 
 	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	retention, err := withOwnedWriterTxValue(ctx, s, func(tx *sql.Tx) (housekeepingTransactionResult, error) {
+	var finalizers []*writerAfterCommitFinalizer
+	defer func() {
+		s.writeMu.Unlock()
+		for _, finalizer := range finalizers {
+			runWriterFinalizer(finalizer)
+		}
+	}()
+	retention, finalizer, err := withOwnedWriterTxValueAfterCommit(ctx, s, writerOperationHousekeeping, func(tx *sql.Tx) (housekeepingTransactionResult, error) {
 		expiredDeleted, err := deleteExpiredAlertsTx(tx, cutoff)
 		if err != nil {
 			return housekeepingTransactionResult{}, err
@@ -2136,25 +2683,35 @@ func (s *Store) RunHousekeepingContext(ctx context.Context, retentionTTL time.Du
 		if err = setMetadataTx(tx, metaLastHousekeepingAt, runAt.Format(time.RFC3339Nano)); err != nil {
 			return housekeepingTransactionResult{}, err
 		}
+		if _, err = tx.Exec(`DELETE FROM lifecycle_writer_commits WHERE committed_at < ?`, runAt.Add(-writerCommitLedgerRetention).Format(time.RFC3339Nano)); err != nil {
+			return housekeepingTransactionResult{}, fmt.Errorf("failed to retain writer commit ledger: %w", err)
+		}
 		return housekeepingTransactionResult{
 			expiredDeleted:         expiredDeleted,
 			limitDeleted:           limitDeleted,
 			silenceRetentionResult: retention,
 		}, nil
-	})
-	if err != nil {
-		return HousekeepingResult{}, err
+	}, nil)
+	if finalizer != nil {
+		finalizers = append(finalizers, finalizer)
 	}
-
-	vacuumPagesFreed, err := runIncrementalVacuum(ctx, s.writerConn)
 	if err != nil {
 		return HousekeepingResult{}, err
 	}
 
 	vacuumAt := time.Now().UTC()
-	if _, err = withOwnedWriterTxValue(ctx, s, func(tx *sql.Tx) (struct{}, error) {
+	vacuumPagesFreed := 0
+	_, finalizer, err = withOwnedWriterTxValueAfterCommit(ctx, s, writerOperationVacuum, func(tx *sql.Tx) (struct{}, error) {
+		vacuumPagesFreed, err = runIncrementalVacuum(ctx, tx)
+		if err != nil {
+			return struct{}{}, err
+		}
 		return struct{}{}, setMetadataTx(tx, metaLastIncrementalVacuumAt, vacuumAt.Format(time.RFC3339Nano))
-	}); err != nil {
+	}, nil)
+	if finalizer != nil {
+		finalizers = append(finalizers, finalizer)
+	}
+	if err != nil {
 		return HousekeepingResult{}, err
 	}
 
@@ -2452,7 +3009,7 @@ func (s *Store) ResolveAlertContext(ctx context.Context, alertID string, changed
 	}
 
 	var result *ResolveResult
-	err := s.withWriterTx(ctx, func(tx *sql.Tx) error {
+	err := s.withWriterTx(ctx, writerOperationResolve, func(tx *sql.Tx) error {
 		current, err := getCurrentAlertTx(tx, alertID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -2546,9 +3103,11 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 		now = time.Now().UTC()
 	}
 
-	liveByID := make(map[string]LiveAlertSnapshot, len(input.LiveAlerts))
+	orderedLiveAlerts := append([]LiveAlertSnapshot(nil), input.LiveAlerts...)
+	slices.SortFunc(orderedLiveAlerts, func(a, b LiveAlertSnapshot) int { return strings.Compare(a.AlertID, b.AlertID) })
+	liveByID := make(map[string]LiveAlertSnapshot, len(orderedLiveAlerts))
 	allSuccessful := areAllUpstreamsSuccessful(input.SuccessfulUpstreams)
-	for _, live := range input.LiveAlerts {
+	for _, live := range orderedLiveAlerts {
 		if len(live.RelevantUpstreams) == 0 && len(live.RelevantSources) > 0 {
 			live.RelevantUpstreams = make([]string, 0, len(live.RelevantSources))
 			for _, src := range live.RelevantSources {
@@ -2575,35 +3134,40 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	}
 
 	ctx := context.Background()
-	txResult, err := withWriterTxValue(ctx, s, func(tx *sql.Tx) (pollTransactionResult, error) {
+	var committedPollResult pollTransactionResult
+	var pollEventsCollector runtimeEventCollector
+	pollFinalizer := &writerAfterCommitFinalizer{
+		ctx:           ctx,
+		operationKind: writerOperationPoll,
+		run: func(bool) {
+			emitRuntimeEvents(committedPollResult.events)
+		},
+	}
+	txResult, err := withWriterTxValueAfterCommit(ctx, s, writerOperationPoll, func(tx *sql.Tx) (pollTransactionResult, error) {
 		result := PollCycleResult{}
-		reconciliation, qerr := reconcileSilenceSourcesWithEventsTx(tx, input.SilenceSources, now)
+		reconciliation, qerr := reconcileSilenceSourcesWithEventsTx(tx, input.SilenceSources, now, &pollEventsCollector)
 		if qerr != nil {
-			_ = tx.Rollback()
 			return pollTransactionResult{}, qerr
 		}
 		result.RecheckJobsQueued = reconciliation.queued
 
-		pollEvents := append([]runtimeEvent(nil), reconciliation.events...)
 		currentByID, err := readAllCurrentAlertsTx(tx)
 		if err != nil {
-			_ = tx.Rollback()
 			return pollTransactionResult{}, err
 		}
 
-		for _, inputLive := range input.LiveAlerts {
+		for _, inputLive := range orderedLiveAlerts {
 			live := liveByID[inputLive.AlertID]
 			targets := normalizeLiveTargets(live)
 			current, found := currentByID[live.AlertID]
 			if !found {
 				if err = insertCurrentAlertTx(tx, live, now); err != nil {
-					_ = tx.Rollback()
 					return pollTransactionResult{}, err
 				}
 				newProjected := projectedState(live.State, true, live.State == StateSuppressed, false)
 				newLive := true
 				newResolved := false
-				if err = insertTransitionTx(tx, AlertStateTransition{
+				transition := AlertStateTransition{
 					AlertID:         live.AlertID,
 					OldState:        nil,
 					NewState:        newProjected,
@@ -2618,24 +3182,22 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 					ChangedAt:       now,
 					ChangeSource:    ChangeSourcePoller,
 					ReasonCode:      sanitizeReasonCode(ptrString("poll_first_seen")),
-				}); err != nil {
-					_ = tx.Rollback()
+				}
+				if err = insertTransitionTx(tx, transition); err != nil {
 					return pollTransactionResult{}, err
 				}
+				pollEventsCollector.append(alertTransitionRuntimeEvent(transition))
 				result.Inserted++
 				result.Transitions++
-				if err = upsertTargetStatesFromLiveTx(tx, live.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
-					_ = tx.Rollback()
+				if err = upsertTargetStatesFromLiveWithEventsTx(tx, live.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now, &pollEventsCollector); err != nil {
 					return pollTransactionResult{}, err
 				}
 				if live.State == StateSuppressed {
 					if err = insertLiveSuppressionCauseTx(tx, live.AlertID, live.SilencedBySources, now); err != nil {
-						_ = tx.Rollback()
 						return pollTransactionResult{}, err
 					}
 				}
 				if err = insertLiveTargetSuppressionCausesTx(tx, live.AlertID, live.Targets, live.SilencedBySources, now); err != nil {
-					_ = tx.Rollback()
 					return pollTransactionResult{}, err
 				}
 				continue
@@ -2661,7 +3223,6 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			storedRelevant := selectStoredRelevantUpstreams(existingRelevant, live.RelevantUpstreams, allSuccessful)
 			relevantJSON, marshalErr := marshalRelevantUpstreams(storedRelevant)
 			if marshalErr != nil {
-				_ = tx.Rollback()
 				return pollTransactionResult{}, marshalErr
 			}
 
@@ -2672,22 +3233,18 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			storedRelevantSources := selectStoredRelevantSources(existingRelevantSources, live.RelevantSources, allSuccessful)
 			relevantSourcesJSON, marshalSourcesErr := marshalRelevantSources(storedRelevantSources)
 			if marshalSourcesErr != nil {
-				_ = tx.Rollback()
 				return pollTransactionResult{}, marshalSourcesErr
 			}
 			sourceLinksJSON, marshalLinksErr := marshalAlertSourceLinks(live.SourceLinks)
 			if marshalLinksErr != nil {
-				_ = tx.Rollback()
 				return pollTransactionResult{}, marshalLinksErr
 			}
 
 			if err = updateCurrentAlertFromLiveTx(tx, current.AlertID, live, newRawState, newIsLive, newIsSuppressed, newIsResolved, string(relevantJSON), string(relevantSourcesJSON), string(sourceLinksJSON), now); err != nil {
-				_ = tx.Rollback()
 				return pollTransactionResult{}, err
 			}
 			result.Updated++
-			if err = upsertTargetStatesFromLiveTx(tx, current.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
-				_ = tx.Rollback()
+			if err = upsertTargetStatesFromLiveWithEventsTx(tx, current.AlertID, targets, live.MatchLabelsJSON, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now, &pollEventsCollector); err != nil {
 				return pollTransactionResult{}, err
 			}
 
@@ -2703,7 +3260,7 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 				if oldResolved {
 					reasonCode = "poll_reappear_clears_resolved"
 				}
-				if err = insertTransitionTx(tx, AlertStateTransition{
+				transition := AlertStateTransition{
 					AlertID:         current.AlertID,
 					OldState:        &old,
 					NewState:        newState,
@@ -2718,31 +3275,35 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 					ChangedAt:       now,
 					ChangeSource:    ChangeSourcePoller,
 					ReasonCode:      sanitizeReasonCode(&reasonCode),
-				}); err != nil {
-					_ = tx.Rollback()
+				}
+				if err = insertTransitionTx(tx, transition); err != nil {
 					return pollTransactionResult{}, err
 				}
+				pollEventsCollector.append(alertTransitionRuntimeEvent(transition))
 				result.Transitions++
 			}
 			if newIsLive && newIsSuppressed {
 				if err = insertLiveSuppressionCauseTx(tx, current.AlertID, live.SilencedBySources, now); err != nil {
-					_ = tx.Rollback()
 					return pollTransactionResult{}, err
 				}
 			}
 			if err = insertLiveTargetSuppressionCausesTx(tx, current.AlertID, live.Targets, live.SilencedBySources, now); err != nil {
-				_ = tx.Rollback()
 				return pollTransactionResult{}, err
 			}
 		}
 
-		for alertID, current := range currentByID {
+		alertIDs := make([]string, 0, len(currentByID))
+		for alertID := range currentByID {
+			alertIDs = append(alertIDs, alertID)
+		}
+		slices.Sort(alertIDs)
+		for _, alertID := range alertIDs {
+			current := currentByID[alertID]
 			if _, exists := liveByID[alertID]; exists {
 				continue
 			}
 
-			if err = markMissingTargetStatesNonLiveTx(tx, current, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now); err != nil {
-				_ = tx.Rollback()
+			if err = markMissingTargetStatesNonLiveWithEventsTx(tx, current, input.SuccessfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now, &pollEventsCollector); err != nil {
 				return pollTransactionResult{}, err
 			}
 
@@ -2753,14 +3314,14 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			relevant, parseErr := parseRelevantUpstreams(current.RelevantUpstreams)
 			if parseErr != nil {
 				result.SkippedInactive++
-				pollEvents = append(pollEvents, runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "invalid_stored_sources")}})
+				pollEventsCollector.append(runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "invalid_stored_sources")}})
 				continue
 			}
 			relevant = filterConfiguredSourceNames(relevant, configuredSources, sourceManifestKnown)
 
 			if !allRelevantUpstreamsSuccessful(relevant, input.SuccessfulUpstreams) {
 				result.SkippedInactive++
-				pollEvents = append(pollEvents, runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "incomplete_source_coverage")}})
+				pollEventsCollector.append(runtimeEvent{level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_absence_deferred", message: "Alert absence transition deferred", attrs: []slog.Attr{slog.String("alert_id", alertID), slog.String("reason_code", "incomplete_source_coverage")}})
 				continue
 			}
 
@@ -2774,14 +3335,13 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			newIsResolved := absencePlan.IsResolved
 			newState := projectedState(newRawState, newIsLive, newIsSuppressed, newIsResolved)
 			if err = updateProjectedStateTx(tx, alertID, newRawState, newIsLive, newIsSuppressed, newIsResolved, now); err != nil {
-				_ = tx.Rollback()
 				return pollTransactionResult{}, err
 			}
 			old := current.State
 			oldRaw := current.RawState
 			oldLive := current.IsLive
 			oldResolved := current.IsResolved
-			if err = insertTransitionTx(tx, AlertStateTransition{
+			transition := AlertStateTransition{
 				AlertID:         alertID,
 				OldState:        &old,
 				NewState:        newState,
@@ -2796,43 +3356,122 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 				ChangedAt:       now,
 				ChangeSource:    ChangeSourcePoller,
 				ReasonCode:      sanitizeReasonCode(ptrString("poll_live_disappeared")),
-			}); err != nil {
-				_ = tx.Rollback()
+			}
+			if err = insertTransitionTx(tx, transition); err != nil {
 				return pollTransactionResult{}, err
 			}
+			pollEventsCollector.append(alertTransitionRuntimeEvent(transition))
 			if newState == StateInactive {
 				result.SetInactive++
-				if err = enqueueAlertForCurrentRecheckContextTx(tx, alertID, now); err != nil {
-					_ = tx.Rollback()
+				if err = enqueueAlertForCurrentRecheckContextWithEventsTx(tx, alertID, now, &pollEventsCollector); err != nil {
 					return pollTransactionResult{}, err
 				}
 			}
 			result.Transitions++
 		}
 
-		return pollTransactionResult{result: result, events: pollEvents, changedAt: now}, nil
-	})
+		committedPollResult = pollTransactionResult{result: result, events: append([]runtimeEvent(nil), pollEventsCollector.events...)}
+		return committedPollResult, nil
+	}, pollFinalizer)
 	if err != nil {
 		return PollCycleResult{}, err
 	}
-	emitRuntimeEvents(txResult.events)
-	logCommittedPollEvents(s.db, txResult.changedAt)
 
 	return txResult.result, nil
 }
 
 type pollTransactionResult struct {
-	result    PollCycleResult
-	events    []runtimeEvent
-	changedAt time.Time
+	result PollCycleResult
+	events []runtimeEvent
 }
 
 type runtimeEvent struct {
+	sequence  uint64
 	level     slog.Level
 	component string
 	event     string
 	message   string
 	attrs     []slog.Attr
+}
+
+type runtimeEventCollector struct {
+	events       []runtimeEvent
+	nextSequence uint64
+}
+
+func (c *runtimeEventCollector) append(event runtimeEvent) {
+	if c == nil {
+		return
+	}
+	event.sequence = c.nextSequence
+	c.nextSequence++
+	c.events = append(c.events, event)
+}
+
+func (c *runtimeEventCollector) replaceAttrAt(eventIndex int, key string, value slog.Attr) {
+	if c == nil || eventIndex < 0 || eventIndex >= len(c.events) {
+		return
+	}
+	attrs := c.events[eventIndex].attrs
+	for attrIndex := range attrs {
+		if attrs[attrIndex].Key == key {
+			attrs[attrIndex] = value
+			c.events[eventIndex].attrs = attrs
+			return
+		}
+	}
+}
+
+func runtimeEventStringAttr(name, value string) slog.Attr {
+	return slog.String(name, value)
+}
+
+func runtimeEventOptionalBoolAttr(name string, value *bool) slog.Attr {
+	if value == nil {
+		return slog.Any(name, nil)
+	}
+	return slog.Bool(name, *value)
+}
+
+func nullableStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func nullableStateValue(value *State) string {
+	if value == nil {
+		return ""
+	}
+	return string(*value)
+}
+
+func runtimeEventNullableIntBoolAttr(name string, value sql.NullInt64) slog.Attr {
+	if !value.Valid {
+		return slog.Any(name, nil)
+	}
+	return slog.Bool(name, value.Int64 != 0)
+}
+
+func alertTransitionRuntimeEvent(transition AlertStateTransition) runtimeEvent {
+	return runtimeEvent{
+		level: slog.LevelDebug, component: "alert_lifecycle", event: "alert_transition", message: "Alert lifecycle state changed",
+		attrs: []slog.Attr{
+			slog.String("alert_id", transition.AlertID),
+			runtimeEventStringAttr("old_state", nullableStateValue(transition.OldState)),
+			slog.String("new_state", string(transition.NewState)),
+			runtimeEventStringAttr("old_raw_state", nullableStateValue(transition.OldRawState)),
+			slog.String("new_raw_state", string(transition.NewRawState)),
+			runtimeEventOptionalBoolAttr("old_is_live", transition.OldIsLive),
+			slog.Bool("new_is_live", transition.NewIsLive),
+			runtimeEventOptionalBoolAttr("old_is_suppressed", transition.OldIsSuppressed),
+			slog.Bool("new_is_suppressed", transition.NewIsSuppressed),
+			runtimeEventOptionalBoolAttr("old_is_resolved", transition.OldIsResolved),
+			slog.Bool("new_is_resolved", transition.NewIsResolved),
+			runtimeEventStringAttr("reason_code", nullableStringValue(transition.ReasonCode)),
+		},
+	}
 }
 
 func emitRuntimeEvents(events []runtimeEvent) {
@@ -2843,128 +3482,6 @@ func emitRuntimeEventsContext(ctx context.Context, events []runtimeEvent) {
 	for _, event := range events {
 		runtimeLog.Event(ctx, event.level, event.component, event.event, event.message, event.attrs...)
 	}
-}
-
-func logCommittedPollEvents(db *sql.DB, changedAt time.Time) {
-	if db == nil {
-		return
-	}
-	changedRaw := changedAt.UTC().Format(time.RFC3339Nano)
-	if !runtimeLog.Enabled(context.Background(), slog.LevelInfo) {
-		return
-	}
-	rows, err := db.Query(`
-SELECT alert_id, COALESCE(old_state, ''), new_state, old_is_live, new_is_live,
-       old_is_suppressed, new_is_suppressed, old_is_resolved, new_is_resolved,
-       COALESCE(reason_code, '')
-FROM alert_events WHERE changed_at=? ORDER BY id
-`, changedRaw)
-	if err != nil {
-		runtimeLog.Error("alert_lifecycle", "transition_log_failed", "Failed to load committed alert transitions for logging", slog.Any("error", err))
-		return
-	}
-	for rows.Next() {
-		var alertID, oldState, newState, reason string
-		var oldLive, oldSuppressed, oldResolved sql.NullBool
-		var newLive, newSuppressed, newResolved bool
-		if scanErr := rows.Scan(&alertID, &oldState, &newState, &oldLive, &newLive, &oldSuppressed, &newSuppressed, &oldResolved, &newResolved, &reason); scanErr != nil {
-			rows.Close()
-			runtimeLog.Error("alert_lifecycle", "transition_log_failed", "Failed to scan committed alert transition for logging", slog.Any("error", scanErr))
-			return
-		}
-		runtimeLog.Debug("alert_lifecycle", "alert_transition", "Alert lifecycle state changed",
-			slog.String("alert_id", alertID), slog.String("old_state", oldState), slog.String("new_state", newState),
-			slog.Any("old_is_live", nullableBoolValue(oldLive)), slog.Bool("new_is_live", newLive),
-			slog.Any("old_is_suppressed", nullableBoolValue(oldSuppressed)), slog.Bool("new_is_suppressed", newSuppressed),
-			slog.Any("old_is_resolved", nullableBoolValue(oldResolved)), slog.Bool("new_is_resolved", newResolved),
-			slog.String("reason_code", reason))
-	}
-	rows.Close()
-
-	targetRows, err := db.Query(`
-SELECT alert_id, target, COALESCE(old_state, ''), new_state, COALESCE(reason_code, '')
-FROM alert_target_events WHERE changed_at=? ORDER BY id
-`, changedRaw)
-	if err != nil {
-		runtimeLog.Error("alert_lifecycle", "target_transition_log_failed", "Failed to load committed target transitions for logging", slog.Any("error", err))
-		return
-	}
-	defer targetRows.Close()
-	for targetRows.Next() {
-		var alertID, target, oldState, newState, reason string
-		if scanErr := targetRows.Scan(&alertID, &target, &oldState, &newState, &reason); scanErr != nil {
-			runtimeLog.Error("alert_lifecycle", "target_transition_log_failed", "Failed to scan committed target transition for logging", slog.Any("error", scanErr))
-			return
-		}
-		event := "target_transition"
-		level := slog.LevelDebug
-		if reason == "poll_target_retired" {
-			event = "target_retired"
-			level = slog.LevelInfo
-		}
-		runtimeLog.Event(context.Background(), level, "alert_lifecycle", event, "Alert target lifecycle state changed", slog.String("alert_id", alertID), slog.String("target", target), slog.String("old_state", oldState), slog.String("new_state", newState), slog.String("reason_code", reason))
-	}
-	logCommittedSilenceHistoryEvents(db, changedRaw)
-}
-
-func nullableBoolValue(value sql.NullBool) any {
-	if !value.Valid {
-		return nil
-	}
-	return value.Bool
-}
-
-func logCommittedSilenceHistoryEvents(db *sql.DB, changedRaw string) {
-	logRows := func(query, event, message string, level slog.Level, scan func(*sql.Rows) ([]slog.Attr, error)) {
-		rows, err := db.Query(query, changedRaw)
-		if err != nil {
-			runtimeLog.Error("silence_reconciliation", "history_log_failed", "Failed to load committed silence history for logging", slog.String("history_event", event), slog.Any("error", err))
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			attrs, scanErr := scan(rows)
-			if scanErr != nil {
-				runtimeLog.Error("silence_reconciliation", "history_log_failed", "Failed to scan committed silence history for logging", slog.String("history_event", event), slog.Any("error", scanErr))
-				return
-			}
-			runtimeLog.Event(context.Background(), level, "silence_reconciliation", event, message, attrs...)
-		}
-	}
-	logRows(`SELECT r.cluster_id, r.silence_id, r.rule_id, COALESCE((SELECT ss.observed_state FROM alertmanager_source_silences ss WHERE ss.rule_id=r.rule_id ORDER BY ss.source_name LIMIT 1), '') FROM silence_rules r WHERE r.first_observed_at=?`, "rule_discovered", "Silence rule discovered", slog.LevelDebug, func(rows *sql.Rows) ([]slog.Attr, error) {
-		var target, silenceID, status string
-		var ruleID int64
-		err := rows.Scan(&target, &silenceID, &ruleID, &status)
-		return []slog.Attr{slog.String("target", target), slog.String("silence_id", silenceID), slog.Int64("rule_id", ruleID), slog.String("status", status)}, err
-	})
-	logRows(`SELECT r.cluster_id, r.silence_id, e.episode_id, e.episode_number FROM silence_rule_episodes e JOIN silence_rules r ON r.rule_id=e.rule_id WHERE e.first_observed_at=?`, "rule_episode_opened", "Silence rule episode opened", slog.LevelDebug, func(rows *sql.Rows) ([]slog.Attr, error) {
-		var target, silenceID string
-		var episodeID int64
-		var episodeNumber int
-		err := rows.Scan(&target, &silenceID, &episodeID, &episodeNumber)
-		return []slog.Attr{slog.String("target", target), slog.String("silence_id", silenceID), slog.Int64("episode_id", episodeID), slog.Int("episode_number", episodeNumber)}, err
-	})
-	logRows(`SELECT r.cluster_id, r.silence_id, e.episode_id FROM silence_rule_episodes e JOIN silence_rules r ON r.rule_id=e.rule_id WHERE e.ended_at=?`, "rule_episode_closed", "Silence rule episode closed", slog.LevelInfo, func(rows *sql.Rows) ([]slog.Attr, error) {
-		var target, silenceID string
-		var episodeID int64
-		err := rows.Scan(&target, &silenceID, &episodeID)
-		return []slog.Attr{slog.String("target", target), slog.String("silence_id", silenceID), slog.Int64("episode_id", episodeID), slog.String("reason_code", "absent_confirmed")}, err
-	})
-	logRows(`SELECT r.cluster_id, r.silence_id, rev.rule_id, rev.revision_id, rev.revision_number FROM silence_revisions rev JOIN silence_rules r ON r.rule_id=rev.rule_id WHERE rev.first_observed_at=?`, "rule_revision_created", "Silence rule revision created", slog.LevelDebug, func(rows *sql.Rows) ([]slog.Attr, error) {
-		var target, silenceID string
-		var ruleID, revisionID int64
-		var revisionNumber int
-		err := rows.Scan(&target, &silenceID, &ruleID, &revisionID, &revisionNumber)
-		return []slog.Attr{slog.String("target", target), slog.String("silence_id", silenceID), slog.Int64("rule_id", ruleID), slog.Int64("revision_id", revisionID), slog.Int("revision_number", revisionNumber)}, err
-	})
-	logRows(`SELECT job_id, total_candidates, trigger_type, (SELECT COUNT(*) FROM silence_recheck_jobs open_jobs WHERE open_jobs.status IN ('queued','running','failed')) FROM silence_recheck_jobs WHERE created_at=?`, "recheck_job_queued", "Silence recheck job queued", slog.LevelInfo, func(rows *sql.Rows) ([]slog.Attr, error) {
-		var jobID int64
-		var candidates int
-		var trigger string
-		var queueDepth int
-		err := rows.Scan(&jobID, &candidates, &trigger, &queueDepth)
-		return []slog.Attr{slog.Int64("job_id", jobID), slog.Int("candidate_count", candidates), slog.Int("queue_depth", queueDepth), slog.String("reason_code", trigger)}, err
-	})
 }
 
 func BuildGroupingFingerprint(cfg GroupingConfig) string {
@@ -2988,72 +3505,23 @@ func BuildGroupingFingerprint(cfg GroupingConfig) string {
 }
 
 func (s *Store) RunRegroupToConfig(ctx context.Context, cfg GroupingConfig, batchSize int) (RegroupResult, error) {
-	if s == nil || s.db == nil {
-		return RegroupResult{}, ErrStoreNotInitialized
-	}
-	if batchSize < 1 {
-		batchSize = 1000
-	}
-
-	targetFingerprint := BuildGroupingFingerprint(cfg)
-	started, resumed, total, err := s.beginOrResumeRegroup(ctx, targetFingerprint)
-	if err != nil {
-		return RegroupResult{}, err
-	}
-	if !started {
-		return RegroupResult{Total: total}, nil
-	}
-	if resumed {
-		runtimeLog.InfoContext(ctx, "lifecycle_regroup", "regroup_resumed", "Alert lifecycle regroup resumed", slog.String("target_fingerprint", targetFingerprint), slog.Int("total", total))
-	} else {
-		runtimeLog.InfoContext(ctx, "lifecycle_regroup", "regroup_started", "Alert lifecycle regroup started", slog.String("target_fingerprint", targetFingerprint), slog.Int("total", total), slog.Int("batch_size", batchSize))
-	}
-
-	compiled, err := compileGroupingConfig(cfg)
-	if err != nil {
-		_ = s.failRegroup(ctx, targetFingerprint, fmt.Sprintf("invalid grouping config: %v", err))
-		return RegroupResult{}, err
-	}
-
-	result := RegroupResult{Total: total}
-
-	for {
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return result, ctx.Err()
-			default:
-			}
-		}
-
-		batchStartedAt := time.Now()
-		done, processedInBatch, updatedInBatch, totalRows, batchErr := s.runRegroupBatch(ctx, targetFingerprint, compiled, batchSize)
-		if batchErr != nil {
-			_ = s.failRegroup(ctx, targetFingerprint, batchErr.Error())
-			return result, batchErr
-		}
-		result.Processed += processedInBatch
-		result.Updated += updatedInBatch
-		result.Total = totalRows
-		runtimeLog.DebugContext(ctx, "lifecycle_regroup", "regroup_batch_completed", "Alert lifecycle regroup batch completed", slog.Int("processed", processedInBatch), slog.Int("updated", updatedInBatch), slog.Int("processed_total", result.Processed), slog.Int("total", totalRows), slog.Duration("duration", time.Since(batchStartedAt)))
-
-		if done {
-			return result, nil
-		}
-	}
+	return s.runRegroupToConfigWithReconciliation(ctx, cfg, batchSize)
 }
 
 func (s *Store) beginOrResumeRegroup(ctx context.Context, targetFingerprint string) (bool, bool, int, error) {
+	result, err := s.beginOrResumeRegroupPhase(ctx, targetFingerprint, nil, nil)
+	return result.started, result.resumed, result.total, err
+}
+
+func (s *Store) beginOrResumeRegroupPhase(ctx context.Context, targetFingerprint string, completion *regroupPhaseCompletion, finalizer *writerAfterCommitFinalizer) (regroupStartResult, error) {
 	now := time.Now().UTC()
-	result, err := withWriterTxValue(ctx, s, func(tx *sql.Tx) (regroupStartResult, error) {
+	return withWriterTxValueAfterCommit(ctx, s, writerOperationRegroupBegin, func(tx *sql.Tx) (regroupStartResult, error) {
 		currentFingerprint, err := readMetadataStringTx(tx, metaGroupingFingerprint)
 		if err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 		status, err := readMetadataStringTx(tx, metaRegroupStatus)
 		if err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 		status = strings.TrimSpace(status)
@@ -3062,60 +3530,57 @@ func (s *Store) beginOrResumeRegroup(ctx context.Context, targetFingerprint stri
 		}
 		activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
 		if err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 
 		totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
 		if err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, fmt.Errorf("failed to count rows for regroup: %w", err)
 		}
 
 		if strings.TrimSpace(currentFingerprint) == targetFingerprint && status == regroupStatusReady {
-			return regroupStartResult{total: totalRows}, nil
+			result := regroupStartResult{total: totalRows}
+			if completion != nil {
+				completion.setBegin(result)
+			}
+			return result, nil
 		}
 
 		resume := status == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint
 		if !resume {
 			if err = setMetadataIntTx(tx, metaRegroupProcessed, 0); err != nil {
-				_ = tx.Rollback()
 				return regroupStartResult{}, err
 			}
 			if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
-				_ = tx.Rollback()
 				return regroupStartResult{}, err
 			}
 			if err = setMetadataTimeTx(tx, metaRegroupStartedAt, &now); err != nil {
-				_ = tx.Rollback()
 				return regroupStartResult{}, err
 			}
 		}
 
 		if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusRunning); err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 		if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 		if err = setMetadataTx(tx, metaRegroupTargetFingerprint, targetFingerprint); err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 		if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 		if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, nil); err != nil {
-			_ = tx.Rollback()
 			return regroupStartResult{}, err
 		}
 
-		return regroupStartResult{started: true, resumed: resume, total: totalRows}, nil
-	})
-	return result.started, result.resumed, result.total, err
+		result := regroupStartResult{started: true, resumed: resume, total: totalRows}
+		if completion != nil {
+			completion.setBegin(result)
+		}
+		return result, nil
+	}, finalizer)
 }
 
 type regroupStartResult struct {
@@ -3162,38 +3627,41 @@ func compileGroupingConfig(cfg GroupingConfig) (compiledGroupingConfig, error) {
 	return out, nil
 }
 
-func (s *Store) runRegroupBatch(ctx context.Context, targetFingerprint string, cfg compiledGroupingConfig, batchSize int) (bool, int, int, int, error) {
-	return withWriterTxTuple(ctx, s, func(tx *sql.Tx) (bool, int, int, int, error) {
+func (s *Store) runRegroupBatchPhase(ctx context.Context, targetFingerprint string, cfg compiledGroupingConfig, batchSize int, completion *regroupPhaseCompletion, finalizer *writerAfterCommitFinalizer) (writerTupleResult, error) {
+	return withWriterTxTupleAfterCommit(ctx, s, writerOperationRegroupBatch, func(tx *sql.Tx) (bool, int, int, int, error) {
 		status, err := readMetadataStringTx(tx, metaRegroupStatus)
 		if err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, 0, err
 		}
 		if strings.TrimSpace(status) != regroupStatusRunning {
-			return true, 0, 0, 0, nil
+			result := writerTupleResult{done: true}
+			if completion != nil {
+				completion.setBatch(result)
+			}
+			return result.done, result.processed, result.updated, result.total, nil
 		}
 		activeTarget, err := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
 		if err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, 0, err
 		}
 		if strings.TrimSpace(activeTarget) != targetFingerprint {
-			return true, 0, 0, 0, nil
+			result := writerTupleResult{done: true}
+			if completion != nil {
+				completion.setBatch(result)
+			}
+			return result.done, result.processed, result.updated, result.total, nil
 		}
 
 		cursor, err := readMetadataInt64Tx(tx, metaRegroupCursorRowID)
 		if err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, 0, err
 		}
 		processed, err := readMetadataIntTx(tx, metaRegroupProcessed)
 		if err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, 0, err
 		}
 		totalRows, err := queryInt(tx, `SELECT COUNT(*) FROM alert_states`)
 		if err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, 0, fmt.Errorf("failed to count rows in regroup batch: %w", err)
 		}
 
@@ -3205,7 +3673,6 @@ ORDER BY rowid ASC
 LIMIT ?
 `, cursor, batchSize)
 		if err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, 0, fmt.Errorf("failed to select regroup batch rows: %w", err)
 		}
 
@@ -3214,14 +3681,14 @@ LIMIT ?
 			var row regroupRow
 			if scanErr := rows.Scan(&row.RowID, &row.AlertID, &row.Receiver, &row.LabelsJSON); scanErr != nil {
 				rows.Close()
-				_ = tx.Rollback()
+
 				return false, 0, 0, 0, fmt.Errorf("failed to scan regroup row: %w", scanErr)
 			}
 			batch = append(batch, row)
 		}
 		if err = rows.Err(); err != nil {
 			rows.Close()
-			_ = tx.Rollback()
+
 			return false, 0, 0, 0, fmt.Errorf("failed to iterate regroup rows: %w", err)
 		}
 		rows.Close()
@@ -3229,34 +3696,31 @@ LIMIT ?
 		if len(batch) == 0 {
 			now := time.Now().UTC()
 			if err = setMetadataTx(tx, metaGroupingFingerprint, targetFingerprint); err != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, 0, err
 			}
 			if err = setMetadataTx(tx, metaRegroupStatus, regroupStatusReady); err != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, 0, err
 			}
 			if err = setMetadataTx(tx, metaRegroupError, ""); err != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, 0, err
 			}
 			if err = setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, 0, err
 			}
 			if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, 0); err != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, 0, err
 			}
 			if err = setMetadataIntTx(tx, metaRegroupProcessed, totalRows); err != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, 0, err
 			}
 			if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, 0, err
 			}
-			return true, 0, 0, totalRows, nil
+			result := writerTupleResult{done: true, total: totalRows}
+			if completion != nil {
+				completion.setBatch(result)
+			}
+			return result.done, result.processed, result.updated, result.total, nil
 		}
 
 		updated := 0
@@ -3264,7 +3728,6 @@ LIMIT ?
 		for _, row := range batch {
 			groupID, groupLabelsJSON, computeErr := computeGroupFromAlertLabels(row.Receiver, row.LabelsJSON, cfg)
 			if computeErr != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, totalRows, fmt.Errorf("failed to regroup alert %s: %w", row.AlertID, computeErr)
 			}
 
@@ -3275,7 +3738,6 @@ SET group_id = ?, group_labels_json = ?, updated_at = ?
 WHERE rowid = ?
 `, groupID, groupLabelsJSON, updatedAt, row.RowID)
 			if updateErr != nil {
-				_ = tx.Rollback()
 				return false, 0, 0, totalRows, fmt.Errorf("failed to update regrouped row: %w", updateErr)
 			}
 			affected, _ := res.RowsAffected()
@@ -3291,46 +3753,42 @@ WHERE rowid = ?
 		}
 
 		if err = setMetadataInt64Tx(tx, metaRegroupCursorRowID, lastRowID); err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, totalRows, err
 		}
 		if err = setMetadataIntTx(tx, metaRegroupProcessed, processed); err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, totalRows, err
 		}
 		if err = setMetadataIntTx(tx, metaRegroupTotal, totalRows); err != nil {
-			_ = tx.Rollback()
 			return false, 0, 0, totalRows, err
 		}
 
-		return false, len(batch), updated, totalRows, nil
-	})
+		result := writerTupleResult{processed: len(batch), updated: updated, total: totalRows}
+		if completion != nil {
+			completion.setBatch(result)
+		}
+		return result.done, result.processed, result.updated, result.total, nil
+	}, finalizer)
 }
 
 func (s *Store) failRegroup(ctx context.Context, targetFingerprint, reason string) error {
-	return s.withWriterTx(ctx, func(tx *sql.Tx) error {
+	return s.withWriterTx(ctx, writerOperationRegroupFailure, func(tx *sql.Tx) error {
 		status, readErr := readMetadataStringTx(tx, metaRegroupStatus)
 		if readErr != nil {
-			_ = tx.Rollback()
 			return readErr
 		}
 		activeTarget, readErr := readMetadataStringTx(tx, metaRegroupTargetFingerprint)
 		if readErr != nil {
-			_ = tx.Rollback()
 			return readErr
 		}
 		if strings.TrimSpace(status) == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint {
 			now := time.Now().UTC()
 			if err := setMetadataTx(tx, metaRegroupStatus, regroupStatusError); err != nil {
-				_ = tx.Rollback()
 				return err
 			}
 			if err := setMetadataTx(tx, metaRegroupError, strings.TrimSpace(reason)); err != nil {
-				_ = tx.Rollback()
 				return err
 			}
 			if err := setMetadataTimeTx(tx, metaRegroupFinishedAt, &now); err != nil {
-				_ = tx.Rollback()
 				return err
 			}
 		}
@@ -3633,6 +4091,9 @@ func normalizeLiveTargets(live LiveAlertSnapshot) []LiveTargetSnapshot {
 				SourceNames: sources,
 			})
 		}
+		slices.SortFunc(out, func(a, b LiveTargetSnapshot) int {
+			return strings.Compare(a.Target, b.Target)
+		})
 		return out
 	}
 
@@ -4063,6 +4524,10 @@ WHERE alert_id = ?
 }
 
 func upsertTargetStateTx(tx *sql.Tx, alertID string, row targetStateRow, reasonCode string, changedAt time.Time) error {
+	return upsertTargetStateWithEventsTx(tx, alertID, row, reasonCode, changedAt, nil)
+}
+
+func upsertTargetStateWithEventsTx(tx *sql.Tx, alertID string, row targetStateRow, reasonCode string, changedAt time.Time, collector *runtimeEventCollector) error {
 	sourceMembersJSON, err := json.Marshal(uniqueSortedStrings(row.SourceMembers))
 	if err != nil {
 		return fmt.Errorf("failed to marshal target source members: %w", err)
@@ -4182,6 +4647,22 @@ INSERT INTO alert_target_events(
 		if err != nil {
 			return fmt.Errorf("failed to insert target state event: %w", err)
 		}
+		eventName := "target_transition"
+		eventLevel := slog.LevelDebug
+		if reasonCode == "poll_target_retired" {
+			eventName = "target_retired"
+			eventLevel = slog.LevelInfo
+		}
+		collector.append(runtimeEvent{level: eventLevel, component: "alert_lifecycle", event: eventName, message: "Alert target lifecycle state changed", attrs: []slog.Attr{
+			slog.String("alert_id", alertID), slog.String("target", row.Target),
+			slog.String("old_state", nullableStringValue(nullableStringFromNull(oldStateRaw))), slog.String("new_state", string(row.State)),
+			slog.String("old_raw_state", nullableStringValue(nullableStringFromNull(oldRawStateRaw))), slog.String("new_raw_state", string(row.RawState)),
+			runtimeEventNullableIntBoolAttr("old_is_live", oldIsLiveRaw), slog.Bool("new_is_live", row.IsLive),
+			runtimeEventNullableIntBoolAttr("old_is_suppressed", oldIsSuppressedRaw), slog.Bool("new_is_suppressed", row.IsSuppressed),
+			runtimeEventNullableIntBoolAttr("old_is_resolved", oldIsResolvedRaw), slog.Bool("new_is_resolved", row.IsResolved),
+			slog.Bool("old_retired", oldRetiredAtRaw.Valid), slog.Bool("new_retired", row.RetiredAt != nil),
+			runtimeEventStringAttr("reason_code", nullableStringValue(sanitizeReasonCode(ptrString(reasonCode)))),
+		}})
 	}
 
 	if row.RetiredAt != nil {
@@ -4303,6 +4784,10 @@ func nullableIntFromNull(v sql.NullInt64) *int {
 }
 
 func upsertTargetStatesFromLiveTx(tx *sql.Tx, alertID string, targets []LiveTargetSnapshot, matchLabelsJSON *string, successfulUpstreams map[string]bool, configuredSourcesByTarget map[string]map[string]struct{}, sourceManifestKnown bool, now time.Time) error {
+	return upsertTargetStatesFromLiveWithEventsTx(tx, alertID, targets, matchLabelsJSON, successfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now, nil)
+}
+
+func upsertTargetStatesFromLiveWithEventsTx(tx *sql.Tx, alertID string, targets []LiveTargetSnapshot, matchLabelsJSON *string, successfulUpstreams map[string]bool, configuredSourcesByTarget map[string]map[string]struct{}, sourceManifestKnown bool, now time.Time, collector *runtimeEventCollector) error {
 	if len(targets) == 0 {
 		return nil
 	}
@@ -4312,8 +4797,12 @@ func upsertTargetStatesFromLiveTx(tx *sql.Tx, alertID string, targets []LiveTarg
 		return err
 	}
 
+	orderedTargets := append([]LiveTargetSnapshot(nil), targets...)
+	slices.SortFunc(orderedTargets, func(a, b LiveTargetSnapshot) int {
+		return strings.Compare(strings.TrimSpace(a.Target), strings.TrimSpace(b.Target))
+	})
 	seenTargets := map[string]struct{}{}
-	for _, target := range targets {
+	for _, target := range orderedTargets {
 		targetName := strings.TrimSpace(target.Target)
 		if targetName == "" {
 			continue
@@ -4344,16 +4833,22 @@ func upsertTargetStatesFromLiveTx(tx *sql.Tx, alertID string, targets []LiveTarg
 		}
 		lastSeen := now
 		row.LastSeenAt = &lastSeen
-		if err := upsertTargetStateTx(tx, alertID, row, "poll_target_seen", now); err != nil {
+		if err := upsertTargetStateWithEventsTx(tx, alertID, row, "poll_target_seen", now, collector); err != nil {
 			return err
 		}
 	}
 
-	for targetName, row := range existing {
+	existingTargetNames := make([]string, 0, len(existing))
+	for targetName := range existing {
+		existingTargetNames = append(existingTargetNames, targetName)
+	}
+	slices.Sort(existingTargetNames)
+	for _, targetName := range existingTargetNames {
+		row := existing[targetName]
 		if _, ok := seenTargets[targetName]; ok {
 			continue
 		}
-		if err := applyTargetAbsencePlanTx(tx, alertID, row, successfulUpstreams, configuredSourcesByTarget[targetName], sourceManifestKnown, now); err != nil {
+		if err := applyTargetAbsencePlanWithEventsTx(tx, alertID, row, successfulUpstreams, configuredSourcesByTarget[targetName], sourceManifestKnown, now, collector); err != nil {
 			return err
 		}
 	}
@@ -4370,33 +4865,43 @@ func fingerprintMatchLabelsJSON(raw *string) string {
 }
 
 func markMissingTargetStatesNonLiveTx(tx *sql.Tx, current AlertCurrent, successfulUpstreams map[string]bool, configuredSourcesByTarget map[string]map[string]struct{}, sourceManifestKnown bool, now time.Time) error {
+	return markMissingTargetStatesNonLiveWithEventsTx(tx, current, successfulUpstreams, configuredSourcesByTarget, sourceManifestKnown, now, nil)
+}
+
+func markMissingTargetStatesNonLiveWithEventsTx(tx *sql.Tx, current AlertCurrent, successfulUpstreams map[string]bool, configuredSourcesByTarget map[string]map[string]struct{}, sourceManifestKnown bool, now time.Time, collector *runtimeEventCollector) error {
 	existing, err := readTargetStatesTx(tx, current.AlertID)
 	if err != nil {
 		return err
 	}
 
-	for _, row := range existing {
-		if err := applyTargetAbsencePlanTx(tx, current.AlertID, row, successfulUpstreams, configuredSourcesByTarget[row.Target], sourceManifestKnown, now); err != nil {
+	targetNames := make([]string, 0, len(existing))
+	for targetName := range existing {
+		targetNames = append(targetNames, targetName)
+	}
+	slices.Sort(targetNames)
+	for _, targetName := range targetNames {
+		row := existing[targetName]
+		if err := applyTargetAbsencePlanWithEventsTx(tx, current.AlertID, row, successfulUpstreams, configuredSourcesByTarget[row.Target], sourceManifestKnown, now, collector); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func applyTargetAbsencePlanTx(tx *sql.Tx, alertID string, row targetStateRow, successfulUpstreams map[string]bool, configuredSources map[string]struct{}, sourceManifestKnown bool, now time.Time) error {
+func applyTargetAbsencePlanWithEventsTx(tx *sql.Tx, alertID string, row targetStateRow, successfulUpstreams map[string]bool, configuredSources map[string]struct{}, sourceManifestKnown bool, now time.Time, collector *runtimeEventCollector) error {
 	topology := PlanTargetTopology(TargetTopologyObservation{
 		PreviousMembers: row.SourceMembers,
 		Configured:      configuredSources, ManifestKnown: sourceManifestKnown,
 		Successful: successfulUpstreams,
 	})
 	if topology.Retire {
-		return retireTargetStateTx(tx, alertID, row, now)
+		return retireTargetStateWithEventsTx(tx, alertID, row, now, collector)
 	}
 	membersChanged := !slices.Equal(topology.Members, row.SourceMembers)
 	row.SourceMembers = topology.Members
 	if !topology.Complete || !row.IsLive {
 		if membersChanged {
-			return upsertTargetStateTx(tx, alertID, row, "poll_target_topology_reconciled", now)
+			return upsertTargetStateWithEventsTx(tx, alertID, row, "poll_target_topology_reconciled", now, collector)
 		}
 		return nil
 	}
@@ -4409,20 +4914,20 @@ func applyTargetAbsencePlanTx(tx *sql.Tx, alertID string, row targetStateRow, su
 	row.IsSuppressed = absencePlan.IsSuppressed
 	row.IsResolved = absencePlan.IsResolved
 	row.State = absencePlan.ProjectedState()
-	if err := upsertTargetStateTx(tx, alertID, row, "poll_target_disappeared", now); err != nil {
+	if err := upsertTargetStateWithEventsTx(tx, alertID, row, "poll_target_disappeared", now, collector); err != nil {
 		return err
 	}
 	if row.State == StateInactive {
-		return enqueueAlertForCurrentRecheckContextTx(tx, alertID, now)
+		return enqueueAlertForCurrentRecheckContextWithEventsTx(tx, alertID, now, collector)
 	}
 	return nil
 }
 
-func retireTargetStateTx(tx *sql.Tx, alertID string, row targetStateRow, now time.Time) error {
+func retireTargetStateWithEventsTx(tx *sql.Tx, alertID string, row targetStateRow, now time.Time, collector *runtimeEventCollector) error {
 	retiredAt := now.UTC()
 	row.SourceMembers = nil
 	row.RetiredAt = &retiredAt
-	return upsertTargetStateTx(tx, alertID, row, "poll_target_retired", now)
+	return upsertTargetStateWithEventsTx(tx, alertID, row, "poll_target_retired", now, collector)
 }
 
 func configuredSourceNames(sources []SourceSilenceState) (map[string]struct{}, bool) {
@@ -4610,15 +5115,49 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 	var committedJobID int64
 	var committedStatus string
 	var committedStarted bool
+	var committedCompleted bool
+	var selectedJobStatus string
+	var selectedQueueDepth int
+	var selectedRetryCount int
 	var committedPriorProcessed, committedTotalCandidates, committedPromoted, committedProcessed, committedStale, committedMissing, committedIneligible, committedIncomplete int
+	var committedJobProcessed, committedJobPromoted, committedJobMissing, committedJobIneligible, committedJobIncomplete, committedJobStale int
+	var committedPinnedRuleCount, committedSourceCount int
 	if batchSize <= 0 {
 		batchSize = 1000
 	}
 
-	promotedResult, resultErr = withWriterTxValue(ctx, s, func(tx *sql.Tx) (int, error) {
+	recheckFinalizer := &writerAfterCommitFinalizer{
+		ctx:           ctx,
+		operationKind: writerOperationRecheckBatch,
+		run: func(reconciled bool) {
+			if reconciled {
+				runtimeLog.InfoContext(ctx, "silence_recheck", "job_commit_reconciled", "Silence recheck commit was reconciled after a delayed ledger lookup", slog.String("writer_operation", writerOperationRecheckBatch), slog.Int64("job_id", committedJobID), slog.Int("processed", committedProcessed), slog.Int("promoted", committedPromoted), slog.Duration("duration", time.Since(startedAt)))
+			}
+			if committedJobID == 0 {
+				return
+			}
+			if committedStarted && committedStatus == "queued" {
+				runtimeLog.InfoContext(ctx, "silence_recheck", "job_started", "Silence recheck job started", slog.Int64("job_id", committedJobID), slog.Int("candidate_count", committedTotalCandidates), slog.Int("pinned_rule_count", committedPinnedRuleCount), slog.Int("source_count", committedSourceCount))
+			} else if committedStarted {
+				runtimeLog.InfoContext(ctx, "silence_recheck", "job_resumed", "Silence recheck job resumed", slog.Int64("job_id", committedJobID), slog.Int("prior_processed", committedPriorProcessed), slog.Int("candidate_count", committedTotalCandidates), slog.Int("pinned_rule_count", committedPinnedRuleCount), slog.Int("source_count", committedSourceCount))
+			}
+			if len(committedDecisions) > 0 {
+				emitRuntimeEventsContext(ctx, committedDecisions)
+			}
+			if committedCompleted {
+				runtimeLog.InfoContext(ctx, "silence_recheck", "job_completed", "Silence recheck job completed", slog.Int64("job_id", committedJobID), slog.Int("processed", committedJobProcessed), slog.Int("promoted", committedJobPromoted), slog.Int("missing_labels", committedJobMissing), slog.Int("ineligible", committedJobIneligible), slog.Int("incomplete_sources", committedJobIncomplete), slog.Int("stale", committedJobStale), slog.Duration("duration", time.Since(startedAt)))
+				return
+			}
+			level := slog.LevelDebug
+			if committedPromoted > 0 {
+				level = slog.LevelInfo
+			}
+			runtimeLog.Event(ctx, level, "silence_recheck", "batch_completed", "Silence recheck batch completed", slog.Int64("job_id", committedJobID), slog.Int("processed", committedProcessed), slog.Int("promoted", committedPromoted), slog.Int("stale", committedStale), slog.Int("missing_labels", committedMissing), slog.Int("ineligible", committedIneligible), slog.Int("incomplete_sources", committedIncomplete), slog.Duration("duration", time.Since(startedAt)))
+		},
+	}
+	promotedResult, resultErr = withWriterTxValueAfterCommit(ctx, s, writerOperationRecheckBatch, func(tx *sql.Tx) (int, error) {
 		jobID, cursor, status, err := selectNextRecheckJobTx(tx)
 		if err != nil {
-			_ = tx.Rollback()
 			return 0, err
 		}
 		if jobID == 0 {
@@ -4631,17 +5170,21 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 			queueDepth = -1
 			runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to count silence recheck queue for logging", slog.Int64("job_id", jobID), slog.Any("error", queueErr))
 		}
-		var priorProcessed, totalCandidates int
-		if queryErr := tx.QueryRow(`SELECT processed_candidates, total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&priorProcessed, &totalCandidates); queryErr != nil {
+		var priorProcessed, totalCandidates, retryCount int
+		if queryErr := tx.QueryRow(`SELECT processed_candidates, total_candidates, retry_count FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&priorProcessed, &totalCandidates, &retryCount); queryErr != nil {
 			priorProcessed = -1
 			totalCandidates = -1
+			retryCount = -1
 			runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to read silence recheck job progress for logging", slog.Int64("job_id", jobID), slog.Any("error", queryErr))
 		}
-		runtimeLog.DebugContext(ctx, "silence_recheck", "job_selected", "Silence recheck job selected", slog.Int64("job_id", jobID), slog.String("status", status), slog.Int("queue_depth", queueDepth), slog.Int("batch_size", batchSize))
+		selectedJobStatus = status
+		selectedQueueDepth = queueDepth
+		selectedRetryCount = retryCount
+		runtimeLog.DebugContext(ctx, "silence_recheck", "job_selected", "Silence recheck job selected", slog.Int64("job_id", jobID), slog.String("status", status), slog.Int("queue_depth", queueDepth), slog.Int("retry_count", retryCount), slog.Int("batch_size", batchSize))
 		if !RecheckJobCanRun(status, false) {
 			var lastError sql.NullString
 			_ = tx.QueryRow(`SELECT last_error FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&lastError)
-			_ = tx.Rollback()
+
 			if s.recheckBlockedJobLogged != jobID {
 				runtimeLog.WarnContext(ctx, "silence_recheck", "failed_job_blocks_queue", "Failed silence recheck job blocks the queue", slog.Int64("job_id", jobID), slog.Int("queue_depth", queueDepth))
 				s.recheckBlockedJobLogged = jobID
@@ -4657,38 +5200,39 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 		nowRaw := now.Format(time.RFC3339Nano)
 		if status == "queued" {
 			if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='running', started_at=COALESCE(started_at, ?) WHERE job_id = ?`, nowRaw, jobID); err != nil {
-				_ = tx.Rollback()
 				return 0, fmt.Errorf("failed to mark recheck job running: %w", err)
 			}
 		}
 
 		rules, err := loadRecheckJobRulesTx(tx, jobID)
 		if err != nil {
-			_ = tx.Rollback()
 			return 0, err
 		}
+		committedPinnedRuleCount = len(rules)
 		sourceStatuses, err := loadRecheckJobSourceStatusesTx(tx, jobID)
 		if err != nil {
-			_ = tx.Rollback()
 			return 0, err
 		}
+		committedSourceCount = len(sourceStatuses)
 		if err = attachEligibleRecheckCandidatesTx(tx, jobID); err != nil {
-			_ = tx.Rollback()
 			return 0, err
 		}
 
 		candidates, err := loadRecheckCandidatesTx(tx, jobID, batchSize)
 		if err != nil {
-			_ = tx.Rollback()
 			return 0, err
 		}
 		if len(candidates) == 0 {
 			if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='completed', open_context_fingerprint=NULL, finished_at=?, last_error=NULL WHERE job_id = ?`, nowRaw, jobID); err != nil {
-				_ = tx.Rollback()
 				return 0, fmt.Errorf("failed to mark recheck job completed: %w", err)
 			}
 			committedJobID = jobID
 			committedStatus = status
+			committedStarted = true
+			committedCompleted = true
+			if err = tx.QueryRow(`SELECT processed_candidates, promoted_alerts, skipped_missing_labels, skipped_ineligible, skipped_incomplete_sources, stale_conflicts, total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&committedJobProcessed, &committedJobPromoted, &committedJobMissing, &committedJobIneligible, &committedJobIncomplete, &committedJobStale, &committedTotalCandidates); err != nil {
+				return 0, fmt.Errorf("failed to capture completed recheck counters: %w", err)
+			}
 			return 0, nil
 		}
 
@@ -4706,7 +5250,6 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 			processed++
 			lastCursor = &cand.AlertID
 			if _, err = tx.Exec(`UPDATE silence_recheck_job_candidates SET processed_at=? WHERE job_id=? AND alert_id=?`, nowRaw, jobID, cand.AlertID); err != nil {
-				_ = tx.Rollback()
 				return 0, fmt.Errorf("failed marking recheck candidate processed: %w", err)
 			}
 			if strings.TrimSpace(cand.MatchLabelsJSON) == "" {
@@ -4732,7 +5275,6 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 
 			targetRows, terr := readTargetStatesTx(tx, cand.AlertID)
 			if terr != nil {
-				_ = tx.Rollback()
 				return 0, terr
 			}
 			if len(targetRows) == 0 {
@@ -4754,7 +5296,6 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 				}
 				updated, transitionID, uerr := promoteAlertSuppressedCAS(tx, cand, now)
 				if uerr != nil {
-					_ = tx.Rollback()
 					return 0, uerr
 				}
 				if !updated {
@@ -4768,7 +5309,6 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 				promoted++
 				appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID)}})
 				if err = insertSuppressionCauseHistoryTx(tx, cand.AlertID, transitionID, jobID, now, matched); err != nil {
-					_ = tx.Rollback()
 					return 0, err
 				}
 				continue
@@ -4793,7 +5333,6 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 				if row.IsSuppressed {
 					historyID, found, causeErr := latestTargetSuppressionCauseHistoryTx(tx, cand.AlertID, row.Target)
 					if causeErr != nil {
-						_ = tx.Rollback()
 						return 0, causeErr
 					}
 					if !found {
@@ -4825,14 +5364,12 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 
 				applied, eventID, perr := promoteTargetSuppressedCASTx(tx, cand.AlertID, row, now, "silence_match_promoted")
 				if perr != nil {
-					_ = tx.Rollback()
 					return 0, perr
 				}
 				if applied {
 					anyTargetApplied = true
 					historyID, causeErr := insertTargetRecheckSuppressionCauseTx(tx, cand.AlertID, row.Target, eventID, jobID, now, matched)
 					if causeErr != nil {
-						_ = tx.Rollback()
 						return 0, causeErr
 					}
 					targetCauseHistoryIDs = append(targetCauseHistoryIDs, historyID)
@@ -4869,7 +5406,6 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 
 			updated, transitionID, uerr := promoteAlertSuppressedCAS(tx, cand, now)
 			if uerr != nil {
-				_ = tx.Rollback()
 				return 0, uerr
 			}
 			if !updated {
@@ -4880,7 +5416,6 @@ func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int
 			promoted++
 			appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID)}})
 			if err = insertTargetAggregateSuppressionCauseTx(tx, cand.AlertID, transitionID, now, targetCauseHistoryIDs); err != nil {
-				_ = tx.Rollback()
 				return 0, err
 			}
 		}
@@ -4895,7 +5430,6 @@ SET cursor_alert_id = ?,
     stale_conflicts = stale_conflicts + ?
 WHERE job_id = ?
 `, lastCursor, processed, promoted, missing, ineligible, incompleteSources, stale, jobID); err != nil {
-			_ = tx.Rollback()
 			return 0, fmt.Errorf("failed to update recheck job progress: %w", err)
 		}
 
@@ -4911,64 +5445,30 @@ WHERE job_id = ?
 		committedMissing = missing
 		committedIneligible = ineligible
 		committedIncomplete = incompleteSources
+		if err = tx.QueryRow(`SELECT processed_candidates, promoted_alerts, skipped_missing_labels, skipped_ineligible, skipped_incomplete_sources, stale_conflicts FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&committedJobProcessed, &committedJobPromoted, &committedJobMissing, &committedJobIneligible, &committedJobIncomplete, &committedJobStale); err != nil {
+			return 0, fmt.Errorf("failed to capture recheck counters: %w", err)
+		}
 		return promoted, nil
-	})
-
+	}, recheckFinalizer)
 	if resultErr != nil && selectedJobID != 0 {
-		nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
-		_, persistErr := withWriterTxValue(ctx, s, func(tx *sql.Tx) (struct{}, error) {
-			_, err := tx.Exec(`
-UPDATE silence_recheck_jobs
-SET status='failed', last_error=COALESCE(last_error, ?), finished_at=COALESCE(finished_at, ?)
-WHERE job_id=? AND status IN ('queued','running','failed')
-`, resultErr.Error(), nowRaw, selectedJobID)
-			return struct{}{}, err
-		})
-		if persistErr != nil {
-			runtimeLog.ErrorContext(ctx, "silence_recheck", "job_failure_persistence_failed", "Failed to persist silence recheck job failure", slog.Int64("job_id", selectedJobID), slog.Any("error", persistErr), slog.Duration("duration", time.Since(startedAt)))
+		if errors.Is(resultErr, ErrWriterCommitOutcomeUnknown) {
+			runtimeLog.ErrorContext(ctx, "silence_recheck", "job_commit_outcome_unknown", "Silence recheck job commit outcome is unknown; job failure was not persisted", slog.String("writer_operation", writerOperationRecheckBatch), slog.Int64("job_id", selectedJobID), slog.String("status", selectedJobStatus), slog.Int("queue_depth", selectedQueueDepth), slog.Int("retry_count", selectedRetryCount), slog.String("stage", "commit_reconcile"), slog.Duration("duration", time.Since(startedAt)), slog.Any("error", resultErr))
+			return promotedResult, resultErr
 		}
-		runtimeLog.ErrorContext(ctx, "silence_recheck", "job_failed", "Silence recheck job failed", slog.Int64("job_id", selectedJobID), slog.String("stage", "worker"), slog.Any("error", resultErr), slog.Duration("duration", time.Since(startedAt)))
-		return promotedResult, resultErr
+		if reason := recheckSelectedInfrastructureReason(ctx, resultErr); reason != "" {
+			if contractErr := emitRecheckInfrastructureBlocked(ctx, selectedJobID, writerOperationRecheckBatch, reason, resultErr); contractErr != nil {
+				return promotedResult, errors.Join(resultErr, contractErr)
+			}
+			return promotedResult, resultErr
+		}
+		return promotedResult, s.persistRecheckFailure(ctx, selectedJobID, resultErr, startedAt)
 	}
 
-	if resultErr == nil && committedJobID != 0 {
-		if committedStarted && committedStatus == "queued" {
-			runtimeLog.InfoContext(ctx, "silence_recheck", "job_started", "Silence recheck job started", slog.Int64("job_id", committedJobID), slog.Int("candidate_count", committedTotalCandidates))
-		} else if committedStarted {
-			runtimeLog.InfoContext(ctx, "silence_recheck", "job_resumed", "Silence recheck job resumed", slog.Int64("job_id", committedJobID), slog.Int("prior_processed", committedPriorProcessed), slog.Int("candidate_count", committedTotalCandidates))
-		}
-		if len(committedDecisions) > 0 {
-			emitRuntimeEventsContext(ctx, committedDecisions)
-		}
-		if committedProcessed == 0 && committedTotalCandidates == 0 {
-			logCompletedRecheckJob(ctx, s.db, committedJobID, time.Since(startedAt))
-		} else {
-			level := slog.LevelDebug
-			if committedPromoted > 0 {
-				level = slog.LevelInfo
-			}
-			runtimeLog.Event(ctx, level, "silence_recheck", "batch_completed", "Silence recheck batch completed", slog.Int64("job_id", committedJobID), slog.Int("processed", committedProcessed), slog.Int("promoted", committedPromoted), slog.Int("stale", committedStale), slog.Int("missing_labels", committedMissing), slog.Int("ineligible", committedIneligible), slog.Int("incomplete_sources", committedIncomplete), slog.Duration("duration", time.Since(startedAt)))
-		}
-	}
 	return promotedResult, resultErr
 }
 
 func recheckCandidateSkippedEvent(jobID int64, alertID, reason string) runtimeEvent {
 	return runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_skipped", message: "Silence recheck candidate skipped", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", alertID), slog.String("reason_code", reason)}}
-}
-
-func logCompletedRecheckJob(ctx context.Context, db *sql.DB, jobID int64, duration time.Duration) {
-	var processed, promoted, missing, ineligible, incomplete, stale int
-	err := db.QueryRow(`
-SELECT processed_candidates, promoted_alerts, skipped_missing_labels,
-       skipped_ineligible, skipped_incomplete_sources, stale_conflicts
-FROM silence_recheck_jobs WHERE job_id=?
-`, jobID).Scan(&processed, &promoted, &missing, &ineligible, &incomplete, &stale)
-	if err != nil {
-		runtimeLog.ErrorContext(ctx, "silence_recheck", "job_completion_log_failed", "Failed to load completed silence recheck job counters", slog.Int64("job_id", jobID), slog.Any("error", err))
-		return
-	}
-	runtimeLog.InfoContext(ctx, "silence_recheck", "job_completed", "Silence recheck job completed", slog.Int64("job_id", jobID), slog.Int("processed", processed), slog.Int("promoted", promoted), slog.Int("missing_labels", missing), slog.Int("ineligible", ineligible), slog.Int("incomplete_sources", incomplete), slog.Int("stale", stale), slog.Duration("duration", duration))
 }
 
 func attachEligibleRecheckCandidatesTx(tx *sql.Tx, jobID int64) error {
@@ -6005,12 +6505,21 @@ func areAllUpstreamsSuccessful(successful map[string]bool) bool {
 	if len(successful) == 0 {
 		return false
 	}
-	for _, ok := range successful {
-		if !ok {
+	for _, upstream := range sortedSuccessfulUpstreamNames(successful) {
+		if !successful[upstream] {
 			return false
 		}
 	}
 	return true
+}
+
+func sortedSuccessfulUpstreamNames(successful map[string]bool) []string {
+	names := make([]string, 0, len(successful))
+	for upstream := range successful {
+		names = append(names, upstream)
+	}
+	slices.Sort(names)
+	return names
 }
 
 func getCurrentAlertTx(tx *sql.Tx, alertID string) (AlertCurrent, error) {
@@ -6219,20 +6728,20 @@ WHERE alert_id IN (
 	return int(clampInt64ToInt(deleted)), nil
 }
 
-func runIncrementalVacuum(ctx context.Context, conn *sql.Conn) (int, error) {
-	if conn == nil {
+func runIncrementalVacuum(ctx context.Context, tx *sql.Tx) (int, error) {
+	if tx == nil {
 		return 0, ErrStoreNotInitialized
 	}
-	before, err := queryIntContext(ctx, conn, `PRAGMA freelist_count`)
+	before, err := queryIntContext(ctx, tx, `PRAGMA freelist_count`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read freelist_count before vacuum: %w", err)
 	}
 
-	if _, err = conn.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
+	if _, err = tx.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
 		return 0, fmt.Errorf("failed to run incremental vacuum: %w", err)
 	}
 
-	after, err := queryIntContext(ctx, conn, `PRAGMA freelist_count`)
+	after, err := queryIntContext(ctx, tx, `PRAGMA freelist_count`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read freelist_count after vacuum: %w", err)
 	}
@@ -6246,26 +6755,34 @@ func runIncrementalVacuum(ctx context.Context, conn *sql.Conn) (int, error) {
 
 type silenceReconciliationResult struct {
 	queued int
-	events []runtimeEvent
 }
 
-func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceState, now time.Time) (silenceReconciliationResult, error) {
+func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceState, now time.Time, collector *runtimeEventCollector) (silenceReconciliationResult, error) {
 	if sources == nil {
 		return silenceReconciliationResult{}, nil
 	}
 	result := silenceReconciliationResult{}
 	previousConsistency, consistencyErr := readClusterConsistencyStatusesTx(tx)
 	if consistencyErr != nil {
-		result.events = append(result.events, runtimeEvent{level: slog.LevelError, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect previous HA consistency state for logging", attrs: []slog.Attr{slog.Any("error", consistencyErr)}})
+		collector.append(runtimeEvent{level: slog.LevelError, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect previous HA consistency state for logging", attrs: []slog.Attr{slog.Any("error", consistencyErr)}})
 		previousConsistency = map[string]clusterConsistencySnapshot{}
 	}
 	normalizedSources := make([]SourceSilenceState, len(sources))
 	copy(normalizedSources, sources)
+	slices.SortFunc(normalizedSources, func(a, b SourceSilenceState) int {
+		if sourceCompare := strings.Compare(strings.TrimSpace(a.SourceName), strings.TrimSpace(b.SourceName)); sourceCompare != 0 {
+			return sourceCompare
+		}
+		return strings.Compare(strings.TrimSpace(a.ClusterID), strings.TrimSpace(b.ClusterID))
+	})
 	for i := range normalizedSources {
 		validCount := len(knownSourceSilences(normalizedSources[i].Silences))
 		malformedCount := normalizedSources[i].MalformedRules + len(normalizedSources[i].Silences) - validCount
 		normalizedSources[i].Silences = knownSourceSilences(normalizedSources[i].Silences)
-		result.events = append(result.events, runtimeEvent{level: slog.LevelDebug, component: "silence_reconciliation", event: "source_snapshot_received", message: "Alertmanager silence source snapshot received", attrs: []slog.Attr{slog.String("source", strings.TrimSpace(normalizedSources[i].SourceName)), slog.String("target", strings.TrimSpace(normalizedSources[i].ClusterID)), slog.String("sync_status", normalizedSourceSyncStatus(normalizedSources[i].SyncStatus)), slog.Int("valid_rule_count", validCount), slog.Int("malformed_rule_count", malformedCount)}})
+		slices.SortFunc(normalizedSources[i].Silences, func(a, b SourceSilenceSnapshot) int {
+			return strings.Compare(strings.TrimSpace(a.SilenceID), strings.TrimSpace(b.SilenceID))
+		})
+		collector.append(runtimeEvent{level: slog.LevelDebug, component: "silence_reconciliation", event: "source_snapshot_received", message: "Alertmanager silence source snapshot received", attrs: []slog.Attr{slog.String("source", strings.TrimSpace(normalizedSources[i].SourceName)), slog.String("target", strings.TrimSpace(normalizedSources[i].ClusterID)), slog.String("sync_status", normalizedSourceSyncStatus(normalizedSources[i].SyncStatus)), slog.Int("valid_rule_count", validCount), slog.Int("malformed_rule_count", malformedCount)}})
 	}
 	sources = normalizedSources
 	shouldEnqueueRecheck := false
@@ -6301,7 +6818,7 @@ func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceStat
 			return silenceReconciliationResult{}, err
 		}
 		if syncStatus == "success" {
-			if err := replaceSourceSilenceRelationsTx(tx, sourceName, clusterID, source.Silences, now); err != nil {
+			if err := replaceSourceSilenceRelationsWithEventsTx(tx, sourceName, clusterID, source.Silences, now, collector); err != nil {
 				return silenceReconciliationResult{}, err
 			}
 		}
@@ -6312,11 +6829,11 @@ func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceStat
 		}
 		switch {
 		case recovered:
-			result.events = append(result.events, runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "source_recovered", message: "Alertmanager silence source recovered", attrs: []slog.Attr{slog.String("source", sourceName), slog.String("target", clusterID), slog.String("previous_status", previousStatus)}})
+			collector.append(runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "source_recovered", message: "Alertmanager silence source recovered", attrs: []slog.Attr{slog.String("source", sourceName), slog.String("target", clusterID), slog.String("previous_status", previousStatus)}})
 		case syncStatus != "success" && previousStatus != syncStatus:
-			result.events = append(result.events, runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "source_sync_failed", message: "Alertmanager silence source synchronization failed", attrs: []slog.Attr{slog.String("source", sourceName), slog.String("target", clusterID), slog.String("sync_status", syncStatus)}})
+			collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "source_sync_failed", message: "Alertmanager silence source synchronization failed", attrs: []slog.Attr{slog.String("source", sourceName), slog.String("target", clusterID), slog.String("sync_status", syncStatus)}})
 		case syncStatus != "success":
-			result.events = append(result.events, runtimeEvent{level: slog.LevelDebug, component: "silence_reconciliation", event: "source_sync_failed_unchanged", message: "Alertmanager silence source remains unavailable", attrs: []slog.Attr{slog.String("source", sourceName), slog.String("target", clusterID), slog.String("sync_status", syncStatus)}})
+			collector.append(runtimeEvent{level: slog.LevelDebug, component: "silence_reconciliation", event: "source_sync_failed_unchanged", message: "Alertmanager silence source remains unavailable", attrs: []slog.Attr{slog.String("source", sourceName), slog.String("target", clusterID), slog.String("sync_status", syncStatus)}})
 		}
 	}
 	retired, retirementErr := retireDeconfiguredSourcesTx(tx, configured, now)
@@ -6326,10 +6843,10 @@ func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceStat
 	if len(retired) > 0 {
 		shouldEnqueueRecheck = true
 		for _, source := range retired {
-			result.events = append(result.events, runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "source_retired", message: "Alertmanager silence source retired", attrs: []slog.Attr{slog.String("source", source.name), slog.String("target", source.target)}})
+			collector.append(runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "source_retired", message: "Alertmanager silence source retired", attrs: []slog.Attr{slog.String("source", source.name), slog.String("target", source.target)}})
 		}
 	}
-	if err := closeConfirmedAbsentSilenceEpisodesTx(tx, sources, now); err != nil {
+	if err := closeConfirmedAbsentSilenceEpisodesWithEventsTx(tx, sources, now, collector); err != nil {
 		return silenceReconciliationResult{}, err
 	}
 	if err := reconcileClusterConsistencyTx(tx, sources, now); err != nil {
@@ -6337,12 +6854,14 @@ func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceStat
 	}
 	currentConsistency, consistencyErr := readClusterConsistencyStatusesTx(tx)
 	if consistencyErr != nil {
-		result.events = append(result.events, runtimeEvent{level: slog.LevelError, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect current HA consistency state for logging", attrs: []slog.Attr{slog.Any("error", consistencyErr)}})
+		collector.append(runtimeEvent{level: slog.LevelError, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect current HA consistency state for logging", attrs: []slog.Attr{slog.Any("error", consistencyErr)}})
 	} else {
-		result.events = append(result.events, clusterConsistencyRuntimeEvents(previousConsistency, currentConsistency)...)
+		for _, event := range clusterConsistencyRuntimeEvents(previousConsistency, currentConsistency) {
+			collector.append(event)
+		}
 	}
 	if shouldEnqueueRecheck {
-		if _, err := enqueueSilenceRecheckJobTx(tx, now); err != nil {
+		if _, err := enqueueSilenceRecheckJobWithEventsTx(tx, now, collector); err != nil {
 			return silenceReconciliationResult{}, err
 		}
 		result.queued = 1
@@ -6383,7 +6902,13 @@ func readClusterConsistencyStatusesTx(tx *sql.Tx) (map[string]clusterConsistency
 
 func clusterConsistencyRuntimeEvents(previous, current map[string]clusterConsistencySnapshot) []runtimeEvent {
 	events := make([]runtimeEvent, 0)
-	for target, snapshot := range current {
+	targets := make([]string, 0, len(current))
+	for target := range current {
+		targets = append(targets, target)
+	}
+	slices.Sort(targets)
+	for _, target := range targets {
+		snapshot := current[target]
 		old := previous[target]
 		switch {
 		case snapshot.status == "inconsistent" && old.status != "inconsistent":
@@ -6397,7 +6922,7 @@ func clusterConsistencyRuntimeEvents(previous, current map[string]clusterConsist
 	return events
 }
 
-func closeConfirmedAbsentSilenceEpisodesTx(tx *sql.Tx, sources []SourceSilenceState, now time.Time) error {
+func closeConfirmedAbsentSilenceEpisodesWithEventsTx(tx *sql.Tx, sources []SourceSilenceState, now time.Time, collector *runtimeEventCollector) error {
 	type coverage struct {
 		members       map[string]struct{}
 		allSuccessful bool
@@ -6421,10 +6946,49 @@ func closeConfirmedAbsentSilenceEpisodesTx(tx *sql.Tx, sources []SourceSilenceSt
 		}
 	}
 	nowRaw := now.UTC().Format(time.RFC3339Nano)
-	for clusterID, cluster := range byCluster {
+	clusters := make([]string, 0, len(byCluster))
+	for clusterID := range byCluster {
+		clusters = append(clusters, clusterID)
+	}
+	slices.Sort(clusters)
+	for _, clusterID := range clusters {
+		cluster := byCluster[clusterID]
 		if len(cluster.members) == 0 || !cluster.allSuccessful {
 			continue
 		}
+		type closedEpisode struct {
+			target    string
+			silenceID string
+			episodeID int64
+		}
+		rows, queryErr := tx.Query(`
+SELECT r.cluster_id, r.silence_id, e.episode_id
+FROM silence_rule_episodes e
+JOIN silence_rules r ON r.rule_id=e.rule_id
+WHERE e.open_marker=1 AND r.cluster_id=?
+  AND NOT EXISTS (
+    SELECT 1 FROM alertmanager_source_silences ss
+    JOIN alertmanager_sources src ON src.source_name=ss.source_name
+    WHERE ss.rule_id=r.rule_id AND src.current_cluster_id=? AND src.retired_at IS NULL
+  )
+`, clusterID, clusterID)
+		if queryErr != nil {
+			return fmt.Errorf("failed selecting confirmed-absent silence episodes for cluster %q: %w", clusterID, queryErr)
+		}
+		closed := make([]closedEpisode, 0)
+		for rows.Next() {
+			var episode closedEpisode
+			if scanErr := rows.Scan(&episode.target, &episode.silenceID, &episode.episodeID); scanErr != nil {
+				rows.Close()
+				return fmt.Errorf("failed scanning confirmed-absent silence episode for cluster %q: %w", clusterID, scanErr)
+			}
+			closed = append(closed, episode)
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return fmt.Errorf("failed iterating confirmed-absent silence episodes for cluster %q: %w", clusterID, rowsErr)
+		}
+		rows.Close()
 		if _, err := tx.Exec(`
 UPDATE silence_rule_episodes
 SET ended_at=?, end_reason='absent_confirmed', open_marker=NULL
@@ -6442,8 +7006,11 @@ WHERE open_marker=1
           AND src.retired_at IS NULL
       )
   )
-`, nowRaw, clusterID, clusterID); err != nil {
+		`, nowRaw, clusterID, clusterID); err != nil {
 			return fmt.Errorf("failed closing confirmed-absent silence episodes for cluster %q: %w", clusterID, err)
+		}
+		for _, episode := range closed {
+			collector.append(runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "rule_episode_closed", message: "Silence rule episode closed", attrs: []slog.Attr{slog.String("target", episode.target), slog.String("silence_id", episode.silenceID), slog.Int64("episode_id", episode.episodeID), slog.String("reason_code", "absent_confirmed")}})
 		}
 	}
 	return nil
@@ -6530,7 +7097,19 @@ func reconcileClusterConsistencyTx(tx *sql.Tx, sources []SourceSilenceState, now
 			return fmt.Errorf("failed to delete deconfigured cluster consistency %q: %w", clusterID, err)
 		}
 	}
-	for clusterID, members := range byCluster {
+	clusters := make([]string, 0, len(byCluster))
+	for clusterID := range byCluster {
+		clusters = append(clusters, clusterID)
+	}
+	slices.Sort(clusters)
+	for _, clusterID := range clusters {
+		members := byCluster[clusterID]
+		slices.SortFunc(members, func(a, b SourceSilenceState) int {
+			if sourceCompare := strings.Compare(strings.TrimSpace(a.SourceName), strings.TrimSpace(b.SourceName)); sourceCompare != 0 {
+				return sourceCompare
+			}
+			return strings.Compare(strings.TrimSpace(a.ClusterID), strings.TrimSpace(b.ClusterID))
+		})
 		status := "unknown"
 		allSuccessful := true
 		fingerprints := map[string]struct{}{}
@@ -6734,12 +7313,12 @@ ON CONFLICT(source_name) DO UPDATE SET
 	return nil
 }
 
-func replaceSourceSilenceRelationsTx(tx *sql.Tx, sourceName, clusterID string, silences []SourceSilenceSnapshot, now time.Time) error {
+func replaceSourceSilenceRelationsWithEventsTx(tx *sql.Tx, sourceName, clusterID string, silences []SourceSilenceSnapshot, now time.Time, collector *runtimeEventCollector) error {
 	if _, err := tx.Exec(`DELETE FROM alertmanager_source_silences WHERE source_name = ?`, sourceName); err != nil {
 		return fmt.Errorf("failed clearing source silence relations for %q: %w", sourceName, err)
 	}
 	for _, silence := range silences {
-		ruleID, revisionID, err := upsertSilenceRuleAndRevisionTx(tx, clusterID, silence, now)
+		ruleID, revisionID, err := upsertSilenceRuleAndRevisionWithEventsTx(tx, sourceName, clusterID, silence, now, collector)
 		if err != nil {
 			return err
 		}
@@ -6764,15 +7343,28 @@ func knownSourceSilences(silences []SourceSilenceSnapshot) []SourceSilenceSnapsh
 			known = append(known, silence)
 		}
 	}
+	slices.SortFunc(known, func(a, b SourceSilenceSnapshot) int {
+		return strings.Compare(strings.TrimSpace(a.SilenceID), strings.TrimSpace(b.SilenceID))
+	})
 	return known
 }
 
 func upsertSilenceRuleAndRevisionTx(tx *sql.Tx, clusterID string, silence SourceSilenceSnapshot, now time.Time) (int64, int64, error) {
+	return upsertSilenceRuleAndRevisionWithEventsTx(tx, "", clusterID, silence, now, nil)
+}
+
+func upsertSilenceRuleAndRevisionWithEventsTx(tx *sql.Tx, sourceName, clusterID string, silence SourceSilenceSnapshot, now time.Time, collector *runtimeEventCollector) (int64, int64, error) {
 	silenceID := strings.TrimSpace(silence.SilenceID)
 	if silenceID == "" {
 		return 0, 0, errors.New("silence ID cannot be empty")
 	}
 	nowRaw := now.UTC().Format(time.RFC3339Nano)
+	var existingRuleID int64
+	ruleLookupErr := tx.QueryRow(`SELECT rule_id FROM silence_rules WHERE cluster_id=? AND silence_id=?`, clusterID, silenceID).Scan(&existingRuleID)
+	ruleDiscovered := errors.Is(ruleLookupErr, sql.ErrNoRows)
+	if ruleLookupErr != nil && !ruleDiscovered {
+		return 0, 0, fmt.Errorf("failed checking silence rule existence: %w", ruleLookupErr)
+	}
 	_, err := tx.Exec(`
 INSERT INTO silence_rules(cluster_id, silence_id, first_observed_at, last_observed_at)
 VALUES(?, ?, ?, ?)
@@ -6784,6 +7376,9 @@ ON CONFLICT(cluster_id, silence_id) DO UPDATE SET last_observed_at=excluded.last
 	var ruleID int64
 	if err = tx.QueryRow(`SELECT rule_id FROM silence_rules WHERE cluster_id = ? AND silence_id = ?`, clusterID, silenceID).Scan(&ruleID); err != nil {
 		return 0, 0, fmt.Errorf("failed loading silence rule id: %w", err)
+	}
+	if ruleDiscovered {
+		collector.append(runtimeEvent{level: slog.LevelDebug, component: "silence_reconciliation", event: "rule_discovered", message: "Silence rule discovered", attrs: []slog.Attr{slog.String("source", sourceName), slog.String("target", clusterID), slog.String("silence_id", silenceID), slog.Int64("rule_id", ruleID), slog.String("status", strings.TrimSpace(silence.Status))}})
 	}
 	var episodeID int64
 	err = tx.QueryRow(`SELECT episode_id FROM silence_rule_episodes WHERE rule_id = ? AND open_marker = 1`, ruleID).Scan(&episodeID)
@@ -6799,6 +7394,7 @@ VALUES(?, ?, ?, ?, NULL, NULL, 1)
 			return 0, 0, fmt.Errorf("failed creating silence episode: %w", ierr)
 		}
 		episodeID, _ = res.LastInsertId()
+		collector.append(runtimeEvent{level: slog.LevelDebug, component: "silence_reconciliation", event: "rule_episode_opened", message: "Silence rule episode opened", attrs: []slog.Attr{slog.String("target", clusterID), slog.String("silence_id", silenceID), slog.Int64("episode_id", episodeID), slog.Int("episode_number", nextEpisode)}})
 	case err != nil:
 		return 0, 0, fmt.Errorf("failed loading silence episode: %w", err)
 	default:
@@ -6852,6 +7448,13 @@ INSERT INTO silence_revisions(
 			return 0, 0, fmt.Errorf("failed creating silence revision: %w", ierr)
 		}
 		revisionID, _ = res.LastInsertId()
+		reasonCode := "content_changed"
+		if errors.Is(err, sql.ErrNoRows) {
+			reasonCode = "initial_observation"
+		} else if latestContentFP == contentFP {
+			reasonCode = "source_updated_at_changed"
+		}
+		collector.append(runtimeEvent{level: slog.LevelDebug, component: "silence_reconciliation", event: "rule_revision_created", message: "Silence rule revision created", attrs: []slog.Attr{slog.String("target", clusterID), slog.String("silence_id", silenceID), slog.Int64("rule_id", ruleID), slog.Int64("revision_id", revisionID), slog.String("reason_code", reasonCode)}})
 	} else {
 		if _, err = tx.Exec(`UPDATE silence_revisions SET last_observed_at = ? WHERE revision_id = ?`, nowRaw, revisionID); err != nil {
 			return 0, 0, fmt.Errorf("failed updating silence revision observation time: %w", err)
@@ -6916,7 +7519,11 @@ func buildSilenceRevisionFingerprints(silence SourceSilenceSnapshot) (string, st
 	return fmt.Sprintf("sha256:%x", contentSum), fmt.Sprintf("sha256:%x", evalSum), matchersJSON
 }
 
-func enqueueSilenceRecheckJobTx(tx *sql.Tx, now time.Time) (int64, error) {
+func enqueueSilenceRecheckJobWithEventsTx(tx *sql.Tx, now time.Time, collector *runtimeEventCollector) (int64, error) {
+	return enqueueSilenceRecheckJobWithTriggerTx(tx, now, "source_changed", collector)
+}
+
+func enqueueSilenceRecheckJobWithTriggerTx(tx *sql.Tx, now time.Time, triggerType string, collector *runtimeEventCollector) (int64, error) {
 	type sourceContext struct {
 		SourceName  string `json:"sourceName"`
 		ClusterID   string `json:"clusterId"`
@@ -6958,7 +7565,7 @@ INSERT INTO silence_recheck_jobs(
   trigger_type, status, cursor_alert_id, created_at
 ) VALUES(?, ?, ?, ?, 'queued', NULL, ?)
 ON CONFLICT(open_context_fingerprint) DO NOTHING
-`, ctxFingerprint, ctxFingerprint, string(ctxRaw), "source_changed", nowRaw)
+	`, ctxFingerprint, ctxFingerprint, string(ctxRaw), triggerType, nowRaw)
 	if err != nil {
 		return 0, fmt.Errorf("failed to enqueue silence recheck job: %w", err)
 	}
@@ -7012,10 +7619,22 @@ WHERE job_id=?
 			return 0, fmt.Errorf("failed counting recheck job candidates: %w", err)
 		}
 	}
+	if rowsAffected == 1 {
+		var candidateCount, queueDepth int
+		if err = tx.QueryRow(`SELECT total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&candidateCount); err != nil {
+			candidateCount = -1
+			collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect recheck candidate count for logging", attrs: []slog.Attr{slog.String("stage", "event_payload"), slog.String("event_family", "recheck_job_queued"), slog.Any("error", err)}})
+		}
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','failed')`).Scan(&queueDepth); err != nil {
+			queueDepth = -1
+			collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect recheck queue depth for logging", attrs: []slog.Attr{slog.String("stage", "queue_depth"), slog.String("event_family", "recheck_job_queued"), slog.Any("error", err)}})
+		}
+		collector.append(runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "recheck_job_queued", message: "Silence recheck job queued", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("context_id", ctxFingerprint), slog.Int("candidate_count", candidateCount), slog.Int("queue_depth", queueDepth), slog.String("reason_code", triggerType)}})
+	}
 	return jobID, nil
 }
 
-func enqueueAlertForCurrentRecheckContextTx(tx *sql.Tx, alertID string, now time.Time) error {
+func enqueueAlertForCurrentRecheckContextWithEventsTx(tx *sql.Tx, alertID string, now time.Time, collector *runtimeEventCollector) error {
 	res, err := tx.Exec(`
 INSERT OR IGNORE INTO silence_recheck_job_candidates(job_id, alert_id)
 SELECT job_id, ? FROM silence_recheck_jobs WHERE status IN ('queued','running')
@@ -7027,8 +7646,14 @@ SELECT job_id, ? FROM silence_recheck_jobs WHERE status IN ('queued','running')
 	if err != nil {
 		return fmt.Errorf("failed checking inactive alert attachment: %w", err)
 	}
+	eventStart := 0
+	if collector != nil {
+		eventStart = len(collector.events)
+	}
+	var jobID int64
 	if attached == 0 {
-		jobID, enqueueErr := enqueueSilenceRecheckJobTx(tx, now)
+		var enqueueErr error
+		jobID, enqueueErr = enqueueSilenceRecheckJobWithTriggerTx(tx, now, "alert_became_inactive", collector)
 		if enqueueErr != nil {
 			return enqueueErr
 		}
@@ -7043,8 +7668,18 @@ SELECT job_id, ? FROM silence_recheck_jobs WHERE status IN ('queued','running')
 UPDATE silence_recheck_jobs SET total_candidates=(
   SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=silence_recheck_jobs.job_id
 ) WHERE status IN ('queued','running')
-`); err != nil {
+	`); err != nil {
 		return fmt.Errorf("failed updating recheck candidate total: %w", err)
+	}
+	if attached == 0 && collector != nil && len(collector.events) > eventStart {
+		queuedEventIndex := eventStart
+		var candidateCount int
+		if err = tx.QueryRow(`SELECT total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&candidateCount); err != nil {
+			candidateCount = -1
+			collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to capture recheck candidate count for logging", attrs: []slog.Attr{slog.String("stage", "event_payload"), slog.String("event_family", "recheck_job_queued"), slog.Any("error", err)}})
+		}
+		collector.replaceAttrAt(queuedEventIndex, "candidate_count", slog.Int("candidate_count", candidateCount))
+		collector.replaceAttrAt(queuedEventIndex, "reason_code", slog.String("reason_code", "alert_became_inactive"))
 	}
 	return nil
 }

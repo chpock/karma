@@ -1,0 +1,7 @@
+# A child that exits before readiness fails through the managed harness.
+
+! exists karma-state
+! exec managed-karma karma-state karma.pid 2s 1s karma --pid-file=/foo/bar/karma.pid --alertmanager.uri=http://127.0.0.1:7113
+! exec wait-managed-pid karma-state 2s 1s
+grep '^failed:child_exit:exit:' karma-state/startup
+! exists karma-state/harness-error

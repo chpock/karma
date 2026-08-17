@@ -1,7 +1,8 @@
 # Fails is we cannot remove a PID file
 
 exec bash -x ./test.sh &
-! exec karma --pid-file=karma.pid --alertmanager.uri=http://127.0.0.1:7073 --listen.address=127.0.0.1 --listen.port=8073
+! exists karma-state
+! exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid --alertmanager.uri=http://127.0.0.1:7073 --listen.address=127.0.0.1 --listen.port=8073
 ! stdout .
 cmp stderr stderr.txt
 wait
@@ -23,12 +24,13 @@ level=INFO msg="Collection completed"
 level=INFO msg="Done, starting HTTP server"
 level=INFO msg="Starting HTTP server" address=127.0.0.1:8073
 level=INFO msg="Shutting down HTTP server" signal=terminated
-level=INFO msg="HTTP server shut down"
 level=INFO msg="Removing PID file" path=karma.pid
-level=ERROR msg="Execution failed" error="failed to remove PID file: remove karma.pid: no such file or directory"
+level=ERROR msg="Execution failed" error="shutdown error: PID file lease ownership was lost"
 -- test.sh --
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 2s
 sleep 1
-PID=$(cat karma.pid)
+PID=$(cat karma-state/wrapper-pid)
 rm karma.pid
 kill $PID
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state

@@ -94,8 +94,29 @@ Operationally:
   contains connection-local settings and `_txlock=immediate`, but no write-capable
   setup PRAGMAs.
 - Runtime write operations are serialized by the lifecycle Store.
+- Every writer transaction has a durable opaque operation token. The token insert is
+  the final statement before the single commit attempt; callback code cannot roll
+  back independently.
+- Commit errors produce one of three typed outcomes: committed, not committed, or
+  unknown. Unknown outcome blocks mutations until the token is reconciled, preventing
+  a second execution of an operation that may already have committed.
+- Post-commit work is split into an in-lock `handoff` for synchronized completion
+  state and an after-unlock observability `run` callback. Regroup consumes the
+  captured committed phase result instead of treating `ErrWriterCommitReconciled`
+  as a domain failure; recheck infrastructure errors never become job failures.
+- `Store.Close` transitions through `closing`, waits for the writer mutex and all
+  Store-owned workers, then closes the writer connection before the read pool.
 - Regroup and silence recheck release the writer between batches, so poll/resolve/housekeeping can make progress.
+- Poll runtime events are immutable transaction-local payloads emitted by the
+  committed transaction's finalizer; no post-commit query by poll timestamp is used.
 - SQLite also uses a 5-second busy timeout for brief locks outside the Store process.
+- The PID path is an owned lease, not global mutable state: exclusive creation keeps
+  an open handle and platform identity, and release validates that identity before
+  removing the path. A pre-existing, symlinked, replaced, or unowned path is never
+  removed by startup rollback or shutdown.
+- Regroup and housekeeping owners use explicit `stopped/running/stopping` arbitration
+  with one cancellation and one worker join. Expected shutdown is an explicit cause;
+  external cancellation is not silently downgraded to normal shutdown.
 - Poll reconciliation persists source/silence identities and revisions before live alert cause members in the same transaction, so every cause FK points to an existing row.
 
 ## 8. Upstream-isolation contract

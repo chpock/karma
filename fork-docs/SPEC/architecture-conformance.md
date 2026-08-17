@@ -57,7 +57,7 @@ The executable test coverage for these contracts is summarized in
 | D19 | Enqueue only promotion-capable context, including failed/invalid→success recovery | previous/next evaluation-state diff | recovery and `TestRecheckEnqueueUsesPromotionCapableEvaluationChangesOnly` | Implemented |
 | D20 | One event links directly to one complete cause set | global/target event-cause transactions | FK, multi-job and restart tests | Implemented |
 | D21 | Retain non-completed/referenced/latest completed jobs; clean older unreferenced | housekeeping | `TestRunHousekeepingCleansCompletedUnreferencedJobs` | Implemented |
-| D22 | Lease/fencing deferred; all derived writes pass one Store-owned immediate-writer transaction boundary | runtime integration | `TestStoreSerializesConcurrentWriters`, writer ownership regression matrix | Implemented |
+| D22 | Lease/fencing deferred; all derived writes pass one Store-owned immediate-writer transaction boundary with durable completion reconciliation | runtime integration | Problem 1 writer/PID regressions and final commit gates in `architecture-verification.md` | Implemented |
 
 ## 3. Silence Editor Decisions Q1-Q24
 

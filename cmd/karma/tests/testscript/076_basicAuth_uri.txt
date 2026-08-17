@@ -1,17 +1,20 @@
 # Basic Auth headers are passed to the UI in the API response
 
 exec bash -x ./test.sh &
-exec karma --pid-file=karma.pid --alertmanager.uri=http://foo:bar@127.0.0.1 --listen.address=127.0.0.1 --listen.port=8076
+! exists karma-state
+exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid --alertmanager.uri=http://foo:bar@127.0.0.1 --listen.address=127.0.0.1 --listen.port=8076
 exec sleep 5
 grep '"headers":{"Authorization":"Basic Zm9vOmJhcg=="}' out.txt
 grep '"publicURI":"http://foo:bar@127.0.0.1"' out.txt
 wait
 
 -- test.sh --
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 2s
 sleep 1
 curl -o out.txt -XPOST -d @request.json -s http://127.0.0.1:8076/alerts.json
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state
 
 -- request.json --
 {

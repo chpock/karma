@@ -1,8 +1,9 @@
 # Uses proxy_url to connect to upstream
 
 exec bash -x ./test.sh &
-exec bash -c 'I=0 ; while [ ! -f alertmanager.pid ] && [ $I -lt 30 ]; do sleep 1; I=$((I+1)); done'
-exec karma --pid-file=karma.pid
+! exists karma-state
+exec bash -c 'I=0 ; while [ ! -f alertmanager.pid ] && [ $I -lt 30 ]; do sleep 1; I=$((I+1)); done; [ -f alertmanager.pid ]'
+exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid
 ! stdout .
 stderr 'level=INFO msg="Configured Alertmanager source" name=proxy-url cluster=proxy-url uri=http://am.example.com proxy=false readonly=false'
 stderr 'level=INFO msg="GET request" uri=http://am.example.com/metrics timeout=10s'
@@ -19,10 +20,14 @@ wait
 env GOCACHE=$TMPDIR go run alertmanager.go &
 
 I=0
-while [ ! -f karma.pid ] && [ $I -lt 30 ]; do sleep 1; I=$((I+1)); done
+while [ ! -f alertmanager.pid ] && [ $I -lt 30 ]; do sleep 1; I=$((I+1)); done
+[ -f alertmanager.pid ] || { echo "alertmanager did not become ready" >&2; exit 1; }
+wait-managed-pid karma-state 5s 2s
 
 sleep 5
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state
 cat alertmanager.pid | xargs kill
 
 -- karma.yaml --

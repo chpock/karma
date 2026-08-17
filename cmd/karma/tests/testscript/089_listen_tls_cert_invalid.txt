@@ -26,8 +26,8 @@ level=INFO msg="Done, starting HTTP server"
 level=INFO msg="Starting HTTPS server" address=127.0.0.1:8089
 level=ERROR msg="HTTPS server startup error" error="tls: failed to find any PEM data in certificate input"
 level=INFO msg="Shutting down HTTP server" signal=terminated
-level=INFO msg="HTTP server shut down"
 level=INFO msg="Removing PID file" path=karma.pid
+level=INFO msg="HTTP server shut down"
 -- karma.yaml --
 alertmanager:
   servers:

@@ -8,4 +8,4 @@ cmp stderr stderr.txt
 level=INFO msg="Version: dev"
 level=INFO msg="Configured Alertmanager source" name=default cluster=default uri=http://127.0.0.1:7072 proxy=false readonly=false
 level=INFO msg="Writing PID file" path=/foo/bar/karma.pid
-level=ERROR msg="Execution failed" error="failed to write a PID file: open /foo/bar/karma.pid: no such file or directory"
+level=ERROR msg="Execution failed" error="create PID file: open /foo/bar/karma.pid: no such file or directory"

@@ -28,6 +28,13 @@ Before running a binary that contains the Problem 2 or Problem 3 schema, delete 
 old diagnostic database file together with its `-wal` and `-shm` sidecars while
 Karma is stopped. Never delete database files from application startup code.
 
+Problem 1 verification uses a fail-fast PID test harness. No testscript helper may wait
+only for PID-file existence. The managed helper observes readiness, child exit, and its
+own startup deadline, terminates/reaps its owned process, and reports early startup
+failure in seconds. Auxiliary Alertmanager readiness must be confirmed before the Karma
+PID wait starts. Do not increase the package timeout as a substitute. This is test
+infrastructure, not a lifecycle domain feature.
+
 Keep the logical schema version at v1. Add metadata key
 `schema_layout_fingerprint` and a compile-time expected SHA-256 value. Compute the
 actual fingerprint from sorted application-owned `sqlite_schema` rows represented as
@@ -48,12 +55,11 @@ It must return a clear error instructing the operator to stop Karma and recreate
 disposable database. It must not silently run `CREATE TABLE IF NOT EXISTS` against an
 incompatible v1 layout, auto-delete the database, migrate it, or partially repair it.
 
-Before implementing Problem 1, update currently false conformance claims to say
-`Known violation; tracked by silence-recheck-problems.md`. This applies at minimum to
-D10 and D14 in `architecture-conformance.md`, immutable candidate claims in
-`phase2-silence-awareness-schema.md`, and the related rows in
-`writer-projection-audit.md` and `IMPLEMENTATION_PLAN.md`. Do not describe the planned
-replacement behavior as implemented at this step.
+Step 0 was applied before implementing Problem 1: currently false conformance claims
+were marked `Known violation; tracked by silence-recheck-problems.md`. D10 and D14
+remain known violations because they belong to Problems 2-3; immutable candidate
+claims in the schema and writer-audit documents remain explicitly planned rather than
+implemented.
 
 Record the approved architecture in fork ADRs before the corresponding broad code
 change:
@@ -67,11 +73,17 @@ change:
 
 ### 1. Establish the Root Cause of the Original SQLite Busy Error
 
-**Status: Implemented**
+**Status: Problem 1 implemented and independently accepted; Problems 2-6 remain pending**
 
-Implemented in the lifecycle Store and verified by the writer ownership regression
-matrix listed in `architecture-verification.md`. Problems 2-7 remain pending and
-their contracts are not changed by this implementation.
+The writer-ownership implementation, fail-fast PID test infrastructure, typed
+acquisition and cancellation handling, domain-state regressions, writer/shutdown
+evidence, and final independent review are complete. Problems 2-6 remain pending.
+
+The remediation includes the durable `lifecycle_writer_commits` ledger, typed
+`committed`/`not_committed`/`unknown` outcomes, bounded internal recovery contexts,
+single-owner rollback, replacement retry, commit-unknown mutation blocking, a
+30-day ledger retention rule, writer-entrypoint barriers, shutdown joins before storage
+close, real-phase/event-identity evidence, and schema-fingerprint coverage for views.
 
 **Exact observed symptoms**
 
@@ -379,6 +391,12 @@ expectation.
 - Jobs remain strict FIFO by `job_id`. A successor always receives a new `job_id`.
 - Duplicate execution of the same poll transaction or enqueue request is idempotent
   and returns the already-created job instead of creating duplicate work.
+- Job creation consumes a private canonical copy of poll input. Canonically sort
+  targets, relevant source/upstream references, source members, suppression source
+  references, silence IDs, silences, and matcher collections before fingerprinting or
+  candidate creation. Never mutate caller-owned slices or maps.
+- Two semantically identical poll snapshots with different input ordering create the
+  same job fingerprint, pinned rules, candidates, and successor identity.
 
 Before writing the first Problem 2 regression, review one combined final schema
 design covering every Problem 2 and Problem 3 table, column, constraint, and index.
@@ -401,23 +419,26 @@ Add focused tests under `internal/fork/alertlifecycle` for these sequences:
    `total_candidates`.
 2. Make an alert inactive under an unchanged source context and verify that a new
    successor job is created with the new alert as its only work item.
-3. Keep an older job open, change the source evaluation context, and verify that the
+3. Apply semantically identical poll inputs with permuted nested targets, sources,
+   silence IDs, silences, and matchers in fresh identical Stores. Verify identical job
+   fingerprints/rules/candidates and byte-identical caller input before/after.
+4. Keep an older job open, change the source evaluation context, and verify that the
    new context creates a separate successor with its own pinned rules.
-4. Create a candidate for lifecycle episode A, re-fire the alert, make it inactive as
+5. Create a candidate for lifecycle episode A, re-fire the alert, make it inactive as
    episode B, and verify that the episode-A candidate is a stale terminal outcome and
    cannot suppress episode B.
-5. Repeat the previous test for one target row. The expected target observation token
+6. Repeat the previous test for one target row. The expected target observation token
    must be pinned independently from the global alert observation token.
-6. Delete or evict the current alert row while a job still owns a candidate snapshot.
+7. Delete or evict the current alert row while a job still owns a candidate snapshot.
    Verify that job membership does not shrink and the missing current row becomes a
    terminal candidate outcome.
-7. Verify that every candidate row reaches exactly one terminal outcome and that a
+8. Verify that every candidate row reaches exactly one terminal outcome and that a
    completed job has `processed_candidates == total_candidates`.
-8. Verify that source-triggered and alert-eligibility-triggered creations return the
+9. Verify that source-triggered and alert-eligibility-triggered creations return the
    correct trigger, actual `created` result, and exact candidate count.
-9. Re-run the same creator input and verify that it returns the same job without
+10. Re-run the same creator input and verify that it returns the same job without
    adding rules, candidates, or counters a second time.
-10. Close and reopen the Store between batches and compare decoded domain fields for
+11. Close and reopen the Store between batches and compare decoded domain fields for
     equality. Separately assert that canonical source/job/candidate JSON bytes and
     fingerprints are unchanged.
 
@@ -1089,6 +1110,24 @@ Complete Problems 1-3 first. This problem presents the already-approved job and
 attempt state. It must not define a second retry policy, create new statuses, change
 candidate membership, or repair provenance independently.
 
+**Additional confirmed observability defects from Problem 1 review**
+
+- Regroup failure persistence currently emits an infrastructure event before an
+  unknown Commit outcome is reconciled. The Store must own only durable
+  `regroup_failed`; cmd owns the single terminal infrastructure event.
+- Between-batch regroup cancellation can escape as raw `ctx.Err()`, losing typed
+  expected-shutdown cause and producing the wrong event/level.
+- Global and target `candidate_promoted` events omit the transition ID already returned
+  by the promotion helpers.
+- Cmd `worker_failed` can duplicate Store-owned selected-job events, and
+  `batch_promoted` duplicates `batch_completed`.
+- Poll observability lacks injectable best-effort metadata boundaries and complete
+  deterministic tests for transaction-local event ownership, all event families,
+  delayed finalizers, required fields, and redaction.
+
+These defects are real but must not expand the implemented Problem 1 contract. Resolve
+them only after the Problems 2-3 domain/state contracts are implemented.
+
 #### Step 1: Return a typed worker result
 
 Replace the current `(promoted int, error)` contract with a result that distinguishes:
@@ -1479,15 +1518,50 @@ Do not report completion if a focused test passes but the recorded-traffic repla
 race suite, visual review, full Go suite, root lint, UI build, Cyrillic scan, or
 patch-integrity check fails.
 
+### 6. Harden PID Lease Recovery and Managed-Harness Finalization
+
+**Dependency and scope**
+
+This is a deferred infrastructure problem discovered while reviewing Problem 1. It does
+not cause the SQLite lock-upgrade failure and does not block Problem 1 after the
+fail-fast direct-child PID harness gate passes.
+
+**Confirmed defects**
+
+- `pidFileLease.Release` returns immediately when ownership is retained with invalid
+  identity, so a transient identity-capture failure can never recover on a later
+  Release call.
+- The Windows release adapter discards temporary current-path handle Close errors on
+  existing success/failure branches.
+- The external managed wrapper publishes its exit marker before cleanup and writes a
+  cleanup-error marker afterward. A waiter can observe exit and check success before
+  the cleanup failure is visible. Exit-marker write errors are also discarded.
+
+**Required contract**
+
+- Retry identity capture from a retained valid handle; preserve ownership on transient
+  failure and remove nothing until identity is proven.
+- Join every temporary/current/owned handle Close error without deleting a replacement
+  path.
+- Publish managed final exit only after termination cleanup is complete. Atomically
+  persist cleanup/marker failure as harness failure before a waiter may report success.
+- Add deterministic primitive-seam tests for retry, ownership loss, Close-error joins,
+  and cleanup/exit ordering. Native Windows execution is not required; shared tests and
+  Windows cross-compilation are sufficient in the available environment.
+
+Do not implement this problem as part of Problem 1.
+
 ## Execution Order and Scope Guard
 
 Execute the work in this exact order:
 
-1. Problem 1 writer boundary;
+1. Problem 1 writer boundary, fail-fast PID verification, and independent review
+   (completed);
 2. Problem 2 immutable job creation and provenance;
 3. Problem 3 attempts, retry, failure, and operator recovery;
-4. Problem 4 observability and operator presentation; and
-5. Problem 5 end-to-end verification and documentation.
+4. Problem 4 observability and operator presentation;
+5. Problem 5 end-to-end verification and documentation; and
+6. deferred Problem 6 PID lease/harness hardening.
 
 Finish the production code, focused regressions, and required documentation for one
 problem before implementing the next. Problems 2 and 3 must share one reviewed

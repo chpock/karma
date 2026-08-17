@@ -1,7 +1,8 @@
 # Logs messages as JSON when log.format=json is passed
 
 exec bash -x ./test.sh &
-exec karma --log.format=json --log.timestamp=false --pid-file=karma.pid --listen.address=127.0.0.1 --listen.port=8058
+! exists karma-state
+exec managed-karma karma-state karma.pid 5s 2s karma --log.format=json --log.timestamp=false --pid-file=karma.pid --listen.address=127.0.0.1 --listen.port=8058
 ! stdout .
 cmp stderr stderr.txt
 wait
@@ -15,9 +16,11 @@ wait
 {"level":"INFO","msg":"Done, starting HTTP server"}
 {"level":"INFO","msg":"Starting HTTP server","address":"127.0.0.1:8058"}
 {"level":"INFO","msg":"Shutting down HTTP server","signal":15}
-{"level":"INFO","msg":"HTTP server shut down"}
 {"level":"INFO","msg":"Removing PID file","path":"karma.pid"}
+{"level":"INFO","msg":"HTTP server shut down"}
 -- test.sh --
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 2s
 sleep 5
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state

@@ -71,20 +71,40 @@ Required checks for this model:
 - `Store.db` remains a multi-connection read pool. Read-only preview, autocomplete,
   merge, stats, and warning queries do not wait on `Store.writeMu` merely because a
   writer transaction exists.
-- Writer transaction callbacks commit exactly once on success and roll back on
-  callback errors and panic paths. An uncertain commit discards the writer
-  connection and replaces it under writer ownership before another mutation.
+- Writer transaction callbacks never own rollback. The helper rolls back exactly
+  once on callback errors and panic paths, inserts an opaque operation token as its
+  final statement, and attempts one commit. Commit completion has a typed outcome:
+  `committed`, `not_committed`, or `unknown`.
+- An uncertain commit discards/replaces the writer connection under writer
+  ownership and reconciles the token through `lifecycle_writer_commits`. `unknown`
+  blocks further mutations; a later durable `committed` result never re-runs the
+  callback. Committed ledger rows are retained for 30 days by housekeeping.
 - `journal_mode(WAL)` and `auto_vacuum(INCREMENTAL)` are persistent setup PRAGMAs
   executed and verified only through the owned writer connection before schema
   bootstrap. They are never run by read-pool connections or on connection
   replacement.
 - Long-running regroup/recheck work is split into transactions so the writer lock is released between batches.
+- Post-commit finalizers have an in-lock handoff for completion state and an
+  after-unlock structured-log callback. Regroup consumes a committed phase result
+  after delayed reconciliation; recheck writer infrastructure errors never become
+  job failure state.
 - Poll transaction order is source/silence reconciliation first, then alert state/events/live cause history, then commit.
+- Poll runtime event payloads are captured in the transaction-local collector and are
+  never reconstructed by querying rows with a timestamp after commit.
 - A failed source refresh updates health only and preserves the last successful source set and fingerprint.
 - SQLite busy timeout is 5 seconds as a defensive boundary for brief external/process-independent locks.
+- The PID file is an owned lease: exclusive creation, an open handle, platform file
+  identity, complete write/sync, and identity-checked release. Startup cleanup and
+  normal shutdown release only a lease acquired by this process; release errors are
+  joined with the originating lifecycle error.
+- Regroup infrastructure stages and reason codes are typed and exact. Expected
+  shutdown is carried as an explicit cancellation cause; external cancellation is
+  warning-level and cannot be classified as normal shutdown by suffix matching.
 
 ## 9. Docs and schema contract
 
 - Schema and API/UI contracts must be synced in `fork-docs/SPEC/`.
 - The preview runtime supports only fresh schema v1. Any other database layout is
   rejected without modification.
+- The schema layout fingerprint covers every application-owned `sqlite_schema` row,
+  including tables, indexes, triggers, and views.

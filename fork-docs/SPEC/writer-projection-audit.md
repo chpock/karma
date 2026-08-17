@@ -43,9 +43,10 @@ by domain transaction, not by source file.
 - Readers: alert APIs, preview, warning/stats, next worker invocation,
   housekeeping.
 - Failure: first persisted error is immutable; failed predecessor blocks FIFO;
-  stale CAS is a counted no-op; incomplete source context cannot promote. The
-  current pre-replacement path can persist a transient worker error as a failed
-  predecessor and can attach late candidates.
+  stale CAS is a counted no-op; incomplete source context cannot promote. An
+  unknown writer commit outcome is never persisted as a failed predecessor and
+  never triggers a duplicate callback. Other transient/terminal worker error
+  classification remains Problem 3, and late candidate attachment remains Problem 2.
 - Restart: queued/running per-candidate progress resumes, but current candidate
   membership and observation reads are not yet fully immutable. Problem 2 replaces
   this behavior with pinned candidate input and successor jobs.

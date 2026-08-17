@@ -3,18 +3,15 @@ package main
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/prymitive/karma/internal/config"
 	runtimeLog "github.com/prymitive/karma/internal/log"
 )
 
-var lifecycleHousekeeping struct {
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
-}
+var lifecycleHousekeeping lifecycleWorkerOwner
+
+var runAlertLifecycleRecheckForHousekeeping = runAlertLifecycleRecheckOnce
 
 func startAlertLifecycleHousekeeping() {
 	if lifecycleStore == nil || !config.Config.AlertLifecycle.Enabled {
@@ -23,12 +20,11 @@ func startAlertLifecycleHousekeeping() {
 
 	interval := config.Config.AlertLifecycle.Housekeeping.IncrementalVacuumInterval
 	ctx, cancel := context.WithCancel(context.Background())
-
-	lifecycleHousekeeping.mu.Lock()
-	lifecycleHousekeeping.cancel = cancel
-	lifecycleHousekeeping.done = make(chan struct{})
-	done := lifecycleHousekeeping.done
-	lifecycleHousekeeping.mu.Unlock()
+	done := make(chan struct{})
+	if !lifecycleHousekeeping.start(done, housekeepingOwnerDependencies(cancel, done)) {
+		cancel()
+		return
+	}
 
 	go func() {
 		defer close(done)
@@ -50,19 +46,7 @@ func startAlertLifecycleHousekeeping() {
 }
 
 func stopAlertLifecycleHousekeeping() {
-	lifecycleHousekeeping.mu.Lock()
-	cancel := lifecycleHousekeeping.cancel
-	done := lifecycleHousekeeping.done
-	lifecycleHousekeeping.cancel = nil
-	lifecycleHousekeeping.done = nil
-	lifecycleHousekeeping.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-	if done != nil {
-		<-done
-	}
+	lifecycleHousekeeping.stop(context.Canceled)
 }
 
 func runAlertLifecycleHousekeepingOnce(ctx context.Context) {
@@ -101,7 +85,7 @@ func runAlertLifecycleHousekeepingOnce(ctx context.Context) {
 		slog.Duration("duration", time.Since(startedAt)),
 	)
 
-	runAlertLifecycleRecheckOnce(ctx)
+	runAlertLifecycleRecheckForHousekeeping(ctx)
 }
 
 func runAlertLifecycleRecheckOnce(ctx context.Context) {

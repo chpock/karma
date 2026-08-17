@@ -2,7 +2,8 @@
 
 cert $WORK karma
 exec bash -x ./test.sh &
-exec karma --pid-file=karma.pid --config.file=karma.yaml --listen.address=127.0.0.1 --listen.port=8087
+! exists karma-state
+exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid --config.file=karma.yaml --listen.address=127.0.0.1 --listen.port=8087
 ! stdout .
 exec sleep 5
 cmp http1.txt pong.txt
@@ -27,8 +28,8 @@ level=info msg="Done, starting HTTP server"
 level=info msg="Starting HTTPS server" address=127.0.0.1:8087
 level=info msg="Shutting down HTTP server"
 level=error msg="HTTPS server startup error" error="http: Server closed"
-level=info msg="HTTP server shut down"
 level=info msg="Removing PID file" path=karma.pid
+level=info msg="HTTP server shut down"
 -- karma.yaml --
 alertmanager:
   servers:
@@ -41,8 +42,10 @@ listen:
     key: karma.key
 
 -- test.sh --
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 2s
 sleep 1
 curl -s --cacert karma-ca.pem -o http1.txt --http1.1 https://127.0.0.1:8087/health
 curl -s --cacert karma-ca.pem -o http2.txt --http2 https://127.0.0.1:8087/health
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state

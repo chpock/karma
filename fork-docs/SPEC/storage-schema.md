@@ -97,6 +97,18 @@ FK:
 Used for schema version, the compile-time-checked `schema_layout_fingerprint`,
 housekeeping timestamps, regroup status/progress/fingerprints.
 
+### 3.4 `lifecycle_writer_commits`
+
+Durable commit ledger used only to reconcile an uncertain SQLite commit.
+
+- `operation_token TEXT PRIMARY KEY` (opaque, generated before the transaction)
+- `operation_kind TEXT NOT NULL`
+- `committed_at TEXT NOT NULL` (RFC3339Nano UTC)
+
+The token row is inserted as the final transaction statement. Housekeeping removes
+committed rows older than 30 days. Unresolved commit state blocks mutations and
+therefore cannot be pruned while it is needed for reconciliation.
+
 ## 4. Versioning
 
 Current schema version:
@@ -106,8 +118,9 @@ Current schema version:
 This preview project supports only schema v1. Startup creates schema v1 in an empty
 database and reopens an existing v1 database without changing its shape. Any other
 schema version, missing layout fingerprint, or layout fingerprint mismatch is
-rejected without modification. The application-owned `sqlite_schema` rows are
-canonicalized and hashed; fresh bootstrap stores the expected hash and existing
+rejected without modification. The application-owned `sqlite_schema` rows,
+including tables, indexes, triggers, and views, are canonicalized and hashed;
+fresh bootstrap stores the expected hash and existing
 databases must match both the stored and compile-time hash.
 
 Design references:

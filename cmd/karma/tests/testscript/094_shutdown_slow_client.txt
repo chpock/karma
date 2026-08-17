@@ -1,7 +1,8 @@
 # Terminates with an error on slow client
 
 exec bash -x ./test.sh &
-! exec karma --pid-file=karma.pid --alertmanager.uri http://127.0.0.1 --listen.address=127.0.0.1 --listen.port 8094
+! exists karma-state
+! exec managed-karma karma-state karma.pid 5s 25s karma --pid-file=karma.pid --alertmanager.uri http://127.0.0.1 --listen.address=127.0.0.1 --listen.port 8094
 ! stdout .
 cmp stderr stderr.txt
 wait
@@ -41,10 +42,11 @@ listen:
 -- test.sh --
 trap "echo got signal" SIGTERM SIGINT
 
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 25s
 sleep 1
 (curl -s --limit-rate 1 http://127.0.0.1:8094/debug/pprof/profile?seconds=35 || echo "curl completed") &
 sleep 3
-cat karma.pid | xargs kill
-while [ -f karma.pid ]; do sleep 1 ; done
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 25s
+check-managed-result karma-state
 killall -v curl || echo "no curl running"

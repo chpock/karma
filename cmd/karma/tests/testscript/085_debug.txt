@@ -1,7 +1,8 @@
 # Enables pprof endpoints when debug is enabled
 
 exec bash -x ./test.sh &
-exec karma --pid-file=karma.pid --alertmanager.uri=http://127.0.0.1:7085 --listen.address=127.0.0.1 --listen.port=8085 --debug
+! exists karma-state
+exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid --alertmanager.uri=http://127.0.0.1:7085 --listen.address=127.0.0.1 --listen.port=8085 --debug
 ! stdout .
 cmp stderr stderr.txt
 wait
@@ -23,11 +24,13 @@ level=INFO msg="Collection completed"
 level=INFO msg="Done, starting HTTP server"
 level=INFO msg="Starting HTTP server" address=127.0.0.1:8085
 level=INFO msg="Shutting down HTTP server" signal=terminated
-level=INFO msg="HTTP server shut down"
 level=INFO msg="Removing PID file" path=karma.pid
+level=INFO msg="HTTP server shut down"
 -- test.sh --
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 2s
 sleep 1
 curl -s -o heap.gz http://127.0.0.1:8085/debug/pprof/heap
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state
 gzip -d heap.gz || exit 1

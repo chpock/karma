@@ -3,7 +3,8 @@ http response prometheus /api/v1/query_range 200 {"status":"success","data":{"re
 http start prometheus 127.0.0.1:9111
 
 exec bash -x ./test.sh &
-exec karma --pid-file=karma.pid --config.file=karma.yaml
+! exists karma-state
+exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid --config.file=karma.yaml
 ! stdout .
 cmp stderr stderr.txt
 wait
@@ -27,8 +28,8 @@ level=INFO msg="Done, starting HTTP server"
 level=INFO msg="Starting HTTP server" address=127.0.0.1:8111
 level=WARN msg="Error while configuring HTTP transport for history request" worker=1 uri=http://127.0.0.1:9111 error="failed to create HTTP transport for 'http://127.0.0.1:9111': open /xxx/yyy/ca.pem: no such file or directory"
 level=INFO msg="Shutting down HTTP server" signal=terminated
-level=INFO msg="HTTP server shut down"
 level=INFO msg="Removing PID file" path=karma.pid
+level=INFO msg="HTTP server shut down"
 -- karma.yaml --
 alertmanager:
   servers:
@@ -59,8 +60,10 @@ history:
 }
 -- test.sh --
 I=0
-while [ ! -f karma.pid ] && [ $I -lt 30 ]; do sleep 1; I=$((I+1)); done
+wait-managed-pid karma-state 5s 2s
 
 sleep 5
 curl -s -f -o /dev/null -XPOST -d @query.json http://127.0.0.1:8111/history.json
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state

@@ -27,7 +27,11 @@ import (
 
 func TestMain(m *testing.M) {
 	testscript.Main(m, map[string]func(){
-		"karma": testscriptKarmaMain,
+		"karma":                testscriptKarmaMain,
+		"managed-karma":        managedKarmaMain,
+		"wait-managed-pid":     managedWaitPIDMain,
+		"wait-managed-exit":    managedWaitExitMain,
+		"check-managed-result": managedCheckResultMain,
 	})
 	err := abide.Cleanup()
 	if err != nil {
@@ -36,6 +40,20 @@ func TestMain(m *testing.M) {
 }
 
 func testscriptKarmaMain() {
+	defer func() {
+		// testscript invokes karma in this process instead of giving it a separate
+		// process lifetime. Production timeout handling deliberately leaves workers
+		// open for process exit; the harness must reclaim them before the next script.
+		if runningHistoryPoller != nil {
+			runningHistoryPoller.stopQuiet()
+			runningHistoryPoller = nil
+		}
+		if lifecycleStore != nil {
+			stopAlertLifecycleHousekeeping()
+			stopAlertLifecycleBackgroundRegroup()
+			_ = closeAlertLifecycleStore()
+		}
+	}()
 	checkConfig := false
 	for _, arg := range os.Args[1:] {
 		if arg == "--check-config" {

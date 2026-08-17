@@ -1,0 +1,7 @@
+# A live Karma child that never creates the expected PID file is reaped by the
+# managed startup deadline instead of reaching the package timeout.
+
+! exists karma-state
+! exec managed-karma karma-state missing.pid 200ms 100ms karma --pid-file=actual.pid --alertmanager.uri=http://127.0.0.1:1 --alertmanager.timeout=50ms --listen.address=127.0.0.1 --listen.port=8114
+grep '^failed:timeout:' karma-state/startup
+grep 'startup timeout after 200ms' karma-state/harness-error

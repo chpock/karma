@@ -1,7 +1,8 @@
 # GET /metrics returns same list of metrics
 
 exec bash -x ./test.sh &
-exec karma --pid-file=karma.pid --alertmanager.uri=http://127.0.0.1:7083 --listen.address=127.0.0.1 --listen.port=8083
+! exists karma-state
+exec managed-karma karma-state karma.pid 5s 2s karma --pid-file=karma.pid --alertmanager.uri=http://127.0.0.1:7083 --listen.address=127.0.0.1 --listen.port=8083
 ! stdout .
 cmp stderr stderr.txt
 cmp curl.txt metrics.txt
@@ -139,10 +140,12 @@ level=INFO msg="Collection completed"
 level=INFO msg="Done, starting HTTP server"
 level=INFO msg="Starting HTTP server" address=127.0.0.1:8083
 level=INFO msg="Shutting down HTTP server" signal=terminated
-level=INFO msg="HTTP server shut down"
 level=INFO msg="Removing PID file" path=karma.pid
+level=INFO msg="HTTP server shut down"
 -- test.sh --
-while [ ! -f karma.pid ]; do sleep 1 ; done
+wait-managed-pid karma-state 5s 2s
 sleep 5
 curl -s http://127.0.0.1:8083/metrics | grep -vE 'process_|go_info' | perl -pe "s/^([a-zA-Z].+)[ ]([0-9\.\-\+eE]+)$/\1/g" > curl.txt
-cat karma.pid | xargs kill
+kill "$(cat karma-state/wrapper-pid)"
+wait-managed-exit karma-state 5s 2s
+check-managed-result karma-state

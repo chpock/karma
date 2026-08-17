@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -147,6 +148,170 @@ func TestOpenStoreRejectsSchemaLayoutMetadataRemoval(t *testing.T) {
 	}
 }
 
+func TestOpenStoreRejectsUnknownApplicationView(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := OpenStore(StoreOptions{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := captureSchemaMetadataSnapshot(t, db)
+	if _, err = db.Exec(`CREATE VIEW unexpected_layout_view AS SELECT 1 AS value`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	afterSetup := captureSchemaMetadataSnapshot(t, db)
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = OpenStore(StoreOptions{Path: path})
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "schema layout fingerprint mismatch") {
+		t.Fatalf("expected schema layout mismatch for unknown view, got %v", err)
+	}
+	if !strings.Contains(err.Error(), schemaRecreateInstruction) {
+		t.Fatalf("schema rejection omitted recreation instruction: %v", err)
+	}
+	if afterSetup == before {
+		t.Fatal("test setup did not add unknown view to the schema snapshot")
+	}
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if after := captureSchemaMetadataSnapshot(t, db); after != afterSetup {
+		t.Fatalf("schema rejection modified the schema snapshot: before=%q after=%q", afterSetup, after)
+	}
+}
+
+func captureSchemaMetadataSnapshot(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.Query(`SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name, tbl_name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var snapshot strings.Builder
+	for rows.Next() {
+		var typ, name, table, sqlText string
+		if err = rows.Scan(&typ, &name, &table, &sqlText); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&snapshot, "schema:%s|%s|%s|%s\n", typ, name, table, sqlText)
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	metadataRows, err := db.Query(`SELECT key, value FROM metadata ORDER BY key`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metadataRows.Close()
+	for metadataRows.Next() {
+		var key, value string
+		if err = metadataRows.Scan(&key, &value); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&snapshot, "metadata:%s|%s\n", key, value)
+	}
+	if err = metadataRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.String()
+}
+
+func TestOpenStorePartialFailuresCloseAcquiredResourcesInOrder(t *testing.T) {
+	stages := []string{"open", "writer", "ping", "preflight", "configure", "bootstrap"}
+	for _, stage := range stages {
+		t.Run(stage, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "history.sqlite")
+			var db *sql.DB
+			closeOrder := make([]string, 0, 2)
+			stageErr := errors.New("injected " + stage + " failure")
+			deps := storeOpenDependencies{
+				openDB: func(dsn string) (*sql.DB, error) {
+					if stage == "open" {
+						return nil, stageErr
+					}
+					var err error
+					db, err = sql.Open("sqlite", dsn)
+					return db, err
+				},
+				acquireWriter: func(ctx context.Context, database *sql.DB) (*sql.Conn, error) {
+					if stage == "writer" {
+						return nil, stageErr
+					}
+					return database.Conn(ctx)
+				},
+				pingWriter: func(context.Context, *sql.Conn) error {
+					if stage == "ping" {
+						return stageErr
+					}
+					return nil
+				},
+				preflight: func(context.Context, *sql.Conn) error {
+					if stage == "preflight" {
+						return stageErr
+					}
+					return nil
+				},
+				configure: func(context.Context, *sql.Conn) error {
+					if stage == "configure" {
+						return stageErr
+					}
+					return nil
+				},
+				bootstrap: func(*Store) error {
+					if stage == "bootstrap" {
+						return stageErr
+					}
+					return nil
+				},
+				closeWriter: func(conn *sql.Conn) error {
+					closeOrder = append(closeOrder, "writer")
+					return conn.Close()
+				},
+				closeDatabase: func(database *sql.DB) error {
+					closeOrder = append(closeOrder, "database")
+					return database.Close()
+				},
+			}
+			store, err := openStoreWithDependencies(StoreOptions{Path: path}, deps)
+			if store != nil {
+				_ = store.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), stageErr.Error()) {
+				t.Fatalf("expected injected failure, got %v", err)
+			}
+			switch stage {
+			case "open":
+				if len(closeOrder) != 0 {
+					t.Fatalf("resources closed after open failure: %v", closeOrder)
+				}
+			case "writer":
+				if !slices.Equal(closeOrder, []string{"database"}) {
+					t.Fatalf("writer acquisition cleanup order: %v", closeOrder)
+				}
+			default:
+				if !slices.Equal(closeOrder, []string{"writer", "database"}) {
+					t.Fatalf("partial cleanup order: %v", closeOrder)
+				}
+			}
+		})
+	}
+}
+
 func TestOpenStoreRejectsNonV1SchemaWithoutChangingIt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 	db, err := sql.Open("sqlite", path)
@@ -167,6 +332,9 @@ func TestOpenStoreRejectsNonV1SchemaWithoutChangingIt(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), `unsupported sqlite schema version "2"`) {
 		t.Fatalf("expected unsupported schema error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), schemaRecreateInstruction) {
+		t.Fatalf("schema rejection omitted recreation instruction: %v", err)
 	}
 
 	db, err = sql.Open("sqlite", path)
@@ -3461,28 +3629,37 @@ func TestStoreSerializesConcurrentWriters(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
+	writerConn := store.writerConn
+	started := make(chan struct{})
+	proceed := make(chan struct{})
 	store.writeMu.Lock()
+	store.writerTransactionStarter = &writerStartBarrier{conn: writerConn, started: started, proceed: proceed}
+	store.writeMu.Unlock()
+
 	housekeepingDone := make(chan error, 1)
 	regroupDone := make(chan error, 1)
 	go func() {
 		_, runErr := store.RunHousekeeping(24*time.Hour, 100000)
 		housekeepingDone <- runErr
 	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("housekeeping did not reach the writer transaction barrier")
+	}
+	regroupInvoked := make(chan struct{})
 	go func() {
+		close(regroupInvoked)
 		_, runErr := store.RunRegroupToConfig(context.Background(), GroupingConfig{}, 1000)
 		regroupDone <- runErr
 	}()
-
+	<-regroupInvoked
 	select {
-	case runErr := <-housekeepingDone:
-		store.writeMu.Unlock()
-		t.Fatalf("housekeeping bypassed writer serialization: %v", runErr)
 	case runErr := <-regroupDone:
-		store.writeMu.Unlock()
 		t.Fatalf("regroup bypassed writer serialization: %v", runErr)
-	case <-time.After(20 * time.Millisecond):
+	default:
 	}
-	store.writeMu.Unlock()
+	close(proceed)
 
 	if runErr := <-housekeepingDone; runErr != nil {
 		t.Fatalf("RunHousekeeping() returned error: %v", runErr)
