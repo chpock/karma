@@ -56,10 +56,9 @@ disposable database. It must not silently run `CREATE TABLE IF NOT EXISTS` again
 incompatible v1 layout, auto-delete the database, migrate it, or partially repair it.
 
 Step 0 was applied before implementing Problem 1: currently false conformance claims
-were marked `Known violation; tracked by silence-recheck-problems.md`. D10 and D14
-remain known violations because they belong to Problems 2-3; immutable candidate
-claims in the schema and writer-audit documents remain explicitly planned rather than
-implemented.
+were marked `Known violation; tracked by silence-recheck-problems.md`. Problem 2 and D14
+are implemented and independently accepted. D10 remains partially open until Problem 3
+retry, scheduler, operator recovery, and complete queue observability pass their gates.
 
 Record the approved architecture in fork ADRs before the corresponding broad code
 change:
@@ -73,11 +72,13 @@ change:
 
 ### 1. Establish the Root Cause of the Original SQLite Busy Error
 
-**Status: Problem 1 implemented and independently accepted; Problems 2-6 remain pending**
+**Status: Problems 1 and 2 implemented and independently accepted; Problems 3-7 remain pending**
 
 The writer-ownership implementation, fail-fast PID test infrastructure, typed
 acquisition and cancellation handling, domain-state regressions, writer/shutdown
-evidence, and final independent review are complete. Problems 2-6 remain pending.
+evidence, and final independent review are complete for Problem 1. Problem 2's residual
+production defects and evidence gaps are corrected and independently accepted. Problems
+3-7 remain pending.
 
 The remediation includes the durable `lifecycle_writer_commits` ledger, typed
 `committed`/`not_committed`/`unknown` outcomes, bounded internal recovery contexts,
@@ -357,24 +358,29 @@ new boundary as implemented before its production path and regression tests exis
 - All production lifecycle mutations pass the single writer ownership boundary.
 - Read-only Store operations retain multi-connection concurrency.
 - No queue recovery, retry policy, or later-problem behavior is introduced.
-- Focused lifecycle tests, `go test ./... -timeout 600s`, root `make lint`, and
+- Focused lifecycle tests, sequential bounded Go tests (`-timeout 180s`), root `make lint`, and
   `git diff --check` all pass.
 
 ### 2. Create Immutable, Provenance-Complete Recheck Jobs
 
+**Status: implemented and independently accepted**
+
 **Problem**
 
-The current implementation does not have one atomic job-creation boundary. A job is
-identified only by its source context, while candidates can be attached later by the
-worker, by an alert transition, or by `UpsertCurrentAlert`. This mixes historical
-rules with alerts from a later lifecycle episode and makes trigger and counter data
-incorrect.
+The pre-remediation implementation did not have one atomic job-creation boundary. A job
+was identified only by its source context, while candidates could be attached later by
+the worker, by an alert transition, or by `UpsertCurrentAlert`. This mixed historical
+rules with alerts from a later lifecycle episode and made trigger and counter data
+incorrect. The current implementation creates the immutable parent, rules, candidates,
+and provenance in one creator transaction; independent acceptance of the remediation is
+still pending.
 
-Immutable membership alone is not sufficient. A candidate row currently stores only
-`job_id`, `alert_id`, and `processed_at`; the worker reads fresh labels, source
-membership, target rows, and `last_seen_at` when it processes the candidate. An old
-job can therefore evaluate a newer alert episode and use that newer value as its CAS
-expectation.
+Immutable membership alone was not sufficient. Before remediation, a candidate row
+stored only `job_id`, `alert_id`, and `processed_at`; the worker read fresh labels,
+source membership, target rows, and `last_seen_at` when it processed the candidate. An
+old job could therefore evaluate a newer alert episode and use that newer value as its
+CAS expectation. The current worker consumes the pinned input and validates exact
+source/cluster completeness and provenance.
 
 **Required contract**
 
@@ -398,15 +404,13 @@ expectation.
 - Two semantically identical poll snapshots with different input ordering create the
   same job fingerprint, pinned rules, candidates, and successor identity.
 
-Before writing the first Problem 2 regression, review one combined final schema
-design covering every Problem 2 and Problem 3 table, column, constraint, and index.
-Record that design in the schema specification and ADR. Problem 2 then implements
-only the job/rule/candidate portion after its failing tests exist. Problem 3 adds its
-state/attempt/operator-action portion only after its own tests exist. Both edit the
-fresh schema-v1 bootstrap directly; this is not a migration and does not require both
-implementation phases to modify the bootstrap in the same commit.
+The combined final schema design covering every Problem 2 and Problem 3 table, column,
+constraint, and index was recorded in the schema specification and ADR before the
+implementation. Problem 2 is responsible for the job/rule/candidate portion; Problem 3
+adds retry, attempt, scheduler, and operator-action behavior on the reserved v1 shape.
+Both edit the fresh schema-v1 bootstrap directly; this is not a migration.
 
-#### Step 1: Add failing regressions for the current design defects
+#### Step 1: Failing regressions and implementation evidence
 
 Add the tests before modifying the production creator. The old implementation must
 fail these tests for the expected reason; a test that already passes without the
@@ -465,8 +469,10 @@ with a format version. Its input must contain:
 
 - the complete canonical source context, not only its fingerprint;
 - trigger type;
-- every sorted pinned rule field used by evaluation, including source, target,
-  revision, observed state, and evaluation identity; and
+- every sorted pinned rule field used by evaluation, including source, target, stable
+  silence identity, content/evaluation fingerprints, observed state, and evaluation
+  fields; local database rule/revision IDs are foreign-key linkage only and are not
+  fingerprint identity; and
 - every sorted immutable candidate field, including alert ID, target scope, pinned
   global/target observation tokens, exact labels, relevant-source snapshot, and
   target-source members.
@@ -721,10 +727,10 @@ creation.
 - No production post-creation candidate INSERT remains.
 - Canonical fingerprint golden vectors remain stable across restart and input order.
 
-After these criteria pass, update D10/D14, the phase-2 schema/plan, storage schema,
-lifecycle state machine, writer projection audit, architecture verification, and
-implementation plan with the implemented immutable creator contract. Do not document
-Problem 3 retry states as implemented yet.
+These criteria are the acceptance contract for the remediation package. The current
+Problem 2 implementation and verification are independently accepted. D10 remains
+partially open for Problem 3 retry, scheduler, operator recovery, and complete queue
+observability; Problem 3 retry states are not documented as implemented.
 
 ### 3. Define Attempts, Automatic Retry, Terminal Failure, and Operator Recovery
 
@@ -1483,14 +1489,15 @@ root after the last edit:
 ```bash
 go test ./internal/fork/alertlifecycle -count=1
 go test ./cmd/karma -count=1
-go test -race ./internal/fork/alertlifecycle ./cmd/karma -count=1
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test -race ./cmd/karma -count=1 -timeout 180s
 npm --prefix ui test -- --runInBand \
   src/Components/ForkLifecycleWarning/index.test.tsx \
   src/Components/MainModal/Configuration/ForkStorageStats.test.tsx
 npm --prefix ui run build
 npm --prefix ui run test:visual -- --grep 'Fork lifecycle warning'
 make lint
-go test ./... -timeout 600s
+go test ./... -count=1 -timeout 180s
 git diff --check
 ```
 
@@ -1551,6 +1558,50 @@ fail-fast direct-child PID harness gate passes.
 
 Do not implement this problem as part of Problem 1.
 
+### 7. Reconcile the Completed Recheck-Job Retention Documentation
+
+**Dependency and scope**
+
+This is a deferred documentation-contract problem discovered while independently
+reviewing Problem 2. It is not part of immutable job creation, candidate processing, or
+Problem 2 acceptance and must not be mixed into the Problem 2 remediation change.
+
+**Confirmed inconsistency**
+
+Decision D21 in `phase2-silence-awareness-plan.md` defines reference-based completed-job
+retention: non-completed, cause-referenced, and latest-completed jobs are protected;
+other completed unreferenced jobs are operational detail and are removed by the next
+housekeeping without a separate job TTL. The runtime and
+`TestRunHousekeepingCleansCompletedUnreferencedJobs` implement that decision.
+
+Other authoritative-looking documents contradict D21 by saying that old completed jobs
+or job pins use the independent silence-history TTL, including `CONFIGURATION.md`,
+`phase2-silence-awareness-schema.md`, and `lifecycle-state-machine.md`. This leaves the
+public configuration meaning and the retention contract ambiguous even though the
+runtime behavior is internally consistent.
+
+**Required contract**
+
+- Preserve D21 as the decided runtime contract unless a separate architecture decision
+  explicitly supersedes it; do not silently add a job TTL during documentation cleanup.
+- State consistently that non-completed jobs, jobs referenced by global or target
+  suppression-cause history, and the latest completed job are retained regardless of
+  age.
+- State consistently that other completed unreferenced jobs are deleted by the next
+  housekeeping. Job-owned rules, candidates, attempts, and operator-action rows are
+  part of that deletable graph and may cascade.
+- Limit `alertLifecycle.silenceHistory.retention.ttl` to unreferenced retired sources,
+  revisions, closed episodes, and rules. It is independent from alert retention but is
+  not a completed-job retention promise.
+- Update `CONFIGURATION.md`, `phase2-silence-awareness-schema.md`,
+  `lifecycle-state-machine.md`, `writer-projection-audit.md`, and any other conflicting
+  summary to one contract.
+- Keep the current immediate-cleanup regression and add documentation assertions only
+  if this repository has a suitable contract-test mechanism.
+
+Problem 7 does not block Problem 2 acceptance and must be implemented as a separate
+change after the ordered lifecycle work unless the execution plan is explicitly changed.
+
 ## Execution Order and Scope Guard
 
 Execute the work in this exact order:
@@ -1560,8 +1611,9 @@ Execute the work in this exact order:
 2. Problem 2 immutable job creation and provenance;
 3. Problem 3 attempts, retry, failure, and operator recovery;
 4. Problem 4 observability and operator presentation;
-5. Problem 5 end-to-end verification and documentation; and
-6. deferred Problem 6 PID lease/harness hardening.
+5. Problem 5 end-to-end verification and documentation;
+6. deferred Problem 6 PID lease/harness hardening; and
+7. deferred Problem 7 completed-job retention documentation reconciliation.
 
 Finish the production code, focused regressions, and required documentation for one
 problem before implementing the next. Problems 2 and 3 must share one reviewed

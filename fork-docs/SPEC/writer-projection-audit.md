@@ -1,7 +1,7 @@
 # Writer and Projection Inventory
 
-Status: reference with known recheck-input violations; see
-`silence-recheck-problems.md`.
+Status: immutable recheck input is implemented and independently accepted; retry and
+operator recovery remain Problem 3.
 
 This inventory follows writes into every observable projection. It is organized
 by domain transaction, not by source file.
@@ -30,9 +30,9 @@ by domain transaction, not by source file.
 
 ## W2: Recheck worker
 
-- Authority: oldest non-completed job's source context, pinned rules, and current
-  candidate rows. Immutable candidate membership and candidate observation input
-  are the approved Problem 2 replacement, not the current implementation.
+- Authority: oldest queued/running job's complete source context, pinned rules, and
+  immutable candidate rows. Candidate observation tokens, labels, relevant sources,
+  and target members are copied at creation and never refreshed from current rows.
 - Transaction: each batch uses one Store-owned `BEGIN IMMEDIATE` transaction to
   update candidate progress, target/global CAS projection, events, and exact causes
   atomically. Writer ownership is released between batches.
@@ -43,13 +43,16 @@ by domain transaction, not by source file.
 - Readers: alert APIs, preview, warning/stats, next worker invocation,
   housekeeping.
 - Failure: first persisted error is immutable; failed predecessor blocks FIFO;
-  stale CAS is a counted no-op; incomplete source context cannot promote. An
+  stale CAS is a counted no-op; incomplete source context cannot promote. Each
+  candidate receives exactly one constrained terminal outcome and parent counters
+  satisfy the processed sum invariant. An
   unknown writer commit outcome is never persisted as a failed predecessor and
   never triggers a duplicate callback. Other transient/terminal worker error
-  classification remains Problem 3, and late candidate attachment remains Problem 2.
-- Restart: queued/running per-candidate progress resumes, but current candidate
-  membership and observation reads are not yet fully immutable. Problem 2 replaces
-  this behavior with pinned candidate input and successor jobs.
+  classification remains Problem 3; late candidate attachment is not supported.
+- Restart: queued/running per-candidate progress resumes from the same immutable
+  membership and pinned input. Eligibility under an unchanged source context creates
+  a new targeted successor rather than mutating an older job. Retry scheduling and
+  operator recovery remain Problem 3.
 
 ## W3: Manual resolve
 

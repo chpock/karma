@@ -6,14 +6,15 @@ It is evidence, not a replacement for the contracts in the state-machine specs.
 ## Domain and storage
 
 ```sh
-go test ./internal/fork/alertlifecycle
-go test ./internal/config
-go test ./cmd/karma -timeout 600s
+go test ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test ./internal/config -count=1 -timeout 180s
+go test ./cmd/karma -count=1 -timeout 180s
 ```
 
 Coverage includes pure/fuzz lifecycle invariants, target topology, sticky multi-job
 causes, FIFO failure blocking, HA inconsistency, fresh schema v1 bootstrap/reopen,
-restart, schema-layout fingerprint validation, and the recorded traffic replay.
+restart, schema-layout fingerprint validation, and the recorded traffic replay
+(`TestRecordedTrafficReplayThroughLifecycleStore`).
 
 SQLite writer ownership is covered by:
 
@@ -102,7 +103,8 @@ Delayed-reconciliation and shutdown coverage additionally includes:
 
 Problem 1 remediation is complete and independently accepted. The verification below
 names PID ownership, exact regroup severity, deterministic ordering, and real-component
-coverage.
+coverage. Problem 2 is implemented and independently accepted; Problem 3
+retry/scheduler behavior remains pending.
 
 Additional writer/shutdown evidence includes:
 
@@ -178,13 +180,96 @@ These tests enforce the normative rule that an invalid individual silence is abs
 from a successful source snapshot while valid neighbors continue. A structurally
 malformed top-level array fails the complete refresh.
 
+Problem 2 immutable recheck input is implemented and independently accepted. Its evidence
+includes:
+
+- `TestProblem2SchemaContainsImmutableJobInputAndCombinedRetryTables`,
+  `TestProblem2SchemaEnforcesInputConstraintsAndIndexes`,
+  `TestProblem2SchemaIndexColumnOrderAndCompositeForeignKeys`,
+  `TestProblem2SchemaChecksUniqueKeysAndForeignKeyActions`, and
+  `TestProblem2SchemaAcceptsAllProblem2EnumAndTerminalValues`, which verify the fresh
+  v1 columns, exact ordered indexes and composite foreign keys, all Problem 2 CHECKs,
+  valid enum/terminal values, duplicate keys, isolated delete/update actions, and the
+  absence of mutable current-state FKs;
+- `TestProblem2EligibilitySuccessorContainsOnlyExactTargetScopes` and
+  `TestRecheckCandidateBecomingEligibleCreatesImmutableSuccessor`, which prove that
+  poll reconciliation creates a targeted successor and never appends or schedules a
+  sibling target in the predecessor;
+- `TestProblem2CanonicalJobFingerprintIgnoresInputOrderAndPreservesCaller`, which
+  verifies deterministic canonical bytes and a fixed SHA-256 vector, complemented by
+  `TestProblem2RuleFingerprintIgnoresLocalIDs` and
+  `TestProblem2ProductionCanonicalizationIsStableAcrossFreshStores` plus
+  `TestProblem2ProductionCanonicalizationCoversPermutedLiveTargets`;
+- `TestProblem2GlobalObservationTokenRejectsNewLifecycleEpisode` and
+  `TestProblem2TargetObservationTokenIsIndependent`, which prove separate global and
+  target observation-token CAS boundaries;
+- `TestProblem2DuplicateIntegrityMatrix`,
+  `TestProblem2TargetDuplicateIntegrityMatrix`,
+  `TestProblem2DuplicateIgnoresLegitimateRuntimeFields`, and the existing provenance
+  conflict tests, which use one shared assertion path for immutable parent/rule/candidate
+  conflicts, complete ordered parent/rule/candidate rows including runtime fields, exact
+  counts, unsuccessful results, and zero queued events while excluding every current
+  legitimate runtime field. `TestProblem2DuplicateRejectsOrderingOnlyPersistedByteDrift`
+  and `TestProblem2DuplicateRejectsRevisionLinkageDriftWithinSameRule` cover ordering and
+  same-rule revision boundaries. The ordering test creates its two-matcher, two-source,
+  two-member input through the normal production creator, validates linked provenance,
+  and asserts exact `rule row 0 differs`/`candidate row 0 differs` stages;
+- `TestProblem2ApplyPollCycleCommittedJobEventAccounting`, which captures committed
+  structured `recheck_job_queued` events from production `ApplyPollCycle` sequences and
+  compares them with trigger counters and physical job-row deltas for creation,
+  successor, and replay paths;
+- `TestProblem2MissingCurrentAlertBecomesTerminalCandidateOutcome` and
+  `TestProblem2WorkerRecordsOneTerminalOutcomePerCandidate`, which prove membership
+  survives current-row eviction and every candidate receives one outcome with the
+  counter-sum invariant;
+- `TestProblem2CreatorDuplicateIsIdempotent`, which proves the healthy duplicate path
+  does not append children, complemented by exact raw-byte, parent, child, rule-linkage,
+  and linked-revision provenance conflict coverage; and
+- `TestProblem2WorkerPrimaryGlobalCASZeroRowRollsBack`,
+  `TestProblem2WorkerPrimaryTargetCASZeroRowRollsBack`,
+  `TestProblem2WorkerClassifiesPrimaryPostCASStates`,
+  `TestProblem2WorkerPostCASReadFailuresRollbackPrimaryAndAggregate`, and
+  `TestProblem2WorkerAggregateCASZeroRowIsInvariant`, which prove worker-level
+  rollback, primary/aggregate CAS invariants, classified stale/ineligible states, and
+  post-CAS read-error propagation without committed transitions. Their snapshots compare
+  complete alert/target state, suppression histories, members, aggregate links, and event
+  rows byte-for-byte before and after rollback;
+- `TestProblem2ForeignKeyActionsAreIsolatedToPinnedInput`, which proves parent-key,
+  source-key, revision-key, and rule-key restrictions using candidate-only/rule-only jobs
+  and non-current source/rule/revision fixtures with no unrelated source-silence edges;
+- `TestProblem2WorkerCoversEveryTerminalOutcome` and
+  `TestProblem2CompletePriorityBoundaryMatrix`, which cover every constrained terminal
+  outcome, its exclusive parent counter, completion, and every adjacent priority
+  boundary;
+- `TestProblem2RestartResumesPinnedMembershipBetweenBatches` plus
+  `TestC4RecheckResumesPinnedContextAndCandidatesAfterRestart`, which verify restart
+  equality and resume from immutable membership, including immutable parent trigger and
+  progress identity, local rule/revision linkage, terminal candidate fields, counters,
+  and no replay of already-terminal candidates. The matrix also covers replay byte
+  stability, max-alert eviction through worker completion, exact cluster-qualified
+  source completeness, per-candidate accounting, and former-v1 layout rejection.
+
+The independent acceptance gate passed on 2026-08-18 with these repository-root commands:
+
+```sh
+go test ./internal/fork/alertlifecycle -run 'TestProblem2|TestRecheckCandidateBecomingEligibleCreatesImmutableSuccessor|TestPinnedRecheckRuleCannotCrossSourceReassignment|TestC4RecheckResumesPinnedContextAndCandidatesAfterRestart|TestRecordedTrafficReplayThroughLifecycleStore' -count=1 -timeout 180s
+go test ./... -count=1 -timeout 180s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test -race ./cmd/karma -count=1 -timeout 180s
+make lint
+git diff --check
+```
+
+Problem 3 retry, scheduler, failure, and operator-recovery behavior is not included in
+this acceptance.
+
 ## Runtime logging
 
 ```sh
 go test ./internal/log
 go test ./internal/alertmanager
 go test ./internal/fork/alertlifecycle
-go test ./cmd/karma -timeout 600s
+go test ./cmd/karma -count=1 -timeout 180s
 cd ui
 npm test -- --runInBand \
   src/Components/SilenceModal/SilenceEditor.test.tsx \
@@ -264,7 +349,7 @@ Before release, run the current commands rather than copying historical test cou
 
 ```sh
 make lint
-go test ./... -timeout 600s
+go test ./... -count=1 -timeout 180s
 npm --prefix ui test -- --runInBand
 npm --prefix ui run build
 git diff --check

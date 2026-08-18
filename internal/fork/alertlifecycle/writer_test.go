@@ -226,9 +226,9 @@ func seedQueuedWriterTestJob(t *testing.T, store *Store) {
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := store.db.Exec(`
 INSERT INTO silence_recheck_jobs(
-  context_fingerprint, open_context_fingerprint, source_context_json,
+  source_context_fingerprint, job_fingerprint, source_context_json,
   trigger_type, status, created_at
-) VALUES('writer-test', 'writer-test', '{}', 'source_changed', 'queued', ?)
+) VALUES('writer-test', 'sha256:writer-test', '{"formatVersion":1,"sources":[],"clusters":[]}', 'source_context_changed', 'queued', ?)
 `, createdAt); err != nil {
 		t.Fatalf("failed to seed recheck job: %v", err)
 	}
@@ -241,40 +241,50 @@ type writerRecheckAggregateSnapshot struct {
 }
 
 type writerRecheckJobSnapshot struct {
-	JobID                  int64
-	ContextFingerprint     string
-	OpenContextFingerprint sql.NullString
-	SourceContext          string
-	TriggerType            string
-	Status                 string
-	CursorAlertID          sql.NullString
-	TotalCandidates        int
-	ProcessedCandidates    int
-	PromotedAlerts         int
-	SkippedIneligible      int
-	SkippedMissingLabels   int
-	SkippedIncomplete      int
-	StaleConflicts         int
-	RetryCount             int
-	CreatedAt              string
-	StartedAt              sql.NullString
-	FinishedAt             sql.NullString
-	LastError              sql.NullString
+	JobID                    int64
+	SourceContextFingerprint string
+	JobFingerprint           string
+	SourceContext            string
+	TriggerType              string
+	Status                   string
+	CursorAlertID            sql.NullString
+	TotalCandidates          int
+	ProcessedCandidates      int
+	PromotedCandidates       int
+	SkippedIneligible        int
+	SkippedMissingLabels     int
+	SkippedIncomplete        int
+	StaleConflicts           int
+	RetryCount               int
+	CreatedAt                string
+	StartedAt                sql.NullString
+	FinishedAt               sql.NullString
+	LastErrorMessage         sql.NullString
 }
 
 type writerRecheckRuleSnapshot struct {
-	JobID         int64
-	SourceName    string
-	ClusterID     string
-	RuleID        int64
-	RevisionID    int64
-	ObservedState string
+	JobID                 int64
+	SourceName            string
+	ClusterID             string
+	TargetKey             string
+	RuleID                int64
+	RevisionID            int64
+	ObservedState         string
+	EvaluationFingerprint string
+	MatchersJSON          string
 }
 
 type writerRecheckCandidateSnapshot struct {
-	JobID       int64
-	AlertID     string
-	ProcessedAt sql.NullString
+	JobID                    int64
+	AlertID                  string
+	TargetKey                string
+	ExpectedAlertLastSeenAt  sql.NullString
+	ExpectedTargetLastSeenAt sql.NullString
+	MatchLabelsJSON          sql.NullString
+	RelevantSourcesJSON      string
+	TargetSourceMembersJSON  sql.NullString
+	ProcessedAt              sql.NullString
+	Outcome                  sql.NullString
 }
 
 func captureWriterRecheckAggregate(t *testing.T, store *Store, jobID int64) string {
@@ -282,23 +292,23 @@ func captureWriterRecheckAggregate(t *testing.T, store *Store, jobID int64) stri
 	snapshot := writerRecheckAggregateSnapshot{}
 	var job writerRecheckJobSnapshot
 	if err := store.db.QueryRow(`
-SELECT job_id, context_fingerprint, open_context_fingerprint, source_context_json,
+SELECT job_id, source_context_fingerprint, job_fingerprint, source_context_json,
        trigger_type, status, cursor_alert_id, total_candidates, processed_candidates,
-       promoted_alerts, skipped_ineligible, skipped_missing_labels,
+       promoted_candidates, skipped_ineligible, skipped_missing_labels,
        skipped_incomplete_sources, stale_conflicts, retry_count, created_at,
-       started_at, finished_at, last_error
+       started_at, finished_at, last_error_message
 FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(
-		&job.JobID, &job.ContextFingerprint, &job.OpenContextFingerprint, &job.SourceContext,
+		&job.JobID, &job.SourceContextFingerprint, &job.JobFingerprint, &job.SourceContext,
 		&job.TriggerType, &job.Status, &job.CursorAlertID, &job.TotalCandidates,
-		&job.ProcessedCandidates, &job.PromotedAlerts, &job.SkippedIneligible,
+		&job.ProcessedCandidates, &job.PromotedCandidates, &job.SkippedIneligible,
 		&job.SkippedMissingLabels, &job.SkippedIncomplete, &job.StaleConflicts,
-		&job.RetryCount, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &job.LastError,
+		&job.RetryCount, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &job.LastErrorMessage,
 	); err != nil {
 		t.Fatal(err)
 	}
 	snapshot.Job = job
 	ruleRows, err := store.db.Query(`
-SELECT job_id, source_name, cluster_id, rule_id, revision_id, observed_state
+SELECT job_id, source_name, cluster_id, target_key, rule_id, revision_id, observed_state, evaluation_fingerprint, matchers_json
 FROM silence_recheck_job_rules WHERE job_id=? ORDER BY job_id, source_name, rule_id`, jobID)
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +316,7 @@ FROM silence_recheck_job_rules WHERE job_id=? ORDER BY job_id, source_name, rule
 	defer ruleRows.Close()
 	for ruleRows.Next() {
 		var rule writerRecheckRuleSnapshot
-		if err = ruleRows.Scan(&rule.JobID, &rule.SourceName, &rule.ClusterID, &rule.RuleID, &rule.RevisionID, &rule.ObservedState); err != nil {
+		if err = ruleRows.Scan(&rule.JobID, &rule.SourceName, &rule.ClusterID, &rule.TargetKey, &rule.RuleID, &rule.RevisionID, &rule.ObservedState, &rule.EvaluationFingerprint, &rule.MatchersJSON); err != nil {
 			t.Fatal(err)
 		}
 		snapshot.Rules = append(snapshot.Rules, rule)
@@ -315,15 +325,16 @@ FROM silence_recheck_job_rules WHERE job_id=? ORDER BY job_id, source_name, rule
 		t.Fatal(err)
 	}
 	candidateRows, err := store.db.Query(`
-SELECT job_id, alert_id, processed_at
-FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY job_id, alert_id`, jobID)
+SELECT job_id, alert_id, target_key, expected_alert_last_seen_at, expected_target_last_seen_at,
+       match_labels_json, relevant_sources_json, target_source_members_json, processed_at, outcome
+FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY job_id, alert_id, target_key`, jobID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer candidateRows.Close()
 	for candidateRows.Next() {
 		var candidate writerRecheckCandidateSnapshot
-		if err = candidateRows.Scan(&candidate.JobID, &candidate.AlertID, &candidate.ProcessedAt); err != nil {
+		if err = candidateRows.Scan(&candidate.JobID, &candidate.AlertID, &candidate.TargetKey, &candidate.ExpectedAlertLastSeenAt, &candidate.ExpectedTargetLastSeenAt, &candidate.MatchLabelsJSON, &candidate.RelevantSourcesJSON, &candidate.TargetSourceMembersJSON, &candidate.ProcessedAt, &candidate.Outcome); err != nil {
 			t.Fatal(err)
 		}
 		snapshot.Candidates = append(snapshot.Candidates, candidate)
@@ -343,7 +354,7 @@ func seedWriterRecheckAggregate(t *testing.T, store *Store) int64 {
 	seedQueuedWriterTestJob(t, store)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	created := now.Add(-time.Hour).Format(time.RFC3339Nano)
-	if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET context_fingerprint='aggregate-context', open_context_fingerprint='aggregate-context', source_context_json='{"formatVersion":1,"sources":[{"sourceName":"am-a","syncStatus":"success"}]}' , trigger_type='source_changed', cursor_alert_id='cursor-before', total_candidates=2, processed_candidates=1, promoted_alerts=1, skipped_ineligible=2, skipped_missing_labels=3, skipped_incomplete_sources=4, stale_conflicts=5, retry_count=2, created_at=?, started_at=?, last_error='root-error' WHERE job_id=(SELECT MAX(job_id) FROM silence_recheck_jobs)`, created, created); err != nil {
+	if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET source_context_fingerprint='aggregate-context', job_fingerprint='sha256:aggregate-context', source_context_json='{"formatVersion":1,"sources":[{"sourceName":"am-a","syncStatus":"success"}],"clusters":[]}' , trigger_type='source_context_changed', cursor_alert_id='cursor-before', total_candidates=2, processed_candidates=1, promoted_candidates=1, skipped_ineligible=0, skipped_missing_labels=0, skipped_incomplete_sources=0, stale_conflicts=0, retry_count=2, created_at=?, started_at=?, first_error_message='root-error', last_error_message='root-error' WHERE job_id=(SELECT MAX(job_id) FROM silence_recheck_jobs)`, created, created); err != nil {
 		t.Fatal(err)
 	}
 	var jobID int64
@@ -384,10 +395,14 @@ func seedWriterRecheckAggregate(t *testing.T, store *Store) int64 {
 		if err := store.UpsertCurrentAlert(AlertCurrent{AlertID: id, State: StateInactive, RawState: StateActive, Receiver: "team-a", GroupID: "group-a", LabelsJSON: matchLabels, MatchLabelsJSON: &matchLabels, AnnotationsJSON: `{}`, StartsAt: now.Add(-time.Hour), LastSeenAt: &now, RelevantUpstreams: `[]`}); err != nil {
 			t.Fatal(err)
 		}
+		processedAt := any(nil)
+		outcome := any(nil)
 		if index == 0 {
-			if _, err := store.db.Exec(`UPDATE silence_recheck_job_candidates SET processed_at=? WHERE job_id=? AND alert_id=?`, created, jobID, id); err != nil {
-				t.Fatal(err)
-			}
+			processedAt = created
+			outcome = "promoted"
+		}
+		if _, err := store.db.Exec(`INSERT INTO silence_recheck_job_candidates(job_id,alert_id,expected_alert_last_seen_at,match_labels_json,relevant_sources_json,processed_at,outcome) VALUES(?,?,?,?,?,?,?)`, jobID, id, now.Format(time.RFC3339Nano), matchLabels, `[]`, processedAt, outcome); err != nil {
+			t.Fatal(err)
 		}
 	}
 	return jobID
@@ -945,7 +960,7 @@ func TestRecheckZeroCandidateRunningJobEmitsResumeThenCompletion(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = store.db.Exec(`INSERT INTO silence_recheck_jobs(context_fingerprint,open_context_fingerprint,source_context_json,trigger_type,status,created_at,started_at,total_candidates) VALUES('running-zero','running-zero','{}','source_changed','running',?,?,0)`, createdAt, createdAt); err != nil {
+	if _, err = store.db.Exec(`INSERT INTO silence_recheck_jobs(source_context_fingerprint,job_fingerprint,source_context_json,trigger_type,status,created_at,started_at,total_candidates) VALUES('running-zero','sha256:running-zero','{"formatVersion":1,"sources":[],"clusters":[]}','source_context_changed','running',?,?,0)`, createdAt, createdAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = store.RunSilenceRecheckBatchContext(context.Background(), 1000); err != nil {
@@ -1987,7 +2002,7 @@ func TestRecheckDelayedCommitReplaysCommittedEventsExactlyOnce(t *testing.T) {
 		t.Fatalf("delayed recheck outcome: %v", err)
 	}
 	logged := logOutput.String()
-	for _, event := range []string{"job_commit_reconciled", "job_started", "batch_completed"} {
+	for _, event := range []string{"job_commit_reconciled", "job_started", "job_completed"} {
 		if count := strings.Count(logged, `"event":"`+event+`"`); count != 1 {
 			t.Fatalf("event %s count: got=%d log=%s", event, count, logged)
 		}

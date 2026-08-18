@@ -180,9 +180,19 @@ func (s *Store) persistRecheckFailure(ctx context.Context, jobID int64, domainEr
 			nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
 			_, err := tx.Exec(`
 UPDATE silence_recheck_jobs
-SET status='failed', last_error=COALESCE(last_error, ?), finished_at=COALESCE(finished_at, ?)
+SET status='failed',
+    first_error_message=COALESCE(first_error_message, ?),
+    first_error_class=COALESCE(first_error_class, 'terminal'),
+    first_error_stage=COALESCE(first_error_stage, 'worker'),
+    first_error_at=COALESCE(first_error_at, ?),
+    last_error_message=?,
+    last_error_class='terminal',
+    last_error_stage='worker',
+    last_error_at=?,
+    finished_at=COALESCE(finished_at, ?),
+    next_attempt_at=NULL
 WHERE job_id=? AND status IN ('queued','running','failed')
-`, domainErr.Error(), nowRaw, jobID)
+`, domainErr.Error(), nowRaw, domainErr.Error(), nowRaw, nowRaw, jobID)
 			return struct{}{}, err
 		}, finalizer)
 		if persistErr == nil {

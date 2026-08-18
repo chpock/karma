@@ -199,7 +199,7 @@ domain outcome.
 | `ha_disagreement_detected` | `warning` on transition | Target and member count; no rule payload. |
 | `ha_disagreement_unchanged` | `debug` | Target and member count. |
 | `ha_converged` | `info` | Target and previous disagreement duration when known. |
-| `recheck_job_queued` | `info` | Job ID, opaque context ID, candidate count, queue depth, reason code. |
+| `recheck_job_queued` | `info` | Job ID, source-context fingerprint, complete job fingerprint, candidate count, queue depth, trigger/reason code. |
 | `observability_collection_failed` | `warning` | For transaction-local poll metadata only: `stage=queue_depth|event_payload`, exact `event_family`, and error; emit best-effort and never change poll outcome. |
 
 An invalid individual silence entry is absent from the successful source snapshot.
@@ -216,7 +216,7 @@ warning.
 | `job_started` | `info` | Job ID, candidate total, pinned-rule count, source count. |
 | `job_resumed` | `info` | Job ID and prior processed count after restart. |
 | `batch_completed` | `info` if any promotion occurred; otherwise `debug` | Job ID, processed, promoted, stale, missing labels, ineligible, incomplete sources, duration. |
-| `candidate_skipped` | `debug` | Job ID, alert ID, stable skip reason; no labels. |
+| `candidate_skipped` | `debug` | Job ID, alert ID, one constrained terminal outcome; no labels. |
 | `candidate_promoted` | `debug` | Job ID, alert ID, target if target-only, transition ID. |
 | `job_completed` | `info` | Job ID, total counters, total duration. |
 | `job_failed` | `error` on transition | Job ID, stage, preserved root error. |

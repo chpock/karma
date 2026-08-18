@@ -150,7 +150,7 @@ const (
 )
 
 func RecheckJobCanRun(jobStatus string, failedPredecessor bool) bool {
-	return !failedPredecessor && jobStatus != "failed" && jobStatus != "completed"
+	return !failedPredecessor && (jobStatus == "queued" || jobStatus == "running")
 }
 
 func ClassifyRecheckCandidate(coverageComplete bool, candidate RecheckCandidateClass) (counter string, promote bool) {

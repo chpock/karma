@@ -191,13 +191,15 @@ type PollCycleInput struct {
 }
 
 type PollCycleResult struct {
-	Inserted          int
-	Updated           int
-	SetInactive       int
-	Reactivated       int
-	SkippedInactive   int
-	Transitions       int
-	RecheckJobsQueued int
+	Inserted                        int
+	Updated                         int
+	SetInactive                     int
+	Reactivated                     int
+	SkippedInactive                 int
+	Transitions                     int
+	RecheckJobsQueued               int
+	RecheckJobsSourceContextChanged int
+	RecheckJobsAlertBecameEligible  int
 }
 
 type ResolveResult struct {

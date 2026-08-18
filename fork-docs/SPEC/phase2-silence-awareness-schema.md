@@ -2,7 +2,7 @@
 
 ## 1. Authority
 
-Status: implemented in the fresh lifecycle schema version `1`.
+Status: fresh v1 schema contract; Problem 2 is implemented and independently accepted.
 
 The literal executable DDL has one source of truth:
 `internal/fork/alertlifecycle/store.go` (`bootstrapSchema`). This document describes
@@ -16,7 +16,7 @@ database or any schema version other than `1` is rejected without modification.
 
 ## 2. Complete table inventory
 
-Schema v1 contains 21 application tables.
+Schema v1 contains 23 application tables.
 
 ### 2.1 Global lifecycle
 
@@ -71,29 +71,47 @@ status-only or repeated observations do not.
 
 ### 2.4 Persistent recheck input and progress
 
-The immutable candidate table described below is the approved replacement contract,
-not the current runtime behavior. The current implementation can attach eligible
-alerts after job creation and reads some correctness-critical observation data from
-mutable current rows. These are known violations tracked in
-`silence-recheck-problems.md` and must not be described as implemented until Problem
-2 passes its production sequence tests.
+Problem 2 implements one atomic immutable job-creation boundary. Its production
+remediation closed exact duplicate integrity, cluster-qualified source completeness,
+timestamp validation, post-CAS error propagation, and per-candidate accounting, but
+Problem 2 is independently accepted.
+The accepted
+creator contract stores the complete source context, exact rule revisions, and every
+global/target candidate input after poll reconciliation has finished. No worker, alert
+upsert, or later transition may insert a candidate into an existing job.
 
 | Table | Identity | Ownership |
 |---|---|---|
-| `silence_recheck_jobs` | `job_id` | FIFO context, status, counters, timing, preserved root error |
-| `silence_recheck_job_rules` | `(job_id, source_name, rule_id)` | Immutable successful-source, target-qualified revision set |
-| `silence_recheck_job_candidates` | `(job_id, alert_id)` | Planned immutable candidate decision input with nullable `processed_at` |
+| `silence_recheck_jobs` | `job_id` | FIFO context, source/job fingerprints, trigger, status, counters, timing, preserved errors |
+| `silence_recheck_job_rules` | `(job_id, source_name, target_key, rule_id)` | Immutable successful-source, target-qualified revision, stable silence identity/content fingerprint, and matcher set |
+| `silence_recheck_job_candidates` | `(job_id, alert_id, target_key)` | Immutable observation token, labels, source membership, and nullable terminal outcome |
+| `silence_recheck_job_attempts` | `attempt_id` | Reserved append-only attempt history for Problem 3 |
+| `silence_recheck_job_operator_actions` | `action_id` | Reserved idempotent operator-action history for Problem 3 |
 
-The approved replacement will pin both the complete decision rules and candidate
-membership at job creation. Until Problem 2 is implemented, late candidate
-attachment and fresh reads of mutable observation data remain known violations. The
-replacement worker will read unprocessed candidate rows and mark each terminal
-outcome in the same batch transaction. `cursor_alert_id` in the job parent is only a
-persisted diagnostic last-processed marker; the replacement candidate membership and
-`processed_at` will own resume correctness.
+`source_context_fingerprint` identifies the canonical pinned source status/topology and
+`job_fingerprint` is the unique SHA-256 identity of the complete source, rule, and
+candidate input. The job fingerprint excludes creation time, database IDs, map order,
+and batch order. Rule identity uses stable silence identity plus content/evaluation
+fingerprints and evaluation fields; local `rule_id`/`revision_id` values remain only
+foreign-key/evidence linkage. Same-context eligibility creates a new job fingerprint
+and FIFO successor; it never appends to an older job.
 
-Jobs are strict FIFO. A failed predecessor keeps its first `last_error` and blocks
-later jobs. Crash/restart resumes the same pinned rules and remaining candidates.
+Each candidate pins `expected_alert_last_seen_at`, nullable
+`expected_target_last_seen_at`, exact raw `match_labels_json`, relevant source
+references, and target source members. Candidate rows have no foreign key to mutable
+alert or target current-state tables, so alert TTL/max-alert eviction cannot remove
+open-job input. A missing current row is a terminal `missing_current_alert` or
+`missing_current_target` outcome.
+
+The worker loads unprocessed rows by immutable membership only, evaluates pinned input,
+and writes exactly one constrained terminal outcome plus one parent counter in the same
+batch transaction. `cursor_alert_id` is only a diagnostic marker; `processed_at` and
+`outcome` own resume correctness.
+
+Jobs are strict FIFO. A failed predecessor keeps its first error and blocks later jobs.
+Crash/restart resumes the same pinned rules, observations, and remaining candidates.
+Retry states, attempt history, scheduler ownership, and operator actions are reserved
+by the combined schema and remain Problem 3 behavior.
 
 ### 2.5 Global suppression evidence
 
@@ -134,8 +152,9 @@ with an explicit format version.
 - Evaluation fingerprint: only matcher tuples and starts/ends.
 - Source-set fingerprint: source rule identity, revision/evaluation identity, and
   observed status.
-- Job context: source topology/status/HA consistency, active evaluation identity,
-  and episode identity.
+- Job context: semantic source-context generation, source topology/status/HA
+  consistency, and active evaluation identity. Local observation timestamps do not
+  participate.
 - Cause fingerprint: status plus sorted source/rule/revision member set.
 
 Database surrogate IDs, local observation time, array insertion order, and display
@@ -152,7 +171,8 @@ Network reads complete before SQL begins. One serialized transaction:
 5. reconciles target topology/retirement and target label indexes;
 6. writes global/target current dimensions and append-only events;
 7. writes exact live suppression causes;
-8. enqueues a promotion-capable recheck context with pinned rules/candidates;
+8. after all state reconciliation, creates one full source-context job or one targeted
+   eligibility successor with pinned rules/candidates;
 9. commits atomically.
 
 Failed persistence rolls back the complete observation. Runtime transition logs are
@@ -163,19 +183,21 @@ emitted only after commit.
 Each worker invocation selects the oldest queued/running/failed job. A failed job is
 reported and blocks the queue. For a runnable job, one batch:
 
-1. loads immutable pinned source status and rules;
-2. attaches any specifically eligible candidate required by a later transition;
-3. loads unprocessed immutable candidate rows;
-4. revalidates global and target eligibility;
-5. evaluates Alertmanager matcher semantics using original labels;
-6. applies target/global conditional updates using expected `last_seen_at` and state
+1. loads immutable pinned source status, rules, and candidate input;
+2. loads unprocessed candidate rows by job membership only;
+3. compares current global/target state with pinned observation tokens;
+4. evaluates Alertmanager matcher semantics using pinned original labels;
+5. applies target/global conditional updates using expected `last_seen_at` and state
    predicates;
-7. writes events and exact target/global evidence;
-8. marks each candidate processed and updates counters;
-9. commits.
+6. writes events and exact target/global evidence;
+7. marks each candidate with one terminal outcome and updates counters;
+8. commits.
 
-`RowsAffected=0` is a stale no-op. A live reappearance or manual Resolve cannot be
-overwritten by an older job.
+`RowsAffected=0` is re-read in the same transaction. A successfully observed stale or
+ineligible state receives its exact terminal outcome; a re-read failure aborts the
+transaction, and an unexplained zero-row result is an invariant error. A live
+reappearance, newer lifecycle episode, or manual Resolve cannot be overwritten by an
+older job.
 
 ## 6. Retention and foreign keys
 
@@ -194,7 +216,7 @@ the required source/rule/revision graph. Housekeeping never disables foreign key
 
 ## 7. Required schema verification
 
-- Fresh bootstrap creates all 21 documented tables and metadata version `1`.
+- Fresh bootstrap creates all 23 documented tables and metadata version `1`.
 - Reopening v1 preserves rows, indexes, and foreign-key behavior.
 - Other/non-empty unknown schemas are rejected without modification.
 - Poll, recheck, Resolve, retention, topology retirement/reappearance, HA

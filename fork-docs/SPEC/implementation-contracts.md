@@ -4,6 +4,9 @@
 
 Keep fork behavior isolated while integrating the refactored state model end-to-end.
 
+Problem 2 immutable recheck input is implemented and independently accepted. Problem 3
+retry/scheduler/operator behavior remains outside that acceptance.
+
 ## 2. Minimal upstream touchpoints
 
 The persistent lifecycle subsystem uses these primary upstream-owned integration
@@ -67,7 +70,9 @@ Required checks for this model:
 - All lifecycle Store writers are serialized inside one process through one
   Store-owned SQLite writer connection. The writer boundary starts
   `BEGIN IMMEDIATE` before background regroup, housekeeping, poll, resolve, or
-  silence recheck reads mutable lifecycle state.
+  silence recheck reads current semantic state for CAS. Recheck correctness inputs
+  (rules, labels, source membership, and observation tokens) come from the immutable
+  job snapshot, never from mutable current rows.
 - `Store.db` remains a multi-connection read pool. Read-only preview, autocomplete,
   merge, stats, and warning queries do not wait on `Store.writeMu` merely because a
   writer transaction exists.
@@ -92,6 +97,9 @@ Required checks for this model:
 - Poll runtime event payloads are captured in the transaction-local collector and are
   never reconstructed by querying rows with a timestamp after commit.
 - A failed source refresh updates health only and preserves the last successful source set and fingerprint.
+- Poll reconciliation creates recheck jobs only after global and target transitions
+  finish. A source-context job snapshots all final eligible scopes; an unchanged
+  source context creates one targeted successor for the exact eligibility transitions.
 - SQLite busy timeout is 5 seconds as a defensive boundary for brief external/process-independent locks.
 - The PID file is an owned lease: exclusive creation, an open handle, platform file
   identity, complete write/sync, and identity-checked release. Startup cleanup and

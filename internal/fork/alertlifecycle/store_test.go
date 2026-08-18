@@ -148,6 +148,50 @@ func TestOpenStoreRejectsSchemaLayoutMetadataRemoval(t *testing.T) {
 	}
 }
 
+func TestOpenStoreRejectsFormerV1RecheckLayoutWithoutModification(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "former-v1.sqlite")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO metadata(key,value) VALUES('schema_version','1')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE silence_recheck_jobs(job_id INTEGER PRIMARY KEY, job_fingerprint TEXT NOT NULL UNIQUE)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	before := captureSchemaMetadataSnapshot(t, db)
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(StoreOptions{Path: path})
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "missing schema layout fingerprint") {
+		t.Fatalf("former v1 layout was not rejected: %v", err)
+	}
+	if !strings.Contains(err.Error(), schemaRecreateInstruction) {
+		t.Fatalf("former v1 rejection omitted recreation instruction: %v", err)
+	}
+
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if after := captureSchemaMetadataSnapshot(t, db); after != before {
+		t.Fatalf("former v1 rejection modified schema: before=%q after=%q", before, after)
+	}
+}
+
 func TestOpenStoreRejectsUnknownApplicationView(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 	store, err := OpenStore(StoreOptions{Path: path})
@@ -375,6 +419,8 @@ func TestOpenStoreBootstrapsPhase2Tables(t *testing.T) {
 		"silence_recheck_jobs",
 		"silence_recheck_job_rules",
 		"silence_recheck_job_candidates",
+		"silence_recheck_job_attempts",
+		"silence_recheck_job_operator_actions",
 		"alert_suppression_cause_history",
 		"alert_suppression_cause_members",
 		"alert_target_suppression_cause_history",
@@ -1274,10 +1320,6 @@ func TestRunSilenceRecheckBatchPromotesInactiveAndAddsCause(t *testing.T) {
 		},
 		Timestamp: now,
 	}
-	if _, err = store.ApplyPollCycle(input); err != nil {
-		t.Fatalf("ApplyPollCycle() setup returned error: %v", err)
-	}
-
 	matchLabels := `{"alertname":"CPUHigh"}`
 	relevantSources := `[{"name":"am-a","cluster":"cluster-a"}]`
 	if err = store.UpsertCurrentAlert(AlertCurrent{
@@ -1299,6 +1341,9 @@ func TestRunSilenceRecheckBatchPromotesInactiveAndAddsCause(t *testing.T) {
 		RelevantSources:   relevantSources,
 	}); err != nil {
 		t.Fatalf("UpsertCurrentAlert() returned error: %v", err)
+	}
+	if _, err = store.ApplyPollCycle(input); err != nil {
+		t.Fatalf("ApplyPollCycle() setup returned error: %v", err)
 	}
 
 	promoted, err := store.RunSilenceRecheckBatch(1000)
@@ -1423,9 +1468,9 @@ func TestRunHousekeepingCleansCompletedUnreferencedJobs(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		fp := "sha256:test-" + string(rune('a'+i))
 		if _, err = store.db.Exec(`
-INSERT INTO silence_recheck_jobs(context_fingerprint, open_context_fingerprint, source_context_json, trigger_type, status, cursor_alert_id, created_at, finished_at)
-VALUES(?, NULL, '{"formatVersion":1}', 'source_changed', 'completed', NULL, ?, ?)
-`, fp, now, now); err != nil {
+INSERT INTO silence_recheck_jobs(source_context_fingerprint, job_fingerprint, source_context_json, trigger_type, status, cursor_alert_id, created_at, finished_at)
+VALUES(?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'source_context_changed', 'completed', NULL, ?, ?)
+`, fp, fp, now, now); err != nil {
 			t.Fatalf("failed to insert completed job: %v", err)
 		}
 	}
@@ -1551,9 +1596,9 @@ INSERT INTO silence_revisions(
 	} {
 		res, insertErr := store.db.Exec(`
 INSERT INTO silence_recheck_jobs(
-  context_fingerprint,source_context_json,trigger_type,status,created_at,finished_at
-) VALUES(?, '{"formatVersion":1,"sources":[]}', 'source_changed','completed',?,?)
-`, job.fingerprint, job.finishedAt, job.finishedAt)
+  source_context_fingerprint,job_fingerprint,source_context_json,trigger_type,status,created_at,finished_at
+) VALUES(?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'source_context_changed','completed',?,?)
+`, job.fingerprint, job.fingerprint, job.finishedAt, job.finishedAt)
 		if insertErr != nil {
 			t.Fatal(insertErr)
 		}
@@ -1564,7 +1609,7 @@ VALUES(?,?,?,?,?,'active')
 `, jobID, "am-a", "cluster-a", ruleID, revisionID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = store.db.Exec(`INSERT INTO silence_recheck_job_candidates(job_id,alert_id,processed_at) VALUES(?,?,?)`, jobID, "job-child-alert", job.finishedAt); err != nil {
+		if _, err = store.db.Exec(`INSERT INTO silence_recheck_job_candidates(job_id,alert_id,processed_at,outcome) VALUES(?,?,?,'promoted')`, jobID, "job-child-alert", job.finishedAt); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1585,7 +1630,7 @@ VALUES(?,?,?,?,?,'active')
 		t.Fatalf("job graph retention mismatch: jobs=%d rules=%d candidates=%d", jobs, rules, candidates)
 	}
 	var fingerprint string
-	if err = store.db.QueryRow(`SELECT context_fingerprint FROM silence_recheck_jobs`).Scan(&fingerprint); err != nil {
+	if err = store.db.QueryRow(`SELECT job_fingerprint FROM silence_recheck_jobs`).Scan(&fingerprint); err != nil {
 		t.Fatal(err)
 	}
 	if fingerprint != "sha256:latest-job" {
@@ -1629,10 +1674,6 @@ func TestRunSilenceRecheckBatchRequiresAllRelevantSourcesToMatch(t *testing.T) {
 		},
 		Timestamp: now,
 	}
-	if _, err = store.ApplyPollCycle(input); err != nil {
-		t.Fatalf("ApplyPollCycle() setup returned error: %v", err)
-	}
-
 	matchLabels := `{"alertname":"CPUHigh"}`
 	relevantSources := `[{"name":"am-a","cluster":"cluster-a"},{"name":"am-b","cluster":"cluster-b"}]`
 	if err = store.UpsertCurrentAlert(AlertCurrent{
@@ -1654,6 +1695,9 @@ func TestRunSilenceRecheckBatchRequiresAllRelevantSourcesToMatch(t *testing.T) {
 		RelevantSources:   relevantSources,
 	}); err != nil {
 		t.Fatalf("UpsertCurrentAlert() returned error: %v", err)
+	}
+	if _, err = store.ApplyPollCycle(input); err != nil {
+		t.Fatalf("ApplyPollCycle() setup returned error: %v", err)
 	}
 
 	promoted, err := store.RunSilenceRecheckBatch(1000)
@@ -1788,16 +1832,27 @@ func TestRunSilenceRecheckBatchPromotesOnlyMatchedTarget(t *testing.T) {
 	if err = tx.Commit(); err != nil {
 		t.Fatalf("failed to commit seed tx: %v", err)
 	}
+	if _, err = store.db.Exec(`UPDATE alert_target_states SET state='active', is_live=1 WHERE alert_id='inactive-target-split' AND target='cluster-a'`); err != nil {
+		t.Fatal(err)
+	}
+	targetEligibilityPoll := input
+	targetEligibilityPoll.SuccessfulUpstreams = map[string]bool{"am-a": true}
+	if _, err = store.ApplyPollCycle(targetEligibilityPoll); err != nil {
+		t.Fatalf("create target eligibility successor: %v", err)
+	}
 
 	promoted, err := store.RunSilenceRecheckBatch(1000)
 	if err != nil {
 		t.Fatalf("RunSilenceRecheckBatch() returned error: %v", err)
 	}
-	if promoted != 1 {
-		t.Fatalf("expected promoted=1 for target-only promotion, got=%d", promoted)
+	if promoted != 0 {
+		t.Fatalf("empty predecessor must not promote a late target, got=%d", promoted)
 	}
-	if _, err = store.RunSilenceRecheckBatch(1000); err != nil {
+	if promoted, err = store.RunSilenceRecheckBatch(1000); err != nil {
 		t.Fatalf("complete first target recheck job: %v", err)
+	}
+	if promoted != 1 {
+		t.Fatalf("expected promoted=1 for target-only successor, got=%d", promoted)
 	}
 
 	global, err := store.GetCurrentAlert("inactive-target-split")
@@ -1875,7 +1930,7 @@ WHERE alert_id='inactive-target-split' AND target='cluster-a' AND source='silenc
 	}
 	if promoted != 1 {
 		var jobStates string
-		_ = store.db.QueryRow(`SELECT group_concat(status || ':' || processed_candidates || ':' || promoted_alerts, ',') FROM silence_recheck_jobs ORDER BY job_id`).Scan(&jobStates)
+		_ = store.db.QueryRow(`SELECT group_concat(status || ':' || processed_candidates || ':' || promoted_candidates, ',') FROM silence_recheck_jobs ORDER BY job_id`).Scan(&jobStates)
 		var ruleCounts string
 		_ = store.db.QueryRow(`SELECT group_concat(job_id || ':' || (SELECT COUNT(*) FROM silence_recheck_job_rules r WHERE r.job_id=j.job_id), ',') FROM silence_recheck_jobs j ORDER BY job_id`).Scan(&ruleCounts)
 		bRows, _ := store.ListTargetAlertsForPreview("cluster-b")
@@ -2202,7 +2257,7 @@ func TestEvaluateRecheckRulesExhaustiveSourceStatusProduct(t *testing.T) {
 								}
 								rules = append(rules, recheckJobRule{SourceName: "b", ObservedState: "active", MatchersJSON: `[{"name":"service","value":"` + value + `","isEqual":true}]`})
 							}
-							matched, complete := evaluateRecheckRules(rules, map[string]string{"a": statusA, "b": statusB}, nil, map[string]struct{}{"a": {}, "b": {}}, labels)
+							matched, complete := evaluateRecheckRules(rules, map[recheckSourceReference]string{{SourceName: "a"}: statusA, {SourceName: "b"}: statusB}, nil, map[recheckSourceReference]struct{}{{SourceName: "a"}: {}, {SourceName: "b"}: {}}, labels)
 							statusComplete := func(status string) bool { return status == "success" || status == "retired" }
 							wantComplete := statusComplete(statusA) && statusComplete(statusB)
 							wantMatch := wantComplete && ((statusA != "retired" && ruleA && matchA) || (statusB != "retired" && ruleB && matchB)) && (statusA == "retired" || (ruleA && matchA)) && (statusB == "retired" || (ruleB && matchB))
@@ -2310,7 +2365,7 @@ func TestMatcherChangeQueuesSuccessorWhilePreviousRecheckJobIsOpen(t *testing.T)
 		t.Fatalf("matcher change must queue a successor despite open predecessor: %+v", result)
 	}
 	var jobs, contexts, revisions int
-	if err = store.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT context_fingerprint) FROM silence_recheck_jobs`).Scan(&jobs, &contexts); err != nil {
+	if err = store.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT source_context_fingerprint) FROM silence_recheck_jobs`).Scan(&jobs, &contexts); err != nil {
 		t.Fatal(err)
 	}
 	if err = store.db.QueryRow(`SELECT COUNT(DISTINCT revision_id) FROM silence_recheck_job_rules`).Scan(&revisions); err != nil {
@@ -2329,10 +2384,10 @@ func TestFailedRecheckJobBlocksLaterJobsAndIsObservable(t *testing.T) {
 	defer store.Close()
 	nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err = store.db.Exec(`
-INSERT INTO silence_recheck_jobs(status, created_at, source_context_json, context_fingerprint, open_context_fingerprint, trigger_type, last_error)
-VALUES('failed', ?, '{}', 'failed-fp', 'failed-fp', 'silence_context_changed', 'forced failure'),
-      ('queued', ?, '{}', 'later-fp', 'later-fp', 'silence_context_changed', NULL)
-`, nowRaw, nowRaw); err != nil {
+INSERT INTO silence_recheck_jobs(status, created_at, finished_at, source_context_json, source_context_fingerprint, job_fingerprint, trigger_type, first_error_message, last_error_message)
+VALUES('failed', ?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'failed-fp', 'sha256:failed-fp', 'source_context_changed', 'forced failure', 'forced failure'),
+      ('queued', ?, NULL, '{"formatVersion":1,"sources":[],"clusters":[]}', 'later-fp', 'sha256:later-fp', 'source_context_changed', NULL, NULL)
+	`, nowRaw, nowRaw, nowRaw); err != nil {
 		t.Fatalf("seed recheck jobs: %v", err)
 	}
 	stats, err := store.GetStats()
@@ -2346,7 +2401,7 @@ VALUES('failed', ?, '{}', 'failed-fp', 'failed-fp', 'silence_context_changed', '
 		t.Fatalf("expected failed FIFO job to block later jobs, got=%v", err)
 	}
 	var laterStatus string
-	if err = store.db.QueryRow(`SELECT status FROM silence_recheck_jobs WHERE context_fingerprint='later-fp'`).Scan(&laterStatus); err != nil {
+	if err = store.db.QueryRow(`SELECT status FROM silence_recheck_jobs WHERE source_context_fingerprint='later-fp'`).Scan(&laterStatus); err != nil {
 		t.Fatal(err)
 	}
 	if laterStatus != "queued" {
@@ -2789,10 +2844,10 @@ func TestRetiredSourceReleasesMutableSilenceHistoryForRetention(t *testing.T) {
 	}
 	if _, err = store.db.Exec(`
 INSERT INTO silence_recheck_jobs(
-  context_fingerprint, open_context_fingerprint, source_context_json,
+  source_context_fingerprint, job_fingerprint, source_context_json,
   trigger_type, status, created_at, finished_at
-) VALUES('sha256:newer-empty-context', NULL, '{"formatVersion":1,"sources":[]}',
-         'source_changed', 'completed', ?, ?)
+) VALUES('sha256:newer-empty-context', 'sha256:newer-empty-job', '{"formatVersion":1,"sources":[],"clusters":[]}',
+         'source_context_changed', 'completed', ?, ?)
 `, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}

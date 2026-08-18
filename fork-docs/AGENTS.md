@@ -64,8 +64,12 @@ directory:
 # the UI ESLint, TypeScript, Stylelint, and Knip gates.
 make lint
 
-# Mandatory after Go changes.
-go test ./... -timeout 600s
+# Mandatory after Go changes. Use the bounded timeout; never raise it to mask a hang.
+go test ./... -count=1 -timeout 180s
+
+# Mandatory race gates. Run sequentially because cmd/karma testscript resources are shared.
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test -race ./cmd/karma -count=1 -timeout 180s
 
 # Mandatory after UI changes.
 npm --prefix ui test -- --runInBand <affected test files>

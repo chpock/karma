@@ -95,7 +95,8 @@ FK:
 - `value TEXT NOT NULL`
 
 Used for schema version, the compile-time-checked `schema_layout_fingerprint`,
-housekeeping timestamps, regroup status/progress/fingerprints.
+housekeeping timestamps, regroup status/progress/fingerprints, and the persisted
+semantic recheck source-context generation.
 
 ### 3.4 `lifecycle_writer_commits`
 
@@ -178,7 +179,8 @@ links the effective target history IDs rather than copying or re-evaluating rule
 
 ## 5. Silence-awareness tables
 
-Implemented Phase 2 tables:
+Phase 2 tables in the fresh v1 schema (Problem 2 is implemented and independently
+accepted):
 
 - `alertmanager_sources`
 - `silence_rules`
@@ -188,6 +190,8 @@ Implemented Phase 2 tables:
 - `silence_recheck_jobs`
 - `silence_recheck_job_rules`
 - `silence_recheck_job_candidates`
+- `silence_recheck_job_attempts` (reserved for Problem 3 retry history)
+- `silence_recheck_job_operator_actions` (reserved for Problem 3 operator recovery)
 - `alert_suppression_cause_history`
 - `alert_suppression_cause_members`
 - `alertmanager_cluster_consistency`
@@ -200,8 +204,24 @@ These tables store:
 
 - last-successful silence set per source,
 - immutable silence revisions and episodes,
-- persistent FIFO recheck jobs with immutable per-job rules and candidate membership,
+- persistent FIFO recheck jobs with immutable per-job rules, stable semantic rule
+  identity, target-scoped candidate membership, pinned observation input, and terminal
+  outcomes,
 - append-only suppression cause history and members.
+
+Recheck input is immutable after creation. `silence_recheck_jobs` separates
+`source_context_fingerprint` from the unique complete `job_fingerprint`; its trigger is
+constrained to `source_context_changed` or `alert_became_eligible`. Rules are keyed by
+`(job_id, source_name, target_key, rule_id)` and persist `silence_id` plus the
+revision's `content_fingerprint` alongside the local foreign-key IDs. Candidates are keyed by
+`(job_id, alert_id, target_key)` and pin expected global/target observation timestamps,
+raw matcher labels, relevant source references, and target source members. Candidate
+rows have no foreign key to mutable alert current-state tables and survive alert
+retention. The worker writes one constrained terminal `outcome` and one parent counter
+per candidate.
+
+The attempts and operator-action tables are present in the combined v1 schema for
+Problem 3, but retry scheduling and operator recovery are not implemented by Problem 2.
 
 Phase 2 matching inputs:
 

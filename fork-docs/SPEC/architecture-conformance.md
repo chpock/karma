@@ -1,7 +1,7 @@
 # Architecture Conformance Matrix
 
-Status: implemented except for rows explicitly marked `Known violation; tracked by
-silence-recheck-problems.md`.
+Status: Problem 2 is implemented and independently accepted; remaining known violations
+are tracked by `silence-recheck-problems.md`.
 
 This document is the finite traceability contract for the alert lifecycle and
 silence editor work. A decision is not implemented merely because a schema field
@@ -45,16 +45,16 @@ The executable test coverage for these contracts is summarized in
 | D7 | Preserve HA member disagreement including silence identity; persistent warning until convergence | identity-aware cluster fingerprint, Stats/warning | HA ID/payload/failure/convergence sequence | Implemented |
 | D8 | `is_suppression_retained` proposal is superseded | N/A | schema absence | Superseded by D13 |
 | D9 | Match only original raw labels; missing labels remain unknown | raw-label index, `match_labels_json` | raw-label exclusion tests | Implemented |
-| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats | planned Problem 2-4 sequence matrix | Known violation; tracked by `silence-recheck-problems.md` |
+| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats | Problem 2 immutable-input matrix; Problem 3 retry/scheduler matrix pending | Known violation; Problem 3 remainder tracked by `silence-recheck-problems.md` |
 | D11 | Earlier many-to-many event linkage proposal is superseded | N/A | schema absence | Superseded by D15/D20 |
 | D12 | Revision only on normalized content/updatedAt/new episode; not repeated/status-only poll | latest-revision boundary and HA-wide episode closure | revision sequence and `TestSilenceEpisodeClosesOnlyAfterConfirmedHAWideAbsence` | Implemented; A→B→A appends and reappearance starts a new episode |
 | D13 | One normalized `is_suppressed` axis with strict live invariant | projection/live validation | projection tests | Implemented |
-| D14 | Required contract: recheck promotion CAS uses the candidate's expected `last_seen_at` plus semantic predicates | global and target promotion SQL | planned Problem 2 immutable-input sequence tests | Known violation; tracked by `silence-recheck-problems.md` |
+| D14 | Required contract: recheck promotion CAS uses the candidate's expected `last_seen_at` plus semantic predicates | global and target promotion SQL | Problem 2 stale-CAS matrix, including worker-level post-CAS read/error and evidence-rollback classification | Implemented |
 | D15 | Recheck only eligible inactive states; exact immutable cause set; no later re-match | target cause histories + aggregate links + effective-cause merge reader | target-only/multi-job/restart evidence and retained-card tests | Implemented |
 | D16 | Missing live silence payload stores unresolved member, never synthetic revision | live cause writer | `TestLiveSuppressionCauseResolvesLaterWithoutRewritingHistory` | Implemented |
-| D17 | One mutable current source set; immutable copy only per meaningful evaluation context | evaluation-aware source fingerprint and pinned job rules | open-predecessor matcher-successor test | Implemented |
+| D17 | One mutable current source set; immutable copy only per meaningful evaluation context | evaluation-aware source fingerprint and pinned job rules | Problem 2 identity/replay matrix, including nested production input and restart equality | Implemented |
 | D18 | Future remote DB uses one elected reconciler; domain remains portable | process/store boundary | architecture review | Implemented constraint; no active-active path added |
-| D19 | Enqueue only promotion-capable context, including failed/invalid→success recovery | previous/next evaluation-state diff | recovery and `TestRecheckEnqueueUsesPromotionCapableEvaluationChangesOnly` | Implemented |
+| D19 | Enqueue only promotion-capable context, including failed/invalid→success recovery | previous/next evaluation-state diff | Problem 2 replay/idempotency and committed event-accounting matrix | Implemented |
 | D20 | One event links directly to one complete cause set | global/target event-cause transactions | FK, multi-job and restart tests | Implemented |
 | D21 | Retain non-completed/referenced/latest completed jobs; clean older unreferenced | housekeeping | `TestRunHousekeepingCleansCompletedUnreferencedJobs` | Implemented |
 | D22 | Lease/fencing deferred; all derived writes pass one Store-owned immediate-writer transaction boundary with durable completion reconciliation | runtime integration | Problem 1 writer/PID regressions and final commit gates in `architecture-verification.md` | Implemented |

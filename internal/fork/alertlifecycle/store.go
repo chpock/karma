@@ -46,10 +46,11 @@ const (
 	metaRegroupFinishedAt        = "regroup_finished_at"
 	metaRegroupTargetFingerprint = "regroup_target_fingerprint"
 	metaRegroupCursorRowID       = "regroup_cursor_rowid"
+	metaRecheckSourceContextGen  = "recheck_source_context_generation"
 	metaSuggestionRevisionPrefix = "suggestion_revision/"
 )
 
-const expectedSchemaLayoutFingerprint = "sha256:a870b06456dd20d9e16ba807f791e2f3b91abbd277f6caf53d01ab1e8d2846f7"
+const expectedSchemaLayoutFingerprint = "sha256:58440003c0cb4ac893c0f06e52f5e01dbef63be4c64abd0935cb8792863cb44c"
 
 var (
 	ErrStoreClosing               = errors.New("lifecycle store is closing")
@@ -99,6 +100,22 @@ type storeLifecycleTestHooks struct {
 	closeEntered    chan struct{}
 	writerFinishing chan struct{}
 	closingStateSet chan struct{}
+	// postCASReadError is test-only fault injection for the Problem 2 evidence matrix.
+	// It is nil in every production Store and has no effect on normal control flow.
+	postCASReadError func(string) error
+}
+
+func (s *Store) recheckPostCASReadError(stage string) error {
+	if s == nil || s.lifecycleTestHooks == nil {
+		return nil
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	hook := s.lifecycleTestHooks.postCASReadError
+	s.lifecycleTestHooks.mu.Unlock()
+	if hook == nil {
+		return nil
+	}
+	return hook(stage)
 }
 
 func (s *Store) signalLifecycleHook(signal chan struct{}) {
@@ -1122,40 +1139,64 @@ CREATE INDEX IF NOT EXISTS idx_source_silences_state
 
 CREATE TABLE IF NOT EXISTS silence_recheck_jobs (
   job_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  context_fingerprint TEXT NOT NULL,
-  open_context_fingerprint TEXT,
+  source_context_fingerprint TEXT NOT NULL,
+  job_fingerprint TEXT NOT NULL UNIQUE,
   source_context_json TEXT NOT NULL,
-  trigger_type TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'failed', 'completed')),
+  trigger_type TEXT NOT NULL CHECK (trigger_type IN ('source_context_changed', 'alert_became_eligible')),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'retry_wait', 'failed', 'completed', 'abandoned')),
   cursor_alert_id TEXT,
   total_candidates INTEGER NOT NULL DEFAULT 0,
   processed_candidates INTEGER NOT NULL DEFAULT 0,
-  promoted_alerts INTEGER NOT NULL DEFAULT 0,
+  promoted_candidates INTEGER NOT NULL DEFAULT 0,
   skipped_ineligible INTEGER NOT NULL DEFAULT 0,
   skipped_missing_labels INTEGER NOT NULL DEFAULT 0,
   skipped_incomplete_sources INTEGER NOT NULL DEFAULT 0,
   stale_conflicts INTEGER NOT NULL DEFAULT 0,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
   retry_count INTEGER NOT NULL DEFAULT 0,
+  consecutive_retry_count INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  first_error_message TEXT,
+  first_error_class TEXT,
+  first_error_stage TEXT,
+  first_error_at TEXT,
+  last_error_message TEXT,
+  last_error_class TEXT,
+  last_error_stage TEXT,
+  last_error_at TEXT,
+  recovery_count INTEGER NOT NULL DEFAULT 0,
+  abandoned_at TEXT,
+  abandoned_by TEXT,
+  abandon_reason TEXT,
   created_at TEXT NOT NULL,
   started_at TEXT,
   finished_at TEXT,
-  last_error TEXT,
-  UNIQUE (open_context_fingerprint),
   CHECK (
-    total_candidates >= 0 AND processed_candidates >= 0 AND promoted_alerts >= 0
+    total_candidates >= 0 AND processed_candidates >= 0 AND processed_candidates <= total_candidates AND promoted_candidates >= 0
     AND skipped_ineligible >= 0 AND skipped_missing_labels >= 0
-    AND skipped_incomplete_sources >= 0 AND stale_conflicts >= 0 AND retry_count >= 0
+    AND skipped_incomplete_sources >= 0 AND stale_conflicts >= 0
+    AND attempt_count >= 0 AND retry_count >= 0 AND consecutive_retry_count >= 0
+    AND recovery_count >= 0
   ),
   CHECK (
-    (status = 'completed' AND open_context_fingerprint IS NULL)
-    OR (status != 'completed' AND open_context_fingerprint = context_fingerprint)
+    processed_candidates = promoted_candidates + skipped_ineligible
+      + skipped_missing_labels + skipped_incomplete_sources + stale_conflicts
+  ),
+  CHECK (
+    (status = 'retry_wait' AND next_attempt_at IS NOT NULL AND finished_at IS NULL)
+    OR (status IN ('failed', 'completed', 'abandoned') AND next_attempt_at IS NULL AND finished_at IS NOT NULL)
+    OR (status IN ('queued', 'running') AND next_attempt_at IS NULL AND finished_at IS NULL)
+  ),
+  CHECK (
+    (status = 'abandoned' AND abandoned_at IS NOT NULL AND abandoned_at = finished_at)
+    OR (status != 'abandoned' AND abandoned_at IS NULL AND abandoned_by IS NULL AND abandon_reason IS NULL)
   )
 );
 
 CREATE INDEX IF NOT EXISTS idx_silence_recheck_jobs_fifo
-  ON silence_recheck_jobs (status, job_id);
+  ON silence_recheck_jobs (status, next_attempt_at, job_id);
 CREATE INDEX IF NOT EXISTS idx_silence_recheck_jobs_context
-  ON silence_recheck_jobs (context_fingerprint, job_id DESC);
+  ON silence_recheck_jobs (source_context_fingerprint, job_id DESC);
 CREATE INDEX IF NOT EXISTS idx_silence_recheck_jobs_finished
   ON silence_recheck_jobs (finished_at);
 
@@ -1163,10 +1204,15 @@ CREATE TABLE IF NOT EXISTS silence_recheck_job_rules (
   job_id INTEGER NOT NULL,
   source_name TEXT NOT NULL,
   cluster_id TEXT NOT NULL DEFAULT '',
+  target_key TEXT NOT NULL DEFAULT '',
   rule_id INTEGER NOT NULL,
   revision_id INTEGER NOT NULL,
+  silence_id TEXT NOT NULL DEFAULT '',
+  content_fingerprint TEXT NOT NULL DEFAULT '',
   observed_state TEXT NOT NULL CHECK (observed_state IN ('pending', 'active', 'expired')),
-  PRIMARY KEY (job_id, source_name, rule_id),
+  evaluation_fingerprint TEXT NOT NULL DEFAULT '',
+  matchers_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (job_id, source_name, target_key, rule_id),
   FOREIGN KEY (job_id) REFERENCES silence_recheck_jobs(job_id) ON DELETE CASCADE,
   FOREIGN KEY (source_name) REFERENCES alertmanager_sources(source_name) ON DELETE RESTRICT,
   FOREIGN KEY (rule_id) REFERENCES silence_rules(rule_id) ON DELETE RESTRICT,
@@ -1181,14 +1227,71 @@ CREATE INDEX IF NOT EXISTS idx_recheck_job_rules_source
 CREATE TABLE IF NOT EXISTS silence_recheck_job_candidates (
   job_id INTEGER NOT NULL,
   alert_id TEXT NOT NULL,
+  target_key TEXT NOT NULL DEFAULT '',
+  expected_alert_last_seen_at TEXT,
+  expected_target_last_seen_at TEXT,
+  match_labels_json TEXT,
+  relevant_sources_json TEXT NOT NULL DEFAULT '[]',
+  target_source_members_json TEXT,
   processed_at TEXT,
-  PRIMARY KEY (job_id, alert_id),
-  FOREIGN KEY (job_id) REFERENCES silence_recheck_jobs(job_id) ON DELETE CASCADE,
-  FOREIGN KEY (alert_id) REFERENCES alert_states(alert_id) ON DELETE CASCADE
+  outcome TEXT CHECK (outcome IS NULL OR outcome IN (
+    'promoted', 'stale_alert_observation', 'stale_target_observation',
+    'missing_observation_token', 'ineligible_state', 'missing_current_alert',
+    'missing_current_target', 'missing_labels', 'invalid_labels', 'no_matching_rule',
+    'incomplete_source_coverage', 'retired_target', 'already_suppressed',
+    'already_resolved'
+  )),
+  CHECK (
+    (outcome IS NULL AND processed_at IS NULL)
+    OR (outcome IS NOT NULL AND processed_at IS NOT NULL)
+  ),
+  CHECK (
+    (target_key = '' AND target_source_members_json IS NULL)
+    OR (target_key <> '' AND target_source_members_json IS NOT NULL)
+  ),
+  PRIMARY KEY (job_id, alert_id, target_key),
+  FOREIGN KEY (job_id) REFERENCES silence_recheck_jobs(job_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_recheck_job_candidates_pending
-  ON silence_recheck_job_candidates(job_id, processed_at, alert_id);
+  ON silence_recheck_job_candidates(job_id, processed_at, alert_id, target_key);
+
+CREATE TABLE IF NOT EXISTS silence_recheck_job_attempts (
+  attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL,
+  attempt_token TEXT NOT NULL UNIQUE,
+  attempt_number INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  outcome TEXT NOT NULL CHECK (outcome IN ('committed', 'retry_scheduled', 'failed')),
+  failure_class TEXT,
+  failure_stage TEXT,
+  scheduled_retry_at TEXT,
+  UNIQUE (job_id, attempt_number),
+  FOREIGN KEY (job_id) REFERENCES silence_recheck_jobs(job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_recheck_job_attempts_job
+  ON silence_recheck_job_attempts(job_id, attempt_number);
+
+CREATE TABLE IF NOT EXISTS silence_recheck_job_operator_actions (
+  action_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL,
+  request_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('retry', 'abandon')),
+  actor TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  request_fingerprint TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  applied_at TEXT,
+  applied_result TEXT,
+  resulting_status TEXT,
+  UNIQUE (job_id, request_id),
+  FOREIGN KEY (job_id) REFERENCES silence_recheck_jobs(job_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_recheck_job_operator_actions_job
+  ON silence_recheck_job_operator_actions(job_id, action_id);
 
 CREATE TABLE IF NOT EXISTS alert_suppression_cause_history (
   history_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1551,15 +1654,6 @@ ON CONFLICT(alert_id) DO UPDATE SET
 		if err != nil {
 			return fmt.Errorf("failed to upsert current alert: %w", err)
 		}
-		if alert.State == StateInactive && !alert.IsLive && !alert.IsResolved && !alert.IsSuppressed && alert.MatchLabelsJSON != nil && strings.TrimSpace(*alert.MatchLabelsJSON) != "" {
-			if _, err = tx.Exec(`
-INSERT OR IGNORE INTO silence_recheck_job_candidates(job_id, alert_id)
-SELECT job_id, ? FROM silence_recheck_jobs WHERE status IN ('queued','running')
-`, alert.AlertID); err != nil {
-				return fmt.Errorf("failed attaching inactive alert to open recheck jobs: %w", err)
-			}
-		}
-
 		return nil
 	})
 }
@@ -2896,16 +2990,16 @@ func (s *Store) queryInconsistentSilenceClusters() ([]string, error) {
 
 func (s *Store) queryRecheckStats() (recheckStatsSnapshot, error) {
 	var out recheckStatsSnapshot
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','failed')`).Scan(&out.queueDepth); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','retry_wait','failed')`).Scan(&out.queueDepth); err != nil {
 		return out, fmt.Errorf("failed to query recheck queue depth: %w", err)
 	}
 	var createdAtRaw, lastError sql.NullString
 	err := s.db.QueryRow(`
-SELECT job_id, status, processed_candidates, promoted_alerts,
+SELECT job_id, status, processed_candidates, promoted_candidates,
        skipped_ineligible + skipped_missing_labels + skipped_incomplete_sources + stale_conflicts,
-       last_error, created_at
+       COALESCE(last_error_message, first_error_message, ''), created_at
 FROM silence_recheck_jobs
-WHERE status IN ('queued','running','failed')
+WHERE status IN ('queued','running','retry_wait','failed')
 ORDER BY job_id ASC
 LIMIT 1
 `).Scan(&out.jobID, &out.status, &out.processed, &out.promoted, &out.skipped, &lastError, &createdAtRaw)
@@ -3149,7 +3243,6 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 		if qerr != nil {
 			return pollTransactionResult{}, qerr
 		}
-		result.RecheckJobsQueued = reconciliation.queued
 
 		currentByID, err := readAllCurrentAlertsTx(tx)
 		if err != nil {
@@ -3363,11 +3456,38 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			pollEventsCollector.append(alertTransitionRuntimeEvent(transition))
 			if newState == StateInactive {
 				result.SetInactive++
-				if err = enqueueAlertForCurrentRecheckContextWithEventsTx(tx, alertID, now, &pollEventsCollector); err != nil {
-					return pollTransactionResult{}, err
-				}
+				pollEventsCollector.appendEligibilityScope(recheckCandidateScope{AlertID: alertID})
 			}
 			result.Transitions++
+		}
+
+		if reconciliation.sourceContextChanged {
+			created, createErr := createRecheckJobFromFinalStateTx(tx, "source_context_changed", nil, now, &pollEventsCollector)
+			if createErr != nil {
+				return pollTransactionResult{}, createErr
+			}
+			if created.Created {
+				result.RecheckJobsQueued++
+				result.RecheckJobsSourceContextChanged++
+			}
+		} else {
+			eligibleScopes := append([]recheckCandidateScope(nil), pollEventsCollector.eligibilityScopes...)
+			slices.SortFunc(eligibleScopes, func(a, b recheckCandidateScope) int {
+				if a.AlertID != b.AlertID {
+					return strings.Compare(a.AlertID, b.AlertID)
+				}
+				return strings.Compare(a.TargetKey, b.TargetKey)
+			})
+			if len(eligibleScopes) > 0 {
+				created, createErr := createRecheckJobFromFinalStateTx(tx, "alert_became_eligible", eligibleScopes, now, &pollEventsCollector)
+				if createErr != nil {
+					return pollTransactionResult{}, createErr
+				}
+				if created.Created {
+					result.RecheckJobsQueued++
+					result.RecheckJobsAlertBecameEligible++
+				}
+			}
 		}
 
 		committedPollResult = pollTransactionResult{result: result, events: append([]runtimeEvent(nil), pollEventsCollector.events...)}
@@ -3395,8 +3515,9 @@ type runtimeEvent struct {
 }
 
 type runtimeEventCollector struct {
-	events       []runtimeEvent
-	nextSequence uint64
+	events            []runtimeEvent
+	nextSequence      uint64
+	eligibilityScopes []recheckCandidateScope
 }
 
 func (c *runtimeEventCollector) append(event runtimeEvent) {
@@ -3408,18 +3529,16 @@ func (c *runtimeEventCollector) append(event runtimeEvent) {
 	c.events = append(c.events, event)
 }
 
-func (c *runtimeEventCollector) replaceAttrAt(eventIndex int, key string, value slog.Attr) {
-	if c == nil || eventIndex < 0 || eventIndex >= len(c.events) {
+func (c *runtimeEventCollector) appendEligibilityScope(scope recheckCandidateScope) {
+	if c == nil {
 		return
 	}
-	attrs := c.events[eventIndex].attrs
-	for attrIndex := range attrs {
-		if attrs[attrIndex].Key == key {
-			attrs[attrIndex] = value
-			c.events[eventIndex].attrs = attrs
+	for _, existing := range c.eligibilityScopes {
+		if existing == scope {
 			return
 		}
 	}
+	c.eligibilityScopes = append(c.eligibilityScopes, scope)
 }
 
 func runtimeEventStringAttr(name, value string) slog.Attr {
@@ -4663,6 +4782,9 @@ INSERT INTO alert_target_events(
 			slog.Bool("old_retired", oldRetiredAtRaw.Valid), slog.Bool("new_retired", row.RetiredAt != nil),
 			runtimeEventStringAttr("reason_code", nullableStringValue(sanitizeReasonCode(ptrString(reasonCode)))),
 		}})
+		if reasonCode == "poll_target_disappeared" && oldIsLiveRaw.Valid && oldIsLiveRaw.Int64 == 1 && !row.IsLive && row.State == StateInactive {
+			collector.appendEligibilityScope(recheckCandidateScope{AlertID: alertID, TargetKey: row.Target})
+		}
 	}
 
 	if row.RetiredAt != nil {
@@ -4917,9 +5039,6 @@ func applyTargetAbsencePlanWithEventsTx(tx *sql.Tx, alertID string, row targetSt
 	if err := upsertTargetStateWithEventsTx(tx, alertID, row, "poll_target_disappeared", now, collector); err != nil {
 		return err
 	}
-	if row.State == StateInactive {
-		return enqueueAlertForCurrentRecheckContextWithEventsTx(tx, alertID, now, collector)
-	}
 	return nil
 }
 
@@ -5086,12 +5205,16 @@ INSERT INTO alert_events(
 }
 
 type recheckJobRule struct {
-	SourceName    string
-	ClusterID     string
-	RuleID        int64
-	RevisionID    int64
-	ObservedState string
-	MatchersJSON  string
+	SourceName            string
+	ClusterID             string
+	TargetKey             string
+	RuleID                int64
+	RevisionID            int64
+	SilenceID             string
+	ContentFingerprint    string
+	ObservedState         string
+	EvaluationFingerprint string
+	MatchersJSON          string
 }
 
 type suppressionCauseMember struct {
@@ -5105,406 +5228,20 @@ func (s *Store) RunSilenceRecheckBatch(batchSize int) (promotedResult int, resul
 	return s.RunSilenceRecheckBatchContext(context.Background(), batchSize)
 }
 
-func (s *Store) RunSilenceRecheckBatchContext(ctx context.Context, batchSize int) (promotedResult int, resultErr error) {
-	if s == nil || s.db == nil {
-		return 0, ErrStoreNotInitialized
-	}
-	var selectedJobID int64
-	startedAt := time.Now()
-	var committedDecisions []runtimeEvent
-	var committedJobID int64
-	var committedStatus string
-	var committedStarted bool
-	var committedCompleted bool
-	var selectedJobStatus string
-	var selectedQueueDepth int
-	var selectedRetryCount int
-	var committedPriorProcessed, committedTotalCandidates, committedPromoted, committedProcessed, committedStale, committedMissing, committedIneligible, committedIncomplete int
-	var committedJobProcessed, committedJobPromoted, committedJobMissing, committedJobIneligible, committedJobIncomplete, committedJobStale int
-	var committedPinnedRuleCount, committedSourceCount int
-	if batchSize <= 0 {
-		batchSize = 1000
-	}
-
-	recheckFinalizer := &writerAfterCommitFinalizer{
-		ctx:           ctx,
-		operationKind: writerOperationRecheckBatch,
-		run: func(reconciled bool) {
-			if reconciled {
-				runtimeLog.InfoContext(ctx, "silence_recheck", "job_commit_reconciled", "Silence recheck commit was reconciled after a delayed ledger lookup", slog.String("writer_operation", writerOperationRecheckBatch), slog.Int64("job_id", committedJobID), slog.Int("processed", committedProcessed), slog.Int("promoted", committedPromoted), slog.Duration("duration", time.Since(startedAt)))
-			}
-			if committedJobID == 0 {
-				return
-			}
-			if committedStarted && committedStatus == "queued" {
-				runtimeLog.InfoContext(ctx, "silence_recheck", "job_started", "Silence recheck job started", slog.Int64("job_id", committedJobID), slog.Int("candidate_count", committedTotalCandidates), slog.Int("pinned_rule_count", committedPinnedRuleCount), slog.Int("source_count", committedSourceCount))
-			} else if committedStarted {
-				runtimeLog.InfoContext(ctx, "silence_recheck", "job_resumed", "Silence recheck job resumed", slog.Int64("job_id", committedJobID), slog.Int("prior_processed", committedPriorProcessed), slog.Int("candidate_count", committedTotalCandidates), slog.Int("pinned_rule_count", committedPinnedRuleCount), slog.Int("source_count", committedSourceCount))
-			}
-			if len(committedDecisions) > 0 {
-				emitRuntimeEventsContext(ctx, committedDecisions)
-			}
-			if committedCompleted {
-				runtimeLog.InfoContext(ctx, "silence_recheck", "job_completed", "Silence recheck job completed", slog.Int64("job_id", committedJobID), slog.Int("processed", committedJobProcessed), slog.Int("promoted", committedJobPromoted), slog.Int("missing_labels", committedJobMissing), slog.Int("ineligible", committedJobIneligible), slog.Int("incomplete_sources", committedJobIncomplete), slog.Int("stale", committedJobStale), slog.Duration("duration", time.Since(startedAt)))
-				return
-			}
-			level := slog.LevelDebug
-			if committedPromoted > 0 {
-				level = slog.LevelInfo
-			}
-			runtimeLog.Event(ctx, level, "silence_recheck", "batch_completed", "Silence recheck batch completed", slog.Int64("job_id", committedJobID), slog.Int("processed", committedProcessed), slog.Int("promoted", committedPromoted), slog.Int("stale", committedStale), slog.Int("missing_labels", committedMissing), slog.Int("ineligible", committedIneligible), slog.Int("incomplete_sources", committedIncomplete), slog.Duration("duration", time.Since(startedAt)))
-		},
-	}
-	promotedResult, resultErr = withWriterTxValueAfterCommit(ctx, s, writerOperationRecheckBatch, func(tx *sql.Tx) (int, error) {
-		jobID, cursor, status, err := selectNextRecheckJobTx(tx)
-		if err != nil {
-			return 0, err
-		}
-		if jobID == 0 {
-			s.recheckBlockedJobLogged = 0
-			runtimeLog.DebugContext(ctx, "silence_recheck", "queue_empty", "Silence recheck queue is empty")
-			return 0, nil
-		}
-		queueDepth, queueErr := queryInt(tx, `SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','failed')`)
-		if queueErr != nil {
-			queueDepth = -1
-			runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to count silence recheck queue for logging", slog.Int64("job_id", jobID), slog.Any("error", queueErr))
-		}
-		var priorProcessed, totalCandidates, retryCount int
-		if queryErr := tx.QueryRow(`SELECT processed_candidates, total_candidates, retry_count FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&priorProcessed, &totalCandidates, &retryCount); queryErr != nil {
-			priorProcessed = -1
-			totalCandidates = -1
-			retryCount = -1
-			runtimeLog.ErrorContext(ctx, "silence_recheck", "observability_collection_failed", "Failed to read silence recheck job progress for logging", slog.Int64("job_id", jobID), slog.Any("error", queryErr))
-		}
-		selectedJobStatus = status
-		selectedQueueDepth = queueDepth
-		selectedRetryCount = retryCount
-		runtimeLog.DebugContext(ctx, "silence_recheck", "job_selected", "Silence recheck job selected", slog.Int64("job_id", jobID), slog.String("status", status), slog.Int("queue_depth", queueDepth), slog.Int("retry_count", retryCount), slog.Int("batch_size", batchSize))
-		if !RecheckJobCanRun(status, false) {
-			var lastError sql.NullString
-			_ = tx.QueryRow(`SELECT last_error FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&lastError)
-
-			if s.recheckBlockedJobLogged != jobID {
-				runtimeLog.WarnContext(ctx, "silence_recheck", "failed_job_blocks_queue", "Failed silence recheck job blocks the queue", slog.Int64("job_id", jobID), slog.Int("queue_depth", queueDepth))
-				s.recheckBlockedJobLogged = jobID
-			} else {
-				runtimeLog.DebugContext(ctx, "silence_recheck", "failed_job_blocks_queue", "Failed silence recheck job still blocks the queue", slog.Int64("job_id", jobID), slog.Int("queue_depth", queueDepth))
-			}
-			return 0, fmt.Errorf("silence recheck job %d is failed and blocks later jobs: %s", jobID, lastError.String)
-		}
-		s.recheckBlockedJobLogged = 0
-		selectedJobID = jobID
-
-		now := time.Now().UTC()
-		nowRaw := now.Format(time.RFC3339Nano)
-		if status == "queued" {
-			if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='running', started_at=COALESCE(started_at, ?) WHERE job_id = ?`, nowRaw, jobID); err != nil {
-				return 0, fmt.Errorf("failed to mark recheck job running: %w", err)
-			}
-		}
-
-		rules, err := loadRecheckJobRulesTx(tx, jobID)
-		if err != nil {
-			return 0, err
-		}
-		committedPinnedRuleCount = len(rules)
-		sourceStatuses, err := loadRecheckJobSourceStatusesTx(tx, jobID)
-		if err != nil {
-			return 0, err
-		}
-		committedSourceCount = len(sourceStatuses)
-		if err = attachEligibleRecheckCandidatesTx(tx, jobID); err != nil {
-			return 0, err
-		}
-
-		candidates, err := loadRecheckCandidatesTx(tx, jobID, batchSize)
-		if err != nil {
-			return 0, err
-		}
-		if len(candidates) == 0 {
-			if _, err = tx.Exec(`UPDATE silence_recheck_jobs SET status='completed', open_context_fingerprint=NULL, finished_at=?, last_error=NULL WHERE job_id = ?`, nowRaw, jobID); err != nil {
-				return 0, fmt.Errorf("failed to mark recheck job completed: %w", err)
-			}
-			committedJobID = jobID
-			committedStatus = status
-			committedStarted = true
-			committedCompleted = true
-			if err = tx.QueryRow(`SELECT processed_candidates, promoted_alerts, skipped_missing_labels, skipped_ineligible, skipped_incomplete_sources, stale_conflicts, total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&committedJobProcessed, &committedJobPromoted, &committedJobMissing, &committedJobIneligible, &committedJobIncomplete, &committedJobStale, &committedTotalCandidates); err != nil {
-				return 0, fmt.Errorf("failed to capture completed recheck counters: %w", err)
-			}
-			return 0, nil
-		}
-
-		processed := 0
-		promoted := 0
-		stale := 0
-		missing := 0
-		ineligible := 0
-		incompleteSources := 0
-		lastCursor := cursor
-		decisions := make([]runtimeEvent, 0, len(candidates))
-		appendDecision := func(event runtimeEvent) { decisions = append(decisions, event) }
-
-		for _, cand := range candidates {
-			processed++
-			lastCursor = &cand.AlertID
-			if _, err = tx.Exec(`UPDATE silence_recheck_job_candidates SET processed_at=? WHERE job_id=? AND alert_id=?`, nowRaw, jobID, cand.AlertID); err != nil {
-				return 0, fmt.Errorf("failed marking recheck candidate processed: %w", err)
-			}
-			if strings.TrimSpace(cand.MatchLabelsJSON) == "" {
-				counter, _ := ClassifyRecheckCandidate(true, RecheckCandidateMissingLabels)
-				if counter == "missing_labels" {
-					missing++
-				}
-				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "missing_labels"))
-				continue
-			}
-			labels := map[string]string{}
-			if err = json.Unmarshal([]byte(cand.MatchLabelsJSON), &labels); err != nil {
-				missing++
-				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "invalid_labels"))
-				continue
-			}
-			relevant, rerr := parseRelevantSourceNames(cand.RelevantSourcesJSON, cand.RelevantUpstreamsJSON)
-			if rerr != nil || len(relevant) == 0 {
-				ineligible++
-				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "invalid_sources"))
-				continue
-			}
-
-			targetRows, terr := readTargetStatesTx(tx, cand.AlertID)
-			if terr != nil {
-				return 0, terr
-			}
-			if len(targetRows) == 0 {
-				matched, complete := evaluateRecheckRules(rules, sourceStatuses, nil, relevant, labels)
-				if len(matched) == 0 {
-					counter, _ := ClassifyRecheckCandidate(complete, RecheckCandidateNonmatch)
-					switch counter {
-					case "ineligible":
-						ineligible++
-					case "incomplete_sources":
-						incompleteSources++
-					}
-					reason := "ineligible"
-					if !complete {
-						reason = "incomplete_sources"
-					}
-					appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, reason))
-					continue
-				}
-				updated, transitionID, uerr := promoteAlertSuppressedCAS(tx, cand, now)
-				if uerr != nil {
-					return 0, uerr
-				}
-				if !updated {
-					counter, _ := ClassifyRecheckCandidate(true, RecheckCandidateStaleCAS)
-					if counter == "stale_conflicts" {
-						stale++
-					}
-					appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
-					continue
-				}
-				promoted++
-				appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID)}})
-				if err = insertSuppressionCauseHistoryTx(tx, cand.AlertID, transitionID, jobID, now, matched); err != nil {
-					return 0, err
-				}
-				continue
-			}
-
-			anyTargetEvidence := false
-			anyTargetApplied := false
-			allTargetsSuppressed := true
-			candidateIncompleteSources := false
-			targetCauseHistoryIDs := make([]int64, 0, len(targetRows))
-
-			for _, row := range targetRows {
-				if row.RetiredAt != nil {
-					continue
-				}
-				if row.IsLive || row.IsResolved {
-					if row.IsLive || !row.IsSuppressed {
-						allTargetsSuppressed = false
-					}
-					continue
-				}
-				if row.IsSuppressed {
-					historyID, found, causeErr := latestTargetSuppressionCauseHistoryTx(tx, cand.AlertID, row.Target)
-					if causeErr != nil {
-						return 0, causeErr
-					}
-					if !found {
-						allTargetsSuppressed = false
-						continue
-					}
-					anyTargetEvidence = true
-					targetCauseHistoryIDs = append(targetCauseHistoryIDs, historyID)
-					continue
-				}
-				targetSources := sourceSetFromMembers(row.SourceMembers)
-				if len(targetSources) == 0 {
-					if !row.IsSuppressed {
-						allTargetsSuppressed = false
-					}
-					continue
-				}
-				matched, complete := evaluateRecheckRules(rules, sourceStatuses, &row.Target, targetSources, labels)
-				if len(matched) == 0 {
-					if !complete {
-						candidateIncompleteSources = true
-					}
-					if !row.IsSuppressed {
-						allTargetsSuppressed = false
-					}
-					continue
-				}
-				anyTargetEvidence = true
-
-				applied, eventID, perr := promoteTargetSuppressedCASTx(tx, cand.AlertID, row, now, "silence_match_promoted")
-				if perr != nil {
-					return 0, perr
-				}
-				if applied {
-					anyTargetApplied = true
-					historyID, causeErr := insertTargetRecheckSuppressionCauseTx(tx, cand.AlertID, row.Target, eventID, jobID, now, matched)
-					if causeErr != nil {
-						return 0, causeErr
-					}
-					targetCauseHistoryIDs = append(targetCauseHistoryIDs, historyID)
-					appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck target candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID), slog.String("target", row.Target)}})
-				} else {
-					allTargetsSuppressed = false
-				}
-			}
-
-			if !anyTargetEvidence {
-				if candidateIncompleteSources {
-					incompleteSources++
-				} else {
-					ineligible++
-				}
-				reason := "ineligible"
-				if candidateIncompleteSources {
-					reason = "incomplete_sources"
-				}
-				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, reason))
-				continue
-			}
-			if !allTargetsSuppressed {
-				if anyTargetApplied {
-					promoted++
-				} else {
-					stale++
-				}
-				if !anyTargetApplied {
-					appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
-				}
-				continue
-			}
-
-			updated, transitionID, uerr := promoteAlertSuppressedCAS(tx, cand, now)
-			if uerr != nil {
-				return 0, uerr
-			}
-			if !updated {
-				stale++
-				appendDecision(recheckCandidateSkippedEvent(jobID, cand.AlertID, "stale_conflict"))
-				continue
-			}
-			promoted++
-			appendDecision(runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", cand.AlertID)}})
-			if err = insertTargetAggregateSuppressionCauseTx(tx, cand.AlertID, transitionID, now, targetCauseHistoryIDs); err != nil {
-				return 0, err
-			}
-		}
-		if _, err = tx.Exec(`
-UPDATE silence_recheck_jobs
-SET cursor_alert_id = ?,
-    processed_candidates = processed_candidates + ?,
-    promoted_alerts = promoted_alerts + ?,
-    skipped_missing_labels = skipped_missing_labels + ?,
-    skipped_ineligible = skipped_ineligible + ?,
-    skipped_incomplete_sources = skipped_incomplete_sources + ?,
-    stale_conflicts = stale_conflicts + ?
-WHERE job_id = ?
-`, lastCursor, processed, promoted, missing, ineligible, incompleteSources, stale, jobID); err != nil {
-			return 0, fmt.Errorf("failed to update recheck job progress: %w", err)
-		}
-
-		committedDecisions = decisions
-		committedJobID = jobID
-		committedStatus = status
-		committedStarted = true
-		committedPriorProcessed = priorProcessed
-		committedTotalCandidates = totalCandidates
-		committedPromoted = promoted
-		committedProcessed = processed
-		committedStale = stale
-		committedMissing = missing
-		committedIneligible = ineligible
-		committedIncomplete = incompleteSources
-		if err = tx.QueryRow(`SELECT processed_candidates, promoted_alerts, skipped_missing_labels, skipped_ineligible, skipped_incomplete_sources, stale_conflicts FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&committedJobProcessed, &committedJobPromoted, &committedJobMissing, &committedJobIneligible, &committedJobIncomplete, &committedJobStale); err != nil {
-			return 0, fmt.Errorf("failed to capture recheck counters: %w", err)
-		}
-		return promoted, nil
-	}, recheckFinalizer)
-	if resultErr != nil && selectedJobID != 0 {
-		if errors.Is(resultErr, ErrWriterCommitOutcomeUnknown) {
-			runtimeLog.ErrorContext(ctx, "silence_recheck", "job_commit_outcome_unknown", "Silence recheck job commit outcome is unknown; job failure was not persisted", slog.String("writer_operation", writerOperationRecheckBatch), slog.Int64("job_id", selectedJobID), slog.String("status", selectedJobStatus), slog.Int("queue_depth", selectedQueueDepth), slog.Int("retry_count", selectedRetryCount), slog.String("stage", "commit_reconcile"), slog.Duration("duration", time.Since(startedAt)), slog.Any("error", resultErr))
-			return promotedResult, resultErr
-		}
-		if reason := recheckSelectedInfrastructureReason(ctx, resultErr); reason != "" {
-			if contractErr := emitRecheckInfrastructureBlocked(ctx, selectedJobID, writerOperationRecheckBatch, reason, resultErr); contractErr != nil {
-				return promotedResult, errors.Join(resultErr, contractErr)
-			}
-			return promotedResult, resultErr
-		}
-		return promotedResult, s.persistRecheckFailure(ctx, selectedJobID, resultErr, startedAt)
-	}
-
-	return promotedResult, resultErr
-}
-
 func recheckCandidateSkippedEvent(jobID int64, alertID, reason string) runtimeEvent {
 	return runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_skipped", message: "Silence recheck candidate skipped", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", alertID), slog.String("reason_code", reason)}}
 }
 
-func attachEligibleRecheckCandidatesTx(tx *sql.Tx, jobID int64) error {
-	if _, err := tx.Exec(`
-INSERT OR IGNORE INTO silence_recheck_job_candidates(job_id, alert_id)
-SELECT ?, alert_id FROM alert_states
-WHERE match_labels_json IS NOT NULL AND trim(match_labels_json) != ''
-  AND (
-    (state='inactive' AND is_live=0 AND is_resolved=0 AND is_suppressed=0)
-    OR EXISTS (
-      SELECT 1 FROM alert_target_states target
-      WHERE target.alert_id=alert_states.alert_id
-        AND target.retired_at IS NULL AND target.state='inactive'
-        AND target.is_live=0 AND target.is_resolved=0 AND target.is_suppressed=0
-    )
-  )
-`, jobID); err != nil {
-		return fmt.Errorf("failed attaching eligible recheck candidates: %w", err)
-	}
-	if _, err := tx.Exec(`
-UPDATE silence_recheck_jobs
-SET total_candidates=(SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=?)
-WHERE job_id=?
-`, jobID, jobID); err != nil {
-		return fmt.Errorf("failed counting eligible recheck candidates: %w", err)
-	}
-	return nil
-}
-
 type recheckCandidate struct {
-	AlertID               string
-	RawState              string
-	LastSeenAt            sql.NullString
-	MatchLabelsJSON       string
-	RelevantUpstreamsJSON string
-	RelevantSourcesJSON   string
+	AlertID                 string
+	TargetKey               string
+	RawState                string
+	LastSeenAt              sql.NullString
+	TargetLastSeenAt        sql.NullString
+	MatchLabelsJSON         string
+	MatchLabelsValid        bool
+	RelevantSourcesJSON     string
+	TargetSourceMembersJSON sql.NullString
 }
 
 func selectNextRecheckJobTx(tx *sql.Tx) (int64, *string, string, error) {
@@ -5535,10 +5272,12 @@ LIMIT 1
 
 func loadRecheckJobRulesTx(tx *sql.Tx, jobID int64) ([]recheckJobRule, error) {
 	rows, err := tx.Query(`
-SELECT jr.source_name, jr.cluster_id, jr.rule_id, jr.revision_id, jr.observed_state, sr.matchers_json
+	SELECT jr.source_name, jr.cluster_id, jr.target_key, jr.rule_id, jr.revision_id,
+	       jr.silence_id, jr.content_fingerprint, jr.observed_state,
+	       jr.evaluation_fingerprint, jr.matchers_json
 FROM silence_recheck_job_rules jr
-JOIN silence_revisions sr ON sr.revision_id = jr.revision_id AND sr.rule_id = jr.rule_id
 WHERE jr.job_id = ?
+	ORDER BY jr.source_name, jr.target_key, jr.silence_id, jr.content_fingerprint, jr.evaluation_fingerprint, jr.matchers_json
 `, jobID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load recheck job rules: %w", err)
@@ -5548,7 +5287,7 @@ WHERE jr.job_id = ?
 	out := []recheckJobRule{}
 	for rows.Next() {
 		var r recheckJobRule
-		if err = rows.Scan(&r.SourceName, &r.ClusterID, &r.RuleID, &r.RevisionID, &r.ObservedState, &r.MatchersJSON); err != nil {
+		if err = rows.Scan(&r.SourceName, &r.ClusterID, &r.TargetKey, &r.RuleID, &r.RevisionID, &r.SilenceID, &r.ContentFingerprint, &r.ObservedState, &r.EvaluationFingerprint, &r.MatchersJSON); err != nil {
 			return nil, fmt.Errorf("failed to scan recheck job rule: %w", err)
 		}
 		out = append(out, r)
@@ -5561,33 +5300,11 @@ WHERE jr.job_id = ?
 
 func loadRecheckCandidatesTx(tx *sql.Tx, jobID int64, batchSize int) ([]recheckCandidate, error) {
 	rows, err := tx.Query(`
-SELECT alerts.alert_id, alerts.raw_state, alerts.last_seen_at, alerts.match_labels_json,
-       alerts.relevant_upstreams_json, alerts.relevant_sources_json
-FROM silence_recheck_job_candidates candidates
-JOIN alert_states alerts ON alerts.alert_id=candidates.alert_id
-WHERE (
-    (
-      alerts.state = 'inactive'
-      AND alerts.is_live = 0
-      AND alerts.is_resolved = 0
-      AND alerts.is_suppressed = 0
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM alert_target_states target
-      WHERE target.alert_id = alerts.alert_id
-        AND target.retired_at IS NULL
-        AND target.state = 'inactive'
-        AND target.is_live = 0
-        AND target.is_resolved = 0
-        AND target.is_suppressed = 0
-    )
-  )
-  AND candidates.job_id=?
-  AND candidates.processed_at IS NULL
-  AND alerts.match_labels_json IS NOT NULL
-  AND trim(alerts.match_labels_json) != ''
-ORDER BY alerts.alert_id
+SELECT alert_id, target_key, expected_alert_last_seen_at, expected_target_last_seen_at,
+       match_labels_json, relevant_sources_json, target_source_members_json
+FROM silence_recheck_job_candidates
+WHERE job_id=? AND processed_at IS NULL AND outcome IS NULL
+ORDER BY alert_id, target_key
 LIMIT ?
 `, jobID, batchSize)
 	if err != nil {
@@ -5598,9 +5315,12 @@ LIMIT ?
 	out := []recheckCandidate{}
 	for rows.Next() {
 		var c recheckCandidate
-		if err = rows.Scan(&c.AlertID, &c.RawState, &c.LastSeenAt, &c.MatchLabelsJSON, &c.RelevantUpstreamsJSON, &c.RelevantSourcesJSON); err != nil {
+		var matchLabels sql.NullString
+		if err = rows.Scan(&c.AlertID, &c.TargetKey, &c.LastSeenAt, &c.TargetLastSeenAt, &matchLabels, &c.RelevantSourcesJSON, &c.TargetSourceMembersJSON); err != nil {
 			return nil, fmt.Errorf("failed scanning recheck candidate: %w", err)
 		}
+		c.MatchLabelsJSON = matchLabels.String
+		c.MatchLabelsValid = matchLabels.Valid
 		out = append(out, c)
 	}
 	if err = rows.Err(); err != nil {
@@ -5609,15 +5329,20 @@ LIMIT ?
 	return out, nil
 }
 
-func parseRelevantSourceNames(relevantSourcesJSON, relevantUpstreamsJSON string) (map[string]struct{}, error) {
-	out := map[string]struct{}{}
+type recheckSourceReference struct {
+	SourceName string
+	ClusterID  string
+}
+
+func parseRelevantSourceReferences(relevantSourcesJSON, relevantUpstreamsJSON string) (map[recheckSourceReference]struct{}, error) {
+	out := map[recheckSourceReference]struct{}{}
 	if strings.TrimSpace(relevantSourcesJSON) != "" {
 		var refs []SourceRef
 		if err := json.Unmarshal([]byte(relevantSourcesJSON), &refs); err == nil {
 			for _, ref := range refs {
 				name := strings.TrimSpace(ref.Name)
 				if name != "" {
-					out[name] = struct{}{}
+					out[recheckSourceReference{SourceName: name, ClusterID: strings.TrimSpace(ref.Cluster)}] = struct{}{}
 				}
 			}
 		}
@@ -5635,7 +5360,7 @@ func parseRelevantSourceNames(relevantSourcesJSON, relevantUpstreamsJSON string)
 	for _, n := range names {
 		n = strings.TrimSpace(n)
 		if n != "" {
-			out[n] = struct{}{}
+			out[recheckSourceReference{SourceName: n}] = struct{}{}
 		}
 	}
 	if len(out) == 0 {
@@ -5644,26 +5369,28 @@ func parseRelevantSourceNames(relevantSourcesJSON, relevantUpstreamsJSON string)
 	return out, nil
 }
 
-func evaluateRecheckRules(rules []recheckJobRule, sourceStatuses map[string]string, target *string, relevant map[string]struct{}, labels map[string]string) ([]recheckJobRule, bool) {
+func evaluateRecheckRules(rules []recheckJobRule, sourceStatuses map[recheckSourceReference]string, target *string, relevant map[recheckSourceReference]struct{}, labels map[string]string) ([]recheckJobRule, bool) {
 	if len(relevant) == 0 {
 		return nil, false
 	}
-	for sourceName := range relevant {
-		status, found := sourceStatuses[sourceName]
+	for source := range relevant {
+		status, found := sourceStatuses[source]
 		if !found || (status != "success" && status != "retired") {
 			return nil, false
 		}
 	}
 	matched := make([]recheckJobRule, 0)
-	matchedBySource := make(map[string]bool, len(relevant))
+	matchedBySource := make(map[recheckSourceReference]bool, len(relevant))
 	for _, r := range rules {
 		if r.ObservedState != "active" {
 			continue
 		}
-		if sourceStatuses[r.SourceName] == "retired" {
+		ruleSource := recheckSourceReference{SourceName: r.SourceName, ClusterID: r.ClusterID}
+		status, found := sourceStatuses[ruleSource]
+		if !found || status == "retired" {
 			continue
 		}
-		if _, ok := relevant[r.SourceName]; !ok {
+		if _, ok := relevant[ruleSource]; !ok {
 			continue
 		}
 		if target != nil && r.ClusterID != *target {
@@ -5674,21 +5401,21 @@ func evaluateRecheckRules(rules []recheckJobRule, sourceStatuses map[string]stri
 			continue
 		}
 		matched = append(matched, r)
-		matchedBySource[r.SourceName] = true
+		matchedBySource[ruleSource] = true
 	}
-	for sourceName := range relevant {
-		status := sourceStatuses[sourceName]
+	for source := range relevant {
+		status := sourceStatuses[source]
 		if status == "retired" {
 			continue
 		}
-		if !matchedBySource[sourceName] {
+		if !matchedBySource[source] {
 			return nil, true
 		}
 	}
 	return matched, true
 }
 
-func loadRecheckJobSourceStatusesTx(tx *sql.Tx, jobID int64) (map[string]string, error) {
+func loadRecheckJobSourceStatusesTx(tx *sql.Tx, jobID int64) (map[recheckSourceReference]string, error) {
 	var raw string
 	if err := tx.QueryRow(`SELECT source_context_json FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&raw); err != nil {
 		return nil, fmt.Errorf("failed loading recheck source context: %w", err)
@@ -5696,30 +5423,36 @@ func loadRecheckJobSourceStatusesTx(tx *sql.Tx, jobID int64) (map[string]string,
 	var context struct {
 		Sources []struct {
 			SourceName string `json:"sourceName"`
+			ClusterID  string `json:"clusterId"`
 			SyncStatus string `json:"syncStatus"`
+			Retired    bool   `json:"retired"`
 		} `json:"sources"`
 	}
 	if err := json.Unmarshal([]byte(raw), &context); err != nil {
 		return nil, fmt.Errorf("failed decoding recheck source context: %w", err)
 	}
-	statuses := make(map[string]string, len(context.Sources))
+	statuses := make(map[recheckSourceReference]string, len(context.Sources))
 	for _, source := range context.Sources {
 		name := strings.TrimSpace(source.SourceName)
 		if name != "" {
-			statuses[name] = strings.TrimSpace(source.SyncStatus)
+			status := strings.TrimSpace(source.SyncStatus)
+			if source.Retired {
+				status = "retired"
+			}
+			statuses[recheckSourceReference{SourceName: name, ClusterID: strings.TrimSpace(source.ClusterID)}] = status
 		}
 	}
 	return statuses, nil
 }
 
-func sourceSetFromMembers(members []string) map[string]struct{} {
-	out := map[string]struct{}{}
+func sourceReferencesFromMembers(members []string, clusterID string) map[recheckSourceReference]struct{} {
+	out := map[recheckSourceReference]struct{}{}
 	for _, member := range members {
 		name := strings.TrimSpace(member)
 		if name == "" {
 			continue
 		}
-		out[name] = struct{}{}
+		out[recheckSourceReference{SourceName: name, ClusterID: strings.TrimSpace(clusterID)}] = struct{}{}
 	}
 	return out
 }
@@ -6754,7 +6487,7 @@ func runIncrementalVacuum(ctx context.Context, tx *sql.Tx) (int, error) {
 }
 
 type silenceReconciliationResult struct {
-	queued int
+	sourceContextChanged bool
 }
 
 func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceState, now time.Time, collector *runtimeEventCollector) (silenceReconciliationResult, error) {
@@ -6861,11 +6594,18 @@ func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceStat
 		}
 	}
 	if shouldEnqueueRecheck {
-		if _, err := enqueueSilenceRecheckJobWithEventsTx(tx, now, collector); err != nil {
+		generation, generationErr := readMetadataIntTx(tx, metaRecheckSourceContextGen)
+		if generationErr != nil {
+			return silenceReconciliationResult{}, generationErr
+		}
+		if generation == int(^uint(0)>>1) {
+			return silenceReconciliationResult{}, errors.New("recheck source context generation overflow")
+		}
+		if err := setMetadataTx(tx, metaRecheckSourceContextGen, strconv.Itoa(generation+1)); err != nil {
 			return silenceReconciliationResult{}, err
 		}
-		result.queued = 1
 	}
+	result.sourceContextChanged = shouldEnqueueRecheck
 	return result, nil
 }
 
@@ -7517,171 +7257,6 @@ func buildSilenceRevisionFingerprints(silence SourceSilenceSnapshot) (string, st
 	contentSum := sha256.Sum256(contentRaw)
 	evalSum := sha256.Sum256(evalRaw)
 	return fmt.Sprintf("sha256:%x", contentSum), fmt.Sprintf("sha256:%x", evalSum), matchersJSON
-}
-
-func enqueueSilenceRecheckJobWithEventsTx(tx *sql.Tx, now time.Time, collector *runtimeEventCollector) (int64, error) {
-	return enqueueSilenceRecheckJobWithTriggerTx(tx, now, "source_changed", collector)
-}
-
-func enqueueSilenceRecheckJobWithTriggerTx(tx *sql.Tx, now time.Time, triggerType string, collector *runtimeEventCollector) (int64, error) {
-	type sourceContext struct {
-		SourceName  string `json:"sourceName"`
-		ClusterID   string `json:"clusterId"`
-		SyncStatus  string `json:"syncStatus"`
-		Fingerprint string `json:"fingerprint"`
-	}
-	rows, err := tx.Query(`
-SELECT source_name, COALESCE(current_cluster_id, ''), sync_status, COALESCE(silence_set_fingerprint, '')
-FROM alertmanager_sources
-ORDER BY source_name ASC
-`)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query source context for recheck job: %w", err)
-	}
-	contexts := make([]sourceContext, 0)
-	for rows.Next() {
-		var c sourceContext
-		if scanErr := rows.Scan(&c.SourceName, &c.ClusterID, &c.SyncStatus, &c.Fingerprint); scanErr != nil {
-			rows.Close()
-			return 0, fmt.Errorf("failed to scan source context for recheck job: %w", scanErr)
-		}
-		contexts = append(contexts, c)
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return 0, fmt.Errorf("failed to iterate source context for recheck job: %w", err)
-	}
-	rows.Close()
-	ctxRaw, _ := json.Marshal(struct {
-		FormatVersion int             `json:"formatVersion"`
-		Sources       []sourceContext `json:"sources"`
-	}{FormatVersion: 1, Sources: contexts})
-	ctxFingerprintRaw := sha256.Sum256(ctxRaw)
-	ctxFingerprint := fmt.Sprintf("sha256:%x", ctxFingerprintRaw)
-	nowRaw := now.UTC().Format(time.RFC3339Nano)
-	res, err := tx.Exec(`
-INSERT INTO silence_recheck_jobs(
-  context_fingerprint, open_context_fingerprint, source_context_json,
-  trigger_type, status, cursor_alert_id, created_at
-) VALUES(?, ?, ?, ?, 'queued', NULL, ?)
-ON CONFLICT(open_context_fingerprint) DO NOTHING
-	`, ctxFingerprint, ctxFingerprint, string(ctxRaw), triggerType, nowRaw)
-	if err != nil {
-		return 0, fmt.Errorf("failed to enqueue silence recheck job: %w", err)
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("failed checking recheck job insertion: %w", err)
-	}
-	var jobID int64
-	if rowsAffected == 1 {
-		jobID, err = res.LastInsertId()
-		if err != nil {
-			return 0, fmt.Errorf("failed reading inserted recheck job id: %w", err)
-		}
-	} else {
-		if err = tx.QueryRow(`SELECT job_id FROM silence_recheck_jobs WHERE open_context_fingerprint = ?`, ctxFingerprint).Scan(&jobID); err != nil {
-			return 0, fmt.Errorf("failed to load existing recheck job id: %w", err)
-		}
-	}
-	if _, err = tx.Exec(`
-INSERT OR IGNORE INTO silence_recheck_job_rules(job_id, source_name, cluster_id, rule_id, revision_id, observed_state)
-SELECT ?, current.source_name, source.current_cluster_id, current.rule_id, current.revision_id, current.observed_state
-FROM alertmanager_source_silences current
-JOIN alertmanager_sources source ON source.source_name = current.source_name
-WHERE source.retired_at IS NULL
-  AND source.sync_status = 'success'
-	`, jobID); err != nil {
-		return 0, fmt.Errorf("failed to snapshot recheck job rules: %w", err)
-	}
-	if rowsAffected == 1 {
-		if _, err = tx.Exec(`
-INSERT OR IGNORE INTO silence_recheck_job_candidates(job_id, alert_id)
-SELECT ?, alert_id FROM alert_states
-WHERE match_labels_json IS NOT NULL AND trim(match_labels_json) != ''
-  AND (
-    (state='inactive' AND is_live=0 AND is_resolved=0 AND is_suppressed=0)
-    OR EXISTS (
-      SELECT 1 FROM alert_target_states target
-      WHERE target.alert_id=alert_states.alert_id
-        AND target.retired_at IS NULL AND target.state='inactive'
-        AND target.is_live=0 AND target.is_resolved=0 AND target.is_suppressed=0
-    )
-  )
-`, jobID); err != nil {
-			return 0, fmt.Errorf("failed to snapshot recheck job candidates: %w", err)
-		}
-		if _, err = tx.Exec(`
-UPDATE silence_recheck_jobs
-SET total_candidates=(SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=?)
-WHERE job_id=?
-`, jobID, jobID); err != nil {
-			return 0, fmt.Errorf("failed counting recheck job candidates: %w", err)
-		}
-	}
-	if rowsAffected == 1 {
-		var candidateCount, queueDepth int
-		if err = tx.QueryRow(`SELECT total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&candidateCount); err != nil {
-			candidateCount = -1
-			collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect recheck candidate count for logging", attrs: []slog.Attr{slog.String("stage", "event_payload"), slog.String("event_family", "recheck_job_queued"), slog.Any("error", err)}})
-		}
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','failed')`).Scan(&queueDepth); err != nil {
-			queueDepth = -1
-			collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect recheck queue depth for logging", attrs: []slog.Attr{slog.String("stage", "queue_depth"), slog.String("event_family", "recheck_job_queued"), slog.Any("error", err)}})
-		}
-		collector.append(runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "recheck_job_queued", message: "Silence recheck job queued", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("context_id", ctxFingerprint), slog.Int("candidate_count", candidateCount), slog.Int("queue_depth", queueDepth), slog.String("reason_code", triggerType)}})
-	}
-	return jobID, nil
-}
-
-func enqueueAlertForCurrentRecheckContextWithEventsTx(tx *sql.Tx, alertID string, now time.Time, collector *runtimeEventCollector) error {
-	res, err := tx.Exec(`
-INSERT OR IGNORE INTO silence_recheck_job_candidates(job_id, alert_id)
-SELECT job_id, ? FROM silence_recheck_jobs WHERE status IN ('queued','running')
-`, alertID)
-	if err != nil {
-		return fmt.Errorf("failed attaching inactive alert to open recheck jobs: %w", err)
-	}
-	attached, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed checking inactive alert attachment: %w", err)
-	}
-	eventStart := 0
-	if collector != nil {
-		eventStart = len(collector.events)
-	}
-	var jobID int64
-	if attached == 0 {
-		var enqueueErr error
-		jobID, enqueueErr = enqueueSilenceRecheckJobWithTriggerTx(tx, now, "alert_became_inactive", collector)
-		if enqueueErr != nil {
-			return enqueueErr
-		}
-		if jobID == 0 {
-			return nil
-		}
-		if _, err = tx.Exec(`INSERT OR IGNORE INTO silence_recheck_job_candidates(job_id, alert_id) VALUES(?, ?)`, jobID, alertID); err != nil {
-			return fmt.Errorf("failed enqueueing inactive alert for recheck: %w", err)
-		}
-	}
-	if _, err = tx.Exec(`
-UPDATE silence_recheck_jobs SET total_candidates=(
-  SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=silence_recheck_jobs.job_id
-) WHERE status IN ('queued','running')
-	`); err != nil {
-		return fmt.Errorf("failed updating recheck candidate total: %w", err)
-	}
-	if attached == 0 && collector != nil && len(collector.events) > eventStart {
-		queuedEventIndex := eventStart
-		var candidateCount int
-		if err = tx.QueryRow(`SELECT total_candidates FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&candidateCount); err != nil {
-			candidateCount = -1
-			collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to capture recheck candidate count for logging", attrs: []slog.Attr{slog.String("stage", "event_payload"), slog.String("event_family", "recheck_job_queued"), slog.Any("error", err)}})
-		}
-		collector.replaceAttrAt(queuedEventIndex, "candidate_count", slog.Int("candidate_count", candidateCount))
-		collector.replaceAttrAt(queuedEventIndex, "reason_code", slog.String("reason_code", "alert_became_inactive"))
-	}
-	return nil
 }
 
 func setMetadataTx(tx *sql.Tx, key, value string) error {

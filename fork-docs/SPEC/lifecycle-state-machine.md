@@ -48,15 +48,18 @@ dimension functions.
 
 ## Failure and observability
 
-- Recheck jobs are strict FIFO. A failed predecessor persists `last_error` and blocks
-  later jobs.
+- Recheck jobs are strict FIFO. A failed predecessor preserves immutable first-error
+  fields plus the latest error fields and blocks later jobs. Each immutable candidate
+  reaches one constrained terminal outcome; parent counters equal processed membership.
 - Stats expose queue depth, current ID/status, progress, skipped count, oldest age,
   and error.
 - HA inconsistency is last-confirmed state: failed coverage cannot clear it; complete
   successful convergence can. Silence identity is part of the member fingerprint;
   equal payloads with different Alertmanager IDs remain inconsistent because
   edit/delete identity differs.
-- Recheck enqueue compares previous and next evaluation state. Only new active,
+- Recheck enqueue compares previous and next evaluation state. Source-context jobs are
+  created after the complete poll reconciliation; an eligibility transition under an
+  unchanged context creates one targeted successor. Only new active,
   pending/expired-to-active, matcher/time evaluation changes, recovery, convergence,
   or topology reassignment/retirement can enqueue; deletion, expiration,
   `updatedAt`-only and display-only changes cannot.
@@ -64,9 +67,11 @@ dimension functions.
   change therefore queues a distinct successor job even while an older context is
   still queued/running; each job retains its own pinned revision set.
 - Recheck job context captures every source status, but pinned rules are copied only
-  from sources that were successful at job creation. A relevant failed, invalid, or
-  unknown source makes that candidate incomplete; stale last-successful relations
-  can never satisfy the job. Recovery creates a complete successor context.
+  from sources that were successful at job creation. Each candidate also pins global /
+  target observation tokens, raw labels, relevant-source references, and target source
+  members. A relevant failed, invalid, or unknown source makes that candidate
+  incomplete; stale last-successful relations can never satisfy the job. Recovery
+  creates a complete successor context.
 - Retiring a source clears only its mutable `alertmanager_source_silences` current
   relations. Immutable job/evidence references remain. Expired completed-job rule
   pins are pruned after silence-history TTL so unreferenced source/rule/revision

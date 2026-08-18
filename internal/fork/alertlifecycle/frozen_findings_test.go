@@ -54,7 +54,7 @@ func TestPinnedRecheckRuleCannotCrossSourceReassignment(t *testing.T) {
 	}
 }
 
-func TestRecheckCandidateBehindCursorIsProcessedAfterBecomingInactive(t *testing.T) {
+func TestRecheckCandidateBecomingEligibleCreatesImmutableSuccessor(t *testing.T) {
 	store, err := OpenStore(StoreOptions{Path: filepath.Join(t.TempDir(), "history.sqlite")})
 	if err != nil {
 		t.Fatal(err)
@@ -86,22 +86,52 @@ func TestRecheckCandidateBehindCursorIsProcessedAfterBecomingInactive(t *testing
 	if promoted, runErr := store.RunSilenceRecheckBatch(1); runErr != nil || promoted != 1 {
 		t.Fatalf("first batch promoted=%d err=%v", promoted, runErr)
 	}
-	if err = store.UpsertCurrentAlert(AlertCurrent{
-		AlertID: "a-late", State: StateInactive, RawState: StateActive, IsLive: false,
-		Receiver: "team", GroupID: "group", GroupLabelsJSON: `{}`, LabelsJSON: labels,
-		MatchLabelsJSON: &labels, AnnotationsJSON: `{}`, StartsAt: now, LastSeenAt: &now,
-		RelevantUpstreams: `["am-a"]`, RelevantSources: `[{"name":"am-a","cluster":"cluster-a"}]`,
+	if _, err = store.ApplyPollCycle(PollCycleInput{
+		LiveAlerts: []LiveAlertSnapshot{{
+			AlertID: "a-late", State: StateActive, Receiver: "team", GroupID: "group",
+			GroupLabelsJSON: `{}`, LabelsJSON: labels, MatchLabelsJSON: &labels,
+			AnnotationsJSON: `{}`, StartsAt: now, LastSeenAt: now,
+			RelevantUpstreams: []string{"am-a"}, RelevantSources: []SourceRef{{Name: "am-a", Cluster: "cluster-a"}},
+		}},
+		SuccessfulUpstreams: map[string]bool{"am-a": true},
+		SilenceSources:      []SourceSilenceState{{SourceName: "am-a", ClusterID: "cluster-a", SyncStatus: "success", Silences: []SourceSilenceSnapshot{silence}}},
+		Timestamp:           now.Add(time.Minute),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 4; i++ {
-		if _, err = store.RunSilenceRecheckBatch(1); err != nil {
-			t.Fatal(err)
-		}
+	result, err := store.ApplyPollCycle(PollCycleInput{
+		SuccessfulUpstreams: map[string]bool{"am-a": true},
+		SilenceSources:      []SourceSilenceState{{SourceName: "am-a", ClusterID: "cluster-a", SyncStatus: "success", Silences: []SourceSilenceSnapshot{silence}}},
+		Timestamp:           now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	current, err := store.GetCurrentAlert("a-late")
-	if err != nil || current == nil || !current.IsSuppressed {
-		t.Fatalf("late lower-ID candidate was skipped: current=%+v err=%v", current, err)
+	if result.RecheckJobsQueued != 1 {
+		t.Fatalf("eligible alert must create one successor job: %+v", result)
+	}
+	var originalCandidates, originalTotal int
+	if err = store.db.QueryRow(`SELECT COUNT(*), total_candidates FROM silence_recheck_job_candidates candidates JOIN silence_recheck_jobs jobs USING(job_id) WHERE jobs.job_id=1`).Scan(&originalCandidates, &originalTotal); err != nil {
+		t.Fatal(err)
+	}
+	if originalCandidates != 2 || originalTotal != 2 {
+		t.Fatalf("original job membership changed: candidates=%d total=%d", originalCandidates, originalTotal)
+	}
+	var successorID int64
+	var trigger string
+	var successorCandidates, successorTotal int
+	if err = store.db.QueryRow(`SELECT job_id, trigger_type, (SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=jobs.job_id), total_candidates FROM silence_recheck_jobs jobs WHERE job_id > 1`).Scan(&successorID, &trigger, &successorCandidates, &successorTotal); err != nil {
+		t.Fatal(err)
+	}
+	if successorID == 0 || trigger != "alert_became_eligible" || successorCandidates != 1 || successorTotal != 1 {
+		t.Fatalf("invalid immutable successor: id=%d trigger=%q candidates=%d total=%d", successorID, trigger, successorCandidates, successorTotal)
+	}
+	var lateMembership int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=? AND alert_id='a-late'`, successorID).Scan(&lateMembership); err != nil {
+		t.Fatal(err)
+	}
+	if lateMembership != 1 {
+		t.Fatalf("successor does not own newly eligible alert: count=%d", lateMembership)
 	}
 }
 
