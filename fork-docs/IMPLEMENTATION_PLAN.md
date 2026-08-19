@@ -31,9 +31,9 @@ Implemented in fork scope:
 - silence source/revision/episode history and HA consistency tracking,
 - persistent FIFO silence recheck with exact causes; immutable target-scoped candidate
   membership, pinned observation input, and terminal outcomes are implemented and
-  independently accepted under Problem 2; retry/scheduler/operator recovery remain
-  Problem 3 work tracked in
-  `fork-docs/SPEC/silence-recheck-problems.md`,
+  verified under Problem 2; Problem 3 adds durable attempts, bounded
+  retry, token reconciliation, one scheduler owner, and audited operator recovery;
+  the Problem 3 implementation is complete,
 - effective suppression evidence on retained past-alert cards using the ordinary
   silence-rule presentation and actions,
 - compact create/edit/recreate silence editor with automatic preview,

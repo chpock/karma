@@ -1,7 +1,7 @@
 # Architecture Conformance Matrix
 
-Status: Problem 2 is implemented and independently accepted; remaining known violations
-are tracked by `silence-recheck-problems.md`.
+Status: Problems 2 and 3 are implemented. Remaining known violations are tracked by
+`silence-recheck-problems.md`.
 
 This document is the finite traceability contract for the alert lifecycle and
 silence editor work. A decision is not implemented merely because a schema field
@@ -45,7 +45,7 @@ The executable test coverage for these contracts is summarized in
 | D7 | Preserve HA member disagreement including silence identity; persistent warning until convergence | identity-aware cluster fingerprint, Stats/warning | HA ID/payload/failure/convergence sequence | Implemented |
 | D8 | `is_suppression_retained` proposal is superseded | N/A | schema absence | Superseded by D13 |
 | D9 | Match only original raw labels; missing labels remain unknown | raw-label index, `match_labels_json` | raw-label exclusion tests | Implemented |
-| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats | Problem 2 immutable-input matrix; Problem 3 retry/scheduler matrix pending | Known violation; Problem 3 remainder tracked by `silence-recheck-problems.md` |
+| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats/scheduler/operator routes | Problem 2 immutable-input matrix; Problem 3 state, attempt, scheduler, and operator matrix | Problem 3 implemented; Problem 4 observability presentation remains open |
 | D11 | Earlier many-to-many event linkage proposal is superseded | N/A | schema absence | Superseded by D15/D20 |
 | D12 | Revision only on normalized content/updatedAt/new episode; not repeated/status-only poll | latest-revision boundary and HA-wide episode closure | revision sequence and `TestSilenceEpisodeClosesOnlyAfterConfirmedHAWideAbsence` | Implemented; A→B→A appends and reappearance starts a new episode |
 | D13 | One normalized `is_suppressed` axis with strict live invariant | projection/live validation | projection tests | Implemented |
@@ -59,7 +59,7 @@ The executable test coverage for these contracts is summarized in
 | D21 | Retain non-completed/referenced/latest completed jobs; clean older unreferenced | housekeeping | `TestRunHousekeepingCleansCompletedUnreferencedJobs` | Implemented |
 | D22 | Lease/fencing deferred; all derived writes pass one Store-owned immediate-writer transaction boundary with durable completion reconciliation | runtime integration | Problem 1 writer/PID regressions and final commit gates in `architecture-verification.md` | Implemented |
 
-## 3. Silence Editor Decisions Q1-Q24
+## 3. Silence Editor Decisions Q1-Q25
 
 | ID | Contract | Runtime owner | Verification | Status |
 |---|---|---|---|---|
@@ -108,6 +108,8 @@ Lifecycle writers:
 
 - `Store.ApplyPollCycle`: live/global/target observation, disappearance, source reconciliation, job enqueue, live causes; one Store-owned immediate writer transaction.
 - `Store.RunSilenceRecheckBatch`: target/global promotion CAS, events, recheck causes; one immediate writer transaction per batch.
+- `Store.RetryRecheckJobContext`: failed-to-queued semantic CAS plus idempotent operator-action row; one immediate writer transaction.
+- `Store.AbandonRecheckJobContext`: failed-to-abandoned semantic CAS plus idempotent operator-action row; one immediate writer transaction.
 - `Store.ResolveAlert`: global/target manual resolution and events; one immediate writer transaction.
 - `Store.RunHousekeeping`: lifecycle/silence/job retention and vacuum; writer ownership spans cleanup, vacuum, and vacuum metadata.
 - `Store.RunRegroupBatch`: grouping metadata only; must not change matching/lifecycle dimensions; one immediate writer transaction per batch.
@@ -153,6 +155,7 @@ adding its invariant/test mapping.
   recorded development CPU (one benchmark iteration, informational budget check);
 - replay: committed 1043-group HA traffic artifact passes poll, SQLite target
   projection and label-index verification;
-All rows above are implemented or explicitly superseded. Reproducible test,
-restart, replay, parser, timezone, performance, build, and browser commands are
-recorded in `architecture-verification.md`.
+All rows above are implemented or explicitly superseded except D10's open Problem 4
+observability presentation. Reproducible test, restart, replay, parser, timezone,
+performance, build, and browser commands are recorded in
+`architecture-verification.md`.

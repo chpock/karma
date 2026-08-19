@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestLifecycleStateMachineSequences(t *testing.T) {
@@ -219,31 +220,28 @@ func TestC4RecheckSchedulerCandidateProduct(t *testing.T) {
 		RecheckCandidateIncompleteSources,
 	}
 	for _, jobState := range jobStates {
-		for _, predecessorFailed := range []bool{false, true} {
-			for _, sourceStatus := range sourceStatuses {
-				for _, candidate := range candidates {
-					wantBlocked := predecessorFailed || jobState == "failed"
-					canRun := RecheckJobCanRun(jobState, predecessorFailed)
-					if canRun != (!wantBlocked && jobState != "completed") {
-						t.Fatalf("state=%s predecessor=%v canRun=%v", jobState, predecessorFailed, canRun)
-					}
-					if !canRun {
-						continue
-					}
-					coverageComplete := sourceStatus == "success" || sourceStatus == "retired"
-					counter, promote := ClassifyRecheckCandidate(coverageComplete, candidate)
-					if candidate == RecheckCandidateMissingLabels && counter != "missing_labels" {
-						t.Fatalf("missing-label candidate counter=%q", counter)
-					}
-					if candidate == RecheckCandidateStaleCAS && counter != "stale_conflicts" {
-						t.Fatalf("stale-CAS candidate counter=%q", counter)
-					}
-					if candidate != RecheckCandidateMissingLabels && candidate != RecheckCandidateStaleCAS && !coverageComplete && counter != "incomplete_sources" {
-						t.Fatalf("incomplete source candidate=%s counter=%q", candidate, counter)
-					}
-					if promote != (coverageComplete && candidate == RecheckCandidateMatch) {
-						t.Fatalf("candidate=%s coverage=%v counter=%s promote=%v", candidate, coverageComplete, counter, promote)
-					}
+		for _, sourceStatus := range sourceStatuses {
+			for _, candidate := range candidates {
+				canRun := RecheckJobCanRun(jobState, nil, time.Now())
+				if canRun != (jobState == "queued" || jobState == "running") {
+					t.Fatalf("state=%s canRun=%v", jobState, canRun)
+				}
+				if !canRun {
+					continue
+				}
+				coverageComplete := sourceStatus == "success" || sourceStatus == "retired"
+				counter, promote := ClassifyRecheckCandidate(coverageComplete, candidate)
+				if candidate == RecheckCandidateMissingLabels && counter != "missing_labels" {
+					t.Fatalf("missing-label candidate counter=%q", counter)
+				}
+				if candidate == RecheckCandidateStaleCAS && counter != "stale_conflicts" {
+					t.Fatalf("stale-CAS candidate counter=%q", counter)
+				}
+				if candidate != RecheckCandidateMissingLabels && candidate != RecheckCandidateStaleCAS && !coverageComplete && counter != "incomplete_sources" {
+					t.Fatalf("incomplete source candidate=%s counter=%q", candidate, counter)
+				}
+				if promote != (coverageComplete && candidate == RecheckCandidateMatch) {
+					t.Fatalf("candidate=%s coverage=%v counter=%s promote=%v", candidate, coverageComplete, counter, promote)
 				}
 			}
 		}

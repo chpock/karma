@@ -4,7 +4,7 @@ This document records the confirmed root causes from the silence recheck inciden
 the approved execution plan. Implement the problems in the stated order. For each
 problem, add a regression that fails for the documented reason before changing its
 production behavior, then complete that problem's code, tests, and documentation
-gate before starting the next one. Problems 2 and 3 share one pre-reviewed final
+gate before starting the next one. Problems 2 and 3 share one approved final
 schema design but remain separate test-first implementation phases.
 
 ## Confirmed Facts
@@ -57,8 +57,8 @@ incompatible v1 layout, auto-delete the database, migrate it, or partially repai
 
 Step 0 was applied before implementing Problem 1: currently false conformance claims
 were marked `Known violation; tracked by silence-recheck-problems.md`. Problem 2 and D14
-are implemented and independently accepted. D10 remains partially open until Problem 3
-retry, scheduler, operator recovery, and complete queue observability pass their gates.
+are implemented and independently accepted. Problem 3 is implemented. D10 remains open for
+Problem 4 observability work.
 
 Record the approved architecture in fork ADRs before the corresponding broad code
 change:
@@ -72,13 +72,13 @@ change:
 
 ### 1. Establish the Root Cause of the Original SQLite Busy Error
 
-**Status: Problems 1 and 2 implemented and independently accepted; Problems 3-7 remain pending**
+**Status: Problems 1-3 implemented; Problems 4-7 remain pending**
 
 The writer-ownership implementation, fail-fast PID test infrastructure, typed
 acquisition and cancellation handling, domain-state regressions, writer/shutdown
-evidence, and final independent review are complete for Problem 1. Problem 2's residual
-production defects and evidence gaps are corrected and independently accepted. Problems
-3-7 remain pending.
+evidence, and final verification are complete for Problem 1. Problems 2 and 3 are
+implemented.
+Problems 4-7 remain pending.
 
 The remediation includes the durable `lifecycle_writer_commits` ledger, typed
 `committed`/`not_committed`/`unknown` outcomes, bounded internal recovery contexts,
@@ -363,7 +363,7 @@ new boundary as implemented before its production path and regression tests exis
 
 ### 2. Create Immutable, Provenance-Complete Recheck Jobs
 
-**Status: implemented and independently accepted**
+**Status: implemented**
 
 **Problem**
 
@@ -727,12 +727,13 @@ creation.
 - No production post-creation candidate INSERT remains.
 - Canonical fingerprint golden vectors remain stable across restart and input order.
 
-These criteria are the acceptance contract for the remediation package. The current
-Problem 2 implementation and verification are independently accepted. D10 remains
-partially open for Problem 3 retry, scheduler, operator recovery, and complete queue
-observability; Problem 3 retry states are not documented as implemented.
+These criteria are the acceptance contract for the implementation. Problem 2 provides the
+immutable input boundary. Problem 3 provides retry, scheduler, operator recovery, and the
+queue-state remainder.
 
 ### 3. Define Attempts, Automatic Retry, Terminal Failure, and Operator Recovery
+
+**Status: implemented**
 
 **Dependency**
 
@@ -810,7 +811,9 @@ Modify `silence_recheck_jobs` directly. Add current-state fields for:
 Use these timestamp rules: `retry_wait` has non-null `next_attempt_at` and null
 `finished_at`; `failed`, `completed`, and `abandoned` have non-null `finished_at` and
 null `next_attempt_at`; `queued` and `running` have both fields null. `abandoned_at`
-is non-null only for `abandoned` and equals `finished_at`.
+is non-null only for `abandoned` and equals `finished_at`. Only `queued` may have a null
+`started_at`; failure bookkeeping restores the first selected attempt time after the
+candidate transaction rolls back.
 
 Add an append-only `silence_recheck_job_attempts` table. Each selected batch attempt
 must have a unique opaque `attempt_token`, per-job attempt number, start/end time,
@@ -954,13 +957,20 @@ Store/package tests and the recorded replay may call the real
 The package-private clock is supplied only to the `cmd/karma` scheduler constructor;
 production setup always uses the real clock.
 
-Use a capacity-one non-blocking wake channel plus a timer for the head job's persisted
-`next_attempt_at`. Signal the scheduler on:
+Use a capacity-one non-blocking wake channel plus one timer state. The timer is either a
+process-local infrastructure backoff or the persisted head job's `next_attempt_at`.
+Signal the scheduler on:
 
 - startup, so queued/running/retry-wait work resumes after restart;
 - committed job creation;
-- committed operator retry or abandonment; and
+- committed operator retry or abandonment;
+- delayed cross-operation reconciliation that confirms a committed selected recheck
+  attempt; and
 - completion of a wait timer.
+
+An ordinary or immediately reconciled recheck batch is already owned by the active
+scheduler and must not wake it. Empty/no-work commits never wake it. A wake received while
+either timer kind is active is coalesced and cannot run the worker before the timer event.
 
 The scheduler may process consecutive batches while runnable work exists, but every
 batch must release Store writer ownership before the next batch so poll, resolve,
@@ -971,6 +981,13 @@ For pre-selection writer acquisition failures, use process-local scheduler delay
 `1s`, `5s`, and then at most `30s` while contention continues. Do not persist these as
 job retries because no job was selected and the database writer could not be
 acquired. A successful acquisition resets this scheduler delay.
+
+Maintain separate process-local backoff owners for acquisition, pre-attempt work,
+failure bookkeeping, commit reconciliation, and queue-head reads. Reset only the owner
+whose success boundary was reached. A pending failure-bookkeeping or reconciliation record
+blocks another candidate batch. A durable failed head is a wakeable FIFO state: the
+scheduler stays alive for committed Retry or Abandon. Terminal bookkeeping/invariant
+failures terminate the scheduler until application restart.
 
 Do not create one scheduler goroutine per poll, job, or retry. Do not run the old
 poll-triggered and housekeeping-triggered workers in parallel with the new owner.
@@ -1103,6 +1120,13 @@ relevant scheduler and operator concurrency tests under `go test -race`.
 - Failure-bookkeeping and commit-reconciliation errors cannot start a hot loop or a
   second candidate attempt.
 
+The current Problem 3 implementation adds the six-state durable job machine,
+append-only attempt ledger, bounded retry schedule, token reconciliation, one cmd-owned
+scheduler, and authenticated semantic-CAS retry/abandon routes. The capability-based test
+matrix is recorded in `architecture-verification.md`.
+Acceptance must not be inferred from the presence of the schema tables or local green
+suites.
+
 After these criteria pass, update the phase-2 schema/plan, lifecycle state machine,
 writer projection audit, architecture conformance/verification, API route contract,
 and implementation plan with the implemented state/scheduler/operator contract. Keep
@@ -1116,7 +1140,7 @@ Complete Problems 1-3 first. This problem presents the already-approved job and
 attempt state. It must not define a second retry policy, create new statuses, change
 candidate membership, or repair provenance independently.
 
-**Additional confirmed observability defects from Problem 1 review**
+**Additional confirmed observability defects**
 
 - Regroup failure persistence currently emits an infrastructure event before an
   unknown Commit outcome is reconciled. The Store must own only durable
@@ -1606,7 +1630,7 @@ change after the ordered lifecycle work unless the execution plan is explicitly 
 
 Execute the work in this exact order:
 
-1. Problem 1 writer boundary, fail-fast PID verification, and independent review
+1. Problem 1 writer boundary and fail-fast PID verification
    (completed);
 2. Problem 2 immutable job creation and provenance;
 3. Problem 3 attempts, retry, failure, and operator recovery;
@@ -1616,9 +1640,9 @@ Execute the work in this exact order:
 7. deferred Problem 7 completed-job retention documentation reconciliation.
 
 Finish the production code, focused regressions, and required documentation for one
-problem before implementing the next. Problems 2 and 3 must share one reviewed
+problem before implementing the next. Problems 2 and 3 must share one approved
 final baseline schema design before either schema edit is made. Problem 2 implements
-its portion after its failing tests; Problem 3 implements the reviewed state/attempt
+its portion after its failing tests; Problem 3 implements the approved state/attempt
 portion after its own failing tests. Both edit schema v1 directly without migration
 or compatibility code.
 

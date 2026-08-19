@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,7 +36,7 @@ func TestRealRegroupOwnerStartsAndJoinsWorker(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(&blockingEventHandler{next: slog.NewTextHandler(io.Discard, nil), entered: entered, release: release}))
+	slog.SetDefault(slog.New(&blockingEventHandler{next: slog.NewTextHandler(io.Discard, nil), event: "regroup_started", entered: entered, release: release}))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 	cancelCalled := make(chan struct{})
 	waitCalled := make(chan struct{})
@@ -69,19 +70,17 @@ func TestRealRegroupOwnerStartsAndJoinsWorker(t *testing.T) {
 	}
 }
 
-func TestRealHousekeepingOwnerStartsAndJoinsWorkerIncludingRecheckPhase(t *testing.T) {
+func TestRealHousekeepingOwnerStartsAndJoinsWorker(t *testing.T) {
 	previousStore := lifecycleStore
 	previousConfig := config.Config
+	lifecycleHousekeeping = lifecycleWorkerOwner{}
 	t.Cleanup(func() {
 		lifecycleStore = previousStore
 		config.Config = previousConfig
+		lifecycleHousekeeping = lifecycleWorkerOwner{}
 	})
 	previousDependencies := housekeepingOwnerDependencies
-	previousRunner := runAlertLifecycleRecheckForHousekeeping
-	t.Cleanup(func() {
-		housekeepingOwnerDependencies = previousDependencies
-		runAlertLifecycleRecheckForHousekeeping = previousRunner
-	})
+	t.Cleanup(func() { housekeepingOwnerDependencies = previousDependencies })
 	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: t.TempDir() + "/history.sqlite"})
 	if err != nil {
 		t.Fatal(err)
@@ -95,11 +94,16 @@ func TestRealHousekeepingOwnerStartsAndJoinsWorkerIncludingRecheckPhase(t *testi
 	config.Config.AlertLifecycle.Housekeeping.IncrementalVacuumInterval = time.Hour
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	runAlertLifecycleRecheckForHousekeeping = func(ctx context.Context) {
-		previousRunner(ctx)
-		close(entered)
-		<-release
-	}
+	var barrier sync.Once
+	store.SetRecheckIntegrationTestHooks(&alertlifecycle.RecheckIntegrationTestHooks{
+		TransactionFinished: func(string) {
+			barrier.Do(func() {
+				close(entered)
+				<-release
+			})
+		},
+	})
+	t.Cleanup(func() { store.SetRecheckIntegrationTestHooks(nil) })
 	cancelCalled := make(chan struct{})
 	waitCalled := make(chan struct{})
 	housekeepingOwnerDependencies = func(cancel context.CancelFunc, _ <-chan struct{}) lifecycleWorkerDeps {
@@ -115,7 +119,7 @@ func TestRealHousekeepingOwnerStartsAndJoinsWorkerIncludingRecheckPhase(t *testi
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
-		t.Fatal("real housekeeping owner did not reach synchronous recheck")
+		t.Fatal("real housekeeping owner did not enter its writer transaction")
 	}
 	stopDone := make(chan struct{})
 	go func() {
@@ -128,12 +132,13 @@ func TestRealHousekeepingOwnerStartsAndJoinsWorkerIncludingRecheckPhase(t *testi
 	select {
 	case <-stopDone:
 	case <-time.After(time.Second):
-		t.Fatal("real housekeeping owner did not join synchronous recheck")
+		t.Fatal("real housekeeping owner did not join the worker")
 	}
 }
 
 type blockingEventHandler struct {
 	next    slog.Handler
+	event   string
 	entered chan struct{}
 	release <-chan struct{}
 }
@@ -151,7 +156,7 @@ func (handler *blockingEventHandler) Handle(ctx context.Context, record slog.Rec
 		}
 		return true
 	})
-	if event == "regroup_started" {
+	if event == handler.event {
 		close(handler.entered)
 		<-handler.release
 	}
@@ -159,9 +164,9 @@ func (handler *blockingEventHandler) Handle(ctx context.Context, record slog.Rec
 }
 
 func (handler *blockingEventHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &blockingEventHandler{next: handler.next.WithAttrs(attrs), entered: handler.entered, release: handler.release}
+	return &blockingEventHandler{next: handler.next.WithAttrs(attrs), event: handler.event, entered: handler.entered, release: handler.release}
 }
 
 func (handler *blockingEventHandler) WithGroup(name string) slog.Handler {
-	return &blockingEventHandler{next: handler.next.WithGroup(name), entered: handler.entered, release: handler.release}
+	return &blockingEventHandler{next: handler.next.WithGroup(name), event: handler.event, entered: handler.entered, release: handler.release}
 }

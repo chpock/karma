@@ -1468,9 +1468,9 @@ func TestRunHousekeepingCleansCompletedUnreferencedJobs(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		fp := "sha256:test-" + string(rune('a'+i))
 		if _, err = store.db.Exec(`
-INSERT INTO silence_recheck_jobs(source_context_fingerprint, job_fingerprint, source_context_json, trigger_type, status, cursor_alert_id, created_at, finished_at)
-VALUES(?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'source_context_changed', 'completed', NULL, ?, ?)
-`, fp, fp, now, now); err != nil {
+INSERT INTO silence_recheck_jobs(source_context_fingerprint, job_fingerprint, source_context_json, trigger_type, status, cursor_alert_id, created_at, started_at, finished_at)
+VALUES(?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'source_context_changed', 'completed', NULL, ?, ?, ?)
+`, fp, fp, now, now, now); err != nil {
 			t.Fatalf("failed to insert completed job: %v", err)
 		}
 	}
@@ -1596,9 +1596,9 @@ INSERT INTO silence_revisions(
 	} {
 		res, insertErr := store.db.Exec(`
 INSERT INTO silence_recheck_jobs(
-  source_context_fingerprint,job_fingerprint,source_context_json,trigger_type,status,created_at,finished_at
-) VALUES(?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'source_context_changed','completed',?,?)
-`, job.fingerprint, job.fingerprint, job.finishedAt, job.finishedAt)
+  source_context_fingerprint,job_fingerprint,source_context_json,trigger_type,status,created_at,started_at,finished_at
+) VALUES(?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'source_context_changed','completed',?,?,?)
+`, job.fingerprint, job.fingerprint, job.finishedAt, job.finishedAt, job.finishedAt)
 		if insertErr != nil {
 			t.Fatal(insertErr)
 		}
@@ -2384,10 +2384,10 @@ func TestFailedRecheckJobBlocksLaterJobsAndIsObservable(t *testing.T) {
 	defer store.Close()
 	nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err = store.db.Exec(`
-INSERT INTO silence_recheck_jobs(status, created_at, finished_at, source_context_json, source_context_fingerprint, job_fingerprint, trigger_type, first_error_message, last_error_message)
-VALUES('failed', ?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'failed-fp', 'sha256:failed-fp', 'source_context_changed', 'forced failure', 'forced failure'),
-      ('queued', ?, NULL, '{"formatVersion":1,"sources":[],"clusters":[]}', 'later-fp', 'sha256:later-fp', 'source_context_changed', NULL, NULL)
-	`, nowRaw, nowRaw, nowRaw); err != nil {
+INSERT INTO silence_recheck_jobs(status, created_at, started_at, finished_at, source_context_json, source_context_fingerprint, job_fingerprint, trigger_type, first_error_message, last_error_message)
+VALUES('failed', ?, ?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'failed-fp', 'sha256:failed-fp', 'source_context_changed', 'forced failure', 'forced failure'),
+      ('queued', ?, NULL, NULL, '{"formatVersion":1,"sources":[],"clusters":[]}', 'later-fp', 'sha256:later-fp', 'source_context_changed', NULL, NULL)
+	`, nowRaw, nowRaw, nowRaw, nowRaw); err != nil {
 		t.Fatalf("seed recheck jobs: %v", err)
 	}
 	stats, err := store.GetStats()
@@ -2845,10 +2845,10 @@ func TestRetiredSourceReleasesMutableSilenceHistoryForRetention(t *testing.T) {
 	if _, err = store.db.Exec(`
 INSERT INTO silence_recheck_jobs(
   source_context_fingerprint, job_fingerprint, source_context_json,
-  trigger_type, status, created_at, finished_at
+  trigger_type, status, created_at, started_at, finished_at
 ) VALUES('sha256:newer-empty-context', 'sha256:newer-empty-job', '{"formatVersion":1,"sources":[],"clusters":[]}',
-         'source_context_changed', 'completed', ?, ?)
-`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+         'source_context_changed', 'completed', ?, ?, ?)
+`, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = store.RunHousekeeping(365*24*time.Hour, 100000); err != nil {

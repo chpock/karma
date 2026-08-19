@@ -1,7 +1,6 @@
 # Writer and Projection Inventory
 
-Status: immutable recheck input is implemented and independently accepted; retry and
-operator recovery remain Problem 3.
+Status: Problems 2 and 3 immutable input, retry, and operator recovery are implemented.
 
 This inventory follows writes into every observable projection. It is organized
 by domain transaction, not by source file.
@@ -48,11 +47,14 @@ by domain transaction, not by source file.
   satisfy the processed sum invariant. An
   unknown writer commit outcome is never persisted as a failed predecessor and
   never triggers a duplicate callback. Other transient/terminal worker error
-  classification remains Problem 3; late candidate attachment is not supported.
+  classification is typed: selected retryable BUSY-family failures use the bounded
+  durable retry schedule, terminal failures block FIFO, and shutdown/acquisition failures
+  do not consume attempts. Late candidate attachment is not supported.
 - Restart: queued/running per-candidate progress resumes from the same immutable
   membership and pinned input. Eligibility under an unchanged source context creates
   a new targeted successor rather than mutating an older job. Retry scheduling and
-  operator recovery remain Problem 3.
+  operator recovery use the same immutable job, append-only attempt history, and audited
+  same-job operator actions.
 
 ## W3: Manual resolve
 

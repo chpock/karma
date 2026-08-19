@@ -3,23 +3,23 @@
 - Status: Accepted
 - Date: 2026-08-17
 
-Implementation status: the combined Problems 2-3 schema contract is accepted as a
-decision. Problem 2 is implemented and independently accepted. Problem 3 later adds
-retry, attempt, scheduler, and operator-recovery behavior on the same schema-v1 objects.
+Implementation status: Implemented. Problem 2 owns immutable job input; Problem 3 adds the
+ADR-007 retry, attempt, scheduler, and operator-recovery behavior on the same schema-v1
+objects.
 
 ## Context
 
-The current recheck queue does not have one atomic creation boundary. A job can be
-created from a source context and receive candidates later from the worker, an alert
-transition, or `UpsertCurrentAlert`. Candidate rows contain only an alert ID, while the
-worker reads labels, source membership, and observation timestamps from mutable current
-rows. This allows a job to evaluate a later lifecycle episode with the wrong historical
-input. Mutable alert retention can also delete candidate rows through a cascading
+Before Problem 2, the recheck queue did not have one atomic creation boundary. A job could
+be created from a source context and receive candidates later from the worker, an alert
+transition, or `UpsertCurrentAlert`. Candidate rows contained only an alert ID, while the
+worker read labels, source membership, and observation timestamps from mutable current
+rows. This allowed a job to evaluate a later lifecycle episode with the wrong historical
+input. Mutable alert retention could also delete candidate rows through a cascading
 foreign key.
 
-Problem 2 requires a complete immutable input snapshot. Problem 3 must use that same
-snapshot for retries and operator actions, so the final fresh schema-v1 shape is agreed
-here before either implementation phase changes the DDL. This preview project has no
+This decision requires a complete immutable input snapshot. Problem 3 uses that same
+snapshot for retries and operator actions, so the final fresh schema-v1 shape is defined
+here for both implementations. This preview project has no
 deployed lifecycle databases and has no migration or backfill subsystem.
 
 ## Decision
@@ -123,9 +123,9 @@ timestamps, applied result, resulting status, canonical request fingerprint, and
 `UNIQUE(job_id, request_id)`. The fingerprint is versioned canonical input exactly
 `{action, normalizedReason, normalizedActor}`.
 
-Problem 2 does not implement retry states, attempt writes, scheduler behavior, or
-operator routes. It only creates the final job/rule/candidate shape and leaves the
-reserved Problem 3 columns at their initial values.
+Problem 2 created the final job/rule/candidate shape and left the reserved Problem 3
+columns at their initial values. ADR-007 now owns the runtime retry states, attempt
+writes, scheduler behavior, and operator routes without changing this immutable input.
 
 ### Ownership and mutation boundary
 
@@ -160,11 +160,11 @@ path is allowed.
 - Alert retention cannot erase an open job's candidate input.
 - Restart resumes the same candidate decisions and cannot silently evaluate a newer
   lifecycle episode.
-- Problem 3 can add retry and operator recovery without changing the identity or input
+- Problem 3 adds retry and operator recovery without changing the identity or input
   semantics established here.
 - Late candidate attachment and mutable correctness-input reads were removed, and the
-  reviewed Problem 2 production and evidence findings are independently accepted.
-  Problem 3 retry/scheduler behavior must not be described as implemented by this ADR.
+  Problem 2 verification matrix covers the resulting production invariants.
+  Problem 3 runtime behavior is specified by ADR-007, not by this input-identity ADR.
 
 ## Verification obligations
 

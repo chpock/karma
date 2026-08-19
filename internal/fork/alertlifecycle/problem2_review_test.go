@@ -1018,7 +1018,7 @@ func TestProblem2DuplicateIgnoresLegitimateRuntimeFields(t *testing.T) {
 			}
 		}},
 		{name: "retry wait timestamp and errors", mutate: func(t *testing.T, store *Store, raw string) {
-			if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET status='retry_wait',cursor_alert_id='cursor',next_attempt_at=?,first_error_message='first',first_error_class='busy',first_error_stage='worker',first_error_at=?,last_error_message='last',last_error_class='busy',last_error_stage='worker',last_error_at=?,attempt_count=2,retry_count=1,consecutive_retry_count=1 WHERE job_id=1`, raw, raw, raw, raw); err != nil {
+			if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET status='retry_wait',cursor_alert_id='cursor',started_at=?,next_attempt_at=?,first_error_message='first',first_error_class='busy',first_error_stage='worker',first_error_at=?,last_error_message='last',last_error_class='busy',last_error_stage='worker',last_error_at=?,attempt_count=2,retry_count=1,consecutive_retry_count=1 WHERE job_id=1`, raw, raw, raw, raw, raw); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -1055,7 +1055,7 @@ func TestProblem2DuplicateIgnoresLegitimateRuntimeFields(t *testing.T) {
 			}
 		}},
 		{name: "operator abandonment", mutate: func(t *testing.T, store *Store, raw string) {
-			if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET status='abandoned',processed_candidates=1,promoted_candidates=1,finished_at=?,abandoned_at=?,abandoned_by='operator',abandon_reason='review' WHERE job_id=1`, raw, raw); err != nil {
+			if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET status='abandoned',processed_candidates=1,promoted_candidates=1,started_at=?,finished_at=?,abandoned_at=?,abandoned_by='operator',abandon_reason='review' WHERE job_id=1`, raw, raw, raw); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := store.db.Exec(`UPDATE silence_recheck_job_candidates SET processed_at=?,outcome='promoted' WHERE job_id=1`, raw); err != nil {
@@ -1632,7 +1632,7 @@ func TestProblem2SchemaAcceptsAllProblem2EnumAndTerminalValues(t *testing.T) {
 		}
 	}
 	finished := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET status='running',next_attempt_at=NULL,finished_at=NULL WHERE job_id=1`); err != nil {
+	if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET status='running',started_at=?,next_attempt_at=NULL,finished_at=NULL WHERE job_id=1`, finished); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`UPDATE silence_recheck_jobs SET status='retry_wait',next_attempt_at=?,finished_at=NULL WHERE job_id=1`, finished); err != nil {

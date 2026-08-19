@@ -155,6 +155,7 @@ func setupRouter(router *chi.Mux, historyPoller *historyPoller) {
 	router.Post(getViewURL("/alerts/{id}/resolve"), resolveAlert)
 	router.Get(getViewURL("/alerts-history/stats"), alertLifecycleStats)
 	router.Get(getViewURL("/alerts-history/warning"), alertLifecycleWarning)
+	registerAlertLifecycleRecheckRoutes(router)
 	router.Get(getViewURL("/alertList.json"), alertList)
 	router.Get(getViewURL("/autocomplete.json"), autocomplete)
 	router.Get(getViewURL("/labelNames.json"), knownLabelNames)

@@ -112,7 +112,40 @@ Returns persistent-warning status for DB expected-state contract:
 
 UI must keep warning visible while `dbExpectedState=false`.
 
-## 6. Invalid silence entries in Alertmanager responses
+## 6. Recheck operator recovery
+
+Authenticated lifecycle mutation routes:
+
+- `POST /alerts-history/recheck/{jobID}/retry`
+- `POST /alerts-history/recheck/{jobID}/abandon`
+
+Both accept one strict JSON object, limited to 4096 bytes:
+
+```json
+{"requestId":"opaque-client-id","reason":"optional retry reason"}
+```
+
+Abandon requires a non-empty trimmed reason. `requestId` is 1-128 ASCII characters from
+letters, digits, `.`, `_`, `:`, and `-`; reasons are trimmed UTF-8 strings at most 1024
+bytes. The object decoder is case-sensitive and rejects duplicate keys, case-variant
+keys, unknown fields, null/non-string values, invalid UTF-8, trailing JSON values, and
+oversized bodies. These malformed requests and malformed IDs are HTTP 400.
+Authentication-enabled requests without an actor are HTTP 401 even when lifecycle
+storage is disabled; unknown jobs are HTTP 404; a state/action/request-fingerprint
+conflict is HTTP 409.
+
+Successful first requests and exact replays return HTTP 200:
+
+```json
+{"status":"success","jobId":547,"action":"retry","requestId":"opaque-client-id","applied":true,"currentStatus":"queued"}
+```
+
+The action fingerprint is versioned canonical `{action, normalizedReason,
+normalizedActor}`. Reusing a request ID with a different action, reason, or actor returns
+HTTP 409. Reasons are persisted for audit and never emitted in runtime logs. Retry and
+abandon preserve the immutable job input, candidate progress, and attempt history.
+
+## 7. Invalid silence entries in Alertmanager responses
 
 The Alertmanager silence list is decoded as a syntactically valid JSON array of
 independent raw entries. Each entry is validated before it enters Karma's model.
@@ -131,11 +164,11 @@ Every upstream object in `alerts.json` always contains `warnings: []`. A warning
 and a safe human-readable `message`. Raw entries, invalid values, matchers, comments,
 credentials, and response bodies are never included in warnings or logs.
 
-## 7. Compact silence editor endpoints
+## 8. Compact silence editor endpoints
 
 All routes are under `/silence-editor/` and scoped to one logical target.
 
-### 7.1 Autocomplete
+### 8.1 Autocomplete
 
 - `POST /silence-editor/labels`
 - `POST /silence-editor/values`
@@ -147,7 +180,7 @@ compiles it independently. Responses provide required `contextFingerprint`, exac
 `total`, `truncated`, and target/context-scoped label/value counts. Prefix
 characters are literal; `%` and `_` are not SQL wildcards.
 
-### 7.2 Status verification
+### 8.2 Status verification
 
 - `GET /silence-editor/status?target=...&id=...`
 
@@ -156,7 +189,7 @@ returns the exact form payload, server-derived `isExpired`, selected `member`, a
 opaque `revisionToken`. Missing or invalid rules fail the operation. The periodic
 silence cache is not an authority for this endpoint.
 
-### 7.3 Preview
+### 8.3 Preview
 
 - `POST /silence-editor/preview`
 
@@ -182,7 +215,7 @@ limited to 100,000 matched alerts. Expired/evicted snapshots return HTTP 409 and
 be rebuilt. Preview fails closed if lifecycle storage is unavailable; it does not
 silently return only live alerts.
 
-### 7.4 Submit
+### 8.4 Submit
 
 - `POST /silence-editor/submit`
 

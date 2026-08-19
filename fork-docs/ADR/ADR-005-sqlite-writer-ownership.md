@@ -3,9 +3,8 @@
 - Status: Accepted
 - Date: 2026-08-16
 
-Implementation status: complete and independently accepted. Normative verification is
-recorded in `fork-docs/SPEC/architecture-verification.md`; remaining recheck work is
-tracked in `fork-docs/SPEC/silence-recheck-problems.md`.
+Implementation status: Implemented. Normative verification is recorded in
+`fork-docs/SPEC/architecture-verification.md`.
 
 ## Context
 

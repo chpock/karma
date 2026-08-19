@@ -2,7 +2,7 @@
 
 ## 1. Authority
 
-Status: fresh v1 schema contract; Problem 2 is implemented and independently accepted.
+Status: implemented fresh-v1 schema contract for Problems 2 and 3.
 
 The literal executable DDL has one source of truth:
 `internal/fork/alertlifecycle/store.go` (`bootstrapSchema`). This document describes
@@ -71,12 +71,8 @@ status-only or repeated observations do not.
 
 ### 2.4 Persistent recheck input and progress
 
-Problem 2 implements one atomic immutable job-creation boundary. Its production
-remediation closed exact duplicate integrity, cluster-qualified source completeness,
-timestamp validation, post-CAS error propagation, and per-candidate accounting, but
-Problem 2 is independently accepted.
-The accepted
-creator contract stores the complete source context, exact rule revisions, and every
+Problem 2 implements one atomic immutable job-creation boundary. The creator contract
+stores the complete source context, exact rule revisions, and every
 global/target candidate input after poll reconciliation has finished. No worker, alert
 upsert, or later transition may insert a candidate into an existing job.
 
@@ -85,8 +81,8 @@ upsert, or later transition may insert a candidate into an existing job.
 | `silence_recheck_jobs` | `job_id` | FIFO context, source/job fingerprints, trigger, status, counters, timing, preserved errors |
 | `silence_recheck_job_rules` | `(job_id, source_name, target_key, rule_id)` | Immutable successful-source, target-qualified revision, stable silence identity/content fingerprint, and matcher set |
 | `silence_recheck_job_candidates` | `(job_id, alert_id, target_key)` | Immutable observation token, labels, source membership, and nullable terminal outcome |
-| `silence_recheck_job_attempts` | `attempt_id` | Reserved append-only attempt history for Problem 3 |
-| `silence_recheck_job_operator_actions` | `action_id` | Reserved idempotent operator-action history for Problem 3 |
+| `silence_recheck_job_attempts` | `attempt_id` | Append-only selected-attempt history with durable outcome and retry schedule |
+| `silence_recheck_job_operator_actions` | `action_id` | Append-only idempotent retry/abandon action history |
 
 `source_context_fingerprint` identifies the canonical pinned source status/topology and
 `job_fingerprint` is the unique SHA-256 identity of the complete source, rule, and
@@ -109,9 +105,10 @@ batch transaction. `cursor_alert_id` is only a diagnostic marker; `processed_at`
 `outcome` own resume correctness.
 
 Jobs are strict FIFO. A failed predecessor keeps its first error and blocks later jobs.
-Crash/restart resumes the same pinned rules, observations, and remaining candidates.
-Retry states, attempt history, scheduler ownership, and operator actions are reserved
-by the combined schema and remain Problem 3 behavior.
+Crash/restart resumes the same pinned rules, observations, remaining candidates, retry
+schedule, attempt ledger, and operator action history. Problem 3 owns the six-state
+runtime machine, typed failure policy, one cmd scheduler, and semantic-CAS operator
+recovery on these same rows.
 
 ### 2.5 Global suppression evidence
 
@@ -180,8 +177,10 @@ emitted only after commit.
 
 ## 5. Recheck transaction
 
-Each worker invocation selects the oldest queued/running/failed job. A failed job is
-reported and blocks the queue. For a runnable job, one batch:
+Each worker invocation selects the oldest `queued`, `running`, `retry_wait`, or `failed`
+job. A failed job blocks the queue until operator Retry or Abandon. A `retry_wait` job
+blocks newer work and is runnable only when `next_attempt_at` is due. For a runnable job,
+one batch:
 
 1. loads immutable pinned source status, rules, and candidate input;
 2. loads unprocessed candidate rows by job membership only;
@@ -191,13 +190,23 @@ reported and blocks the queue. For a runnable job, one batch:
    predicates;
 6. writes events and exact target/global evidence;
 7. marks each candidate with one terminal outcome and updates counters;
-8. commits.
+8. inserts the attempt row and updates parent attempt/progress state in the same
+   transaction; and
+9. commits.
 
 `RowsAffected=0` is re-read in the same transaction. A successfully observed stale or
 ineligible state receives its exact terminal outcome; a re-read failure aborts the
 transaction, and an unexplained zero-row result is an invariant error. A live
 reappearance, newer lifecycle episode, or manual Resolve cannot be overwritten by an
 older job.
+
+If selected work rolls back, the same process-local attempt token and attempt number are
+used by a separate immediate-writer failure-bookkeeping transaction. It atomically appends
+`retry_scheduled` or `failed`, updates the parent retry/error fields, and preserves first
+error history. Commit uncertainty blocks another candidate batch until the generic writer
+ledger and complete attempt tuple agree on present or absent. Pre-selection acquisition
+failure and normal shutdown cancellation create no attempt row. See ADR-007 for retry
+delays, acquisition classification, scheduler ownership, and operator recovery.
 
 ## 6. Retention and foreign keys
 

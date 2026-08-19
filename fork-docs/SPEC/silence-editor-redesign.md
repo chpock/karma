@@ -374,7 +374,7 @@ upstream-owned entry points.
 
 ### Stage 1: design decisions
 
-- Completed through the POC and the Q1-Q24 decision record in section 14.
+- Completed through the POC and the Q1-Q25 decision record in section 14.
 
 ### Stage 2: domain and API contract
 

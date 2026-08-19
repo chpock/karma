@@ -11,8 +11,6 @@ import (
 
 var lifecycleHousekeeping lifecycleWorkerOwner
 
-var runAlertLifecycleRecheckForHousekeeping = runAlertLifecycleRecheckOnce
-
 func startAlertLifecycleHousekeeping() {
 	if lifecycleStore == nil || !config.Config.AlertLifecycle.Enabled {
 		return
@@ -84,20 +82,4 @@ func runAlertLifecycleHousekeepingOnce(ctx context.Context) {
 		slog.Int("historyRowsAfter", result.HistoryRowsAfter),
 		slog.Duration("duration", time.Since(startedAt)),
 	)
-
-	runAlertLifecycleRecheckForHousekeeping(ctx)
-}
-
-func runAlertLifecycleRecheckOnce(ctx context.Context) {
-	if lifecycleStore == nil {
-		return
-	}
-	promoted, err := lifecycleStore.RunSilenceRecheckBatchContext(ctx, 1000)
-	if err != nil {
-		runtimeLog.Event(ctx, slog.LevelError, "silence_recheck", "worker_failed", "Alert lifecycle silence recheck failed", slog.Any("error", err))
-		return
-	}
-	if promoted > 0 {
-		runtimeLog.Event(ctx, slog.LevelInfo, "silence_recheck", "batch_promoted", "Alert lifecycle silence recheck promoted alerts", slog.Int("promoted", promoted))
-	}
 }

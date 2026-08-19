@@ -16,6 +16,8 @@ var lifecycleStore *alertlifecycle.Store
 
 var lifecycleRegroup regroupOwner
 
+var lifecycleRecheckScheduler *recheckScheduler
+
 func setupAlertLifecycleStorage() error {
 	if !config.Config.AlertLifecycle.Enabled {
 		runtimeLog.Debug("alert_lifecycle", "storage_disabled", "Alert lifecycle storage is disabled")
@@ -39,6 +41,10 @@ func setupAlertLifecycleStorage() error {
 		currentRows = stats.CurrentRows
 	}
 	lifecycleStore = store
+	lifecycleRecheckScheduler = newRecheckScheduler(store, nil)
+	store.SetRecheckCommitWake(signalAlertLifecycleRecheck)
+	store.SetRecheckReconciledWake(signalAlertLifecycleRecheckReconciled)
+	lifecycleRecheckScheduler.Start()
 	runtimeLog.Info("alert_lifecycle", "storage_initialized", "Alert lifecycle storage initialized", slog.String("path", config.Config.AlertLifecycle.SQLite.Path), slog.String("schema_version", "1"), slog.Int("current_rows", currentRows))
 	startAlertLifecycleBackgroundRegroup()
 	startAlertLifecycleHousekeeping()
@@ -48,6 +54,10 @@ func setupAlertLifecycleStorage() error {
 }
 
 func closeAlertLifecycleStore() error {
+	if lifecycleRecheckScheduler != nil {
+		lifecycleRecheckScheduler.Stop()
+		lifecycleRecheckScheduler = nil
+	}
 	if lifecycleStore == nil {
 		return nil
 	}

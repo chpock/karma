@@ -1,6 +1,9 @@
 package alertlifecycle
 
-import "slices"
+import (
+	"slices"
+	"time"
+)
 
 // LifecycleDimensions are the complete state axes persisted for one global or
 // target alert projection. State is derived and never accepted as independent
@@ -149,8 +152,8 @@ const (
 	RecheckCandidateIncompleteSources RecheckCandidateClass = "incomplete_sources"
 )
 
-func RecheckJobCanRun(jobStatus string, failedPredecessor bool) bool {
-	return !failedPredecessor && (jobStatus == "queued" || jobStatus == "running")
+func RecheckJobCanRun(jobStatus string, nextAttemptAt *time.Time, now time.Time) bool {
+	return recheckQueueEligible(jobStatus, nextAttemptAt, now)
 }
 
 func ClassifyRecheckCandidate(coverageComplete bool, candidate RecheckCandidateClass) (counter string, promote bool) {

@@ -48,9 +48,28 @@ dimension functions.
 
 ## Failure and observability
 
-- Recheck jobs are strict FIFO. A failed predecessor preserves immutable first-error
-  fields plus the latest error fields and blocks later jobs. Each immutable candidate
-  reaches one constrained terminal outcome; parent counters equal processed membership.
+- Recheck jobs are strict FIFO with explicit `queued`, `running`, `retry_wait`, `failed`,
+  `completed`, and `abandoned` states. A failed or not-yet-due retry predecessor preserves
+  immutable first-error fields plus latest error fields and blocks later jobs. Five
+  typed retry waits are persisted; the sixth consecutive retryable failure is terminal.
+  Each immutable candidate reaches one constrained terminal outcome; parent counters
+  equal processed membership.
+- Selected attempts are append-only and tokenized. Pre-selection acquisition failures and
+  normal shutdown cancellation create no attempt. Commit uncertainty is reconciled by
+  the attempt token before another candidate batch can start; transient tuple reads keep
+  reconciliation pending, while only durable absence or mismatch is invariant. Internal
+  recovery deadlines are not shutdown. A connection-invalidating reconciliation read
+  replaces the dedicated writer without losing pending state, and generic-token absence
+  requires attempt-token absence. Selection, committed batches, failure, Retry, and
+  Abandon all persist the result of the same pure job-event reducer. Failed jobs advance
+  only through an audited same-job operator retry or explicit abandonment; both preserve
+  immutable input and progress.
+- The single scheduler wakes only on startup, committed job creation, committed operator
+  action, persisted due time, and a delayed cross-operation reconciliation of a selected
+  recheck attempt. Ordinary or immediately reconciled empty/no-work commits never wake it;
+  housekeeping is not a poller. A durable failed head keeps the owner alive for Retry or
+  Abandon, while a terminal infrastructure disposition exits the scheduler owner until
+  application restart.
 - Stats expose queue depth, current ID/status, progress, skipped count, oldest age,
   and error.
 - HA inconsistency is last-confirmed state: failed coverage cannot clear it; complete

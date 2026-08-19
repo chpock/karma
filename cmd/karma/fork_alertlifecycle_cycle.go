@@ -52,8 +52,6 @@ func runAlertLifecyclePollCycle(successfulUpstreams map[string]bool) {
 		slog.Int("recheckJobsQueued", result.RecheckJobsQueued),
 		slog.Duration("duration", time.Since(startedAt)),
 	)
-
-	runAlertLifecycleRecheckOnce(context.Background())
 }
 
 func countSuccessfulUpstreams(upstreams map[string]bool) (int, int) {

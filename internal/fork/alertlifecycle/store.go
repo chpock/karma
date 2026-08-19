@@ -50,12 +50,14 @@ const (
 	metaSuggestionRevisionPrefix = "suggestion_revision/"
 )
 
-const expectedSchemaLayoutFingerprint = "sha256:58440003c0cb4ac893c0f06e52f5e01dbef63be4c64abd0935cb8792863cb44c"
+const expectedSchemaLayoutFingerprint = "sha256:08a58c07d0b27a1adcf69f0d6fc435012363a26bcea7099ed6e7b3963cacd732"
 
 var (
 	ErrStoreClosing               = errors.New("lifecycle store is closing")
 	ErrStoreClosed                = errors.New("lifecycle store is closed")
 	ErrWriterUnavailable          = errors.New("lifecycle writer is unavailable")
+	ErrWriterAcquisition          = errors.New("lifecycle writer transaction acquisition failed")
+	ErrWriterOperationToken       = errors.New("lifecycle writer operation token generation failed")
 	ErrWriterCommitOutcomeUnknown = errors.New("lifecycle writer commit outcome is unknown")
 	ErrWriterCommitReconciled     = errors.New("lifecycle writer commit was reconciled")
 	ErrWriterOperationInvariant   = errors.New("lifecycle writer operation invariant failed")
@@ -79,6 +81,8 @@ type Store struct {
 	writerCommit               func(*sql.Tx) error
 	writerRollback             func(*sql.Tx) error
 	writerCommitLookup         func(context.Context, string, string) (bool, error)
+	recheckAttemptLookup       func(context.Context, string) (int64, int, string, error)
+	writerOperationToken       func() (string, error)
 	writerTransactionFinished  func(string)
 	beforeCommitLedgerInsert   func(context.Context, string)
 	lifecycleTestHooks         *storeLifecycleTestHooks
@@ -88,6 +92,10 @@ type Store struct {
 	silenceHistoryRetentionTTL time.Duration
 	writeMu                    sync.Mutex
 	recheckBlockedJobLogged    int64
+	recheckCommitWake          func()
+	recheckReconciledWake      func()
+	recheckStateMu             sync.Mutex
+	pendingRecheckFailure      *recheckPendingFailure
 	lifecycleState             lifecycleState
 	writerRecoveryState        writerRecoveryState
 	pendingWriterCommit        *pendingWriterCommit
@@ -103,6 +111,9 @@ type storeLifecycleTestHooks struct {
 	// postCASReadError is test-only fault injection for the Problem 2 evidence matrix.
 	// It is nil in every production Store and has no effect on normal control flow.
 	postCASReadError func(string) error
+	// recheckFault is a test-only named-stage fault boundary for Problem 3.
+	// Production Stores leave it nil and execute the normal SQL path.
+	recheckFault func(string) error
 }
 
 func (s *Store) recheckPostCASReadError(stage string) error {
@@ -111,6 +122,19 @@ func (s *Store) recheckPostCASReadError(stage string) error {
 	}
 	s.lifecycleTestHooks.mu.Lock()
 	hook := s.lifecycleTestHooks.postCASReadError
+	s.lifecycleTestHooks.mu.Unlock()
+	if hook == nil {
+		return nil
+	}
+	return hook(stage)
+}
+
+func (s *Store) recheckStageFault(stage string) error {
+	if s == nil || s.lifecycleTestHooks == nil {
+		return nil
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	hook := s.lifecycleTestHooks.recheckFault
 	s.lifecycleTestHooks.mu.Unlock()
 	if hook == nil {
 		return nil
@@ -159,6 +183,7 @@ const (
 	writerOperationRegroupFailure     = "regroup_failure"
 	writerOperationRecheckBatch       = "recheck_batch"
 	writerOperationRecheckFailure     = "recheck_failure"
+	writerOperationRecheckOperator    = "recheck_operator_action"
 )
 
 var validWriterOperationKinds = map[string]struct{}{
@@ -174,11 +199,13 @@ var validWriterOperationKinds = map[string]struct{}{
 	writerOperationRegroupFailure:     {},
 	writerOperationRecheckBatch:       {},
 	writerOperationRecheckFailure:     {},
+	writerOperationRecheckOperator:    {},
 }
 
 type pendingWriterCommit struct {
 	token     string
 	kind      string
+	cause     error
 	finalizer *writerAfterCommitFinalizer
 }
 
@@ -186,12 +213,22 @@ type writerAfterCommitFinalizer struct {
 	ctx            context.Context
 	operationKind  string
 	reconciled     bool
-	handoff        func(bool)
+	reconcile      func(bool) error
+	reconcileDone  bool
+	reconcileErr   error
+	handoff        func(writerHandoffDisposition)
 	onHandoffError func(error)
 	handoffDone    bool
 	handoffErr     error
 	run            func(bool)
 }
+
+type writerHandoffDisposition uint8
+
+const (
+	writerHandoffImmediate writerHandoffDisposition = iota
+	writerHandoffCrossOperation
+)
 
 type writerCommitOutcome uint8
 
@@ -202,8 +239,10 @@ const (
 )
 
 type writerCommitOutcomeError struct {
-	outcome writerCommitOutcome
-	err     error
+	outcome   writerCommitOutcome
+	operation string
+	err       error
+	cause     error
 }
 
 type writerAcquisitionError struct {
@@ -217,9 +256,51 @@ func (e *writerAcquisitionError) Error() string {
 
 func (e *writerAcquisitionError) Unwrap() error { return e.err }
 
+func (e *writerAcquisitionError) Is(target error) bool {
+	return target == ErrWriterAcquisition || errors.Is(e.err, target)
+}
+
 func (e *writerCommitOutcomeError) Error() string { return e.err.Error() }
 
 func (e *writerCommitOutcomeError) Unwrap() error { return e.err }
+
+func (e *writerCommitOutcomeError) OriginalCause() error {
+	if e.cause != nil {
+		return e.cause
+	}
+	return e.err
+}
+
+func (e *writerCommitOutcomeError) OperationKind() string {
+	if e == nil {
+		return ""
+	}
+	return e.operation
+}
+
+// RecheckWriterCommitDisposition exposes the writer operation provenance needed
+// by the cmd-owned recheck scheduler without exposing the generic writer type.
+func RecheckWriterCommitDisposition(err error) (operation, outcome string, ok bool) {
+	var value *writerCommitOutcomeError
+	if !errors.As(err, &value) {
+		return "", "", false
+	}
+	switch value.outcome {
+	case writerCommitOutcomeCommitted:
+		return value.operation, "committed", true
+	case writerCommitOutcomeNotCommitted:
+		return value.operation, "not_committed", true
+	case writerCommitOutcomeUnknown:
+		return value.operation, "unknown", true
+	default:
+		return value.operation, "", false
+	}
+}
+
+const (
+	RecheckBatchWriterOperation   = writerOperationRecheckBatch
+	RecheckFailureWriterOperation = writerOperationRecheckFailure
+)
 
 const writerRecoveryTimeout = 5 * time.Second
 
@@ -427,6 +508,26 @@ func (s *Store) Close() error {
 	return errors.Join(writerErr, dbErr)
 }
 
+func (s *Store) SetRecheckCommitWake(wake func()) {
+	if s == nil {
+		return
+	}
+	s.writeMu.Lock()
+	s.recheckCommitWake = wake
+	s.writeMu.Unlock()
+}
+
+// SetRecheckReconciledWake installs the wake owner for a recheck commit that was
+// confirmed by a later writer operation. Ordinary recheck commits do not use it.
+func (s *Store) SetRecheckReconciledWake(wake func()) {
+	if s == nil {
+		return
+	}
+	s.writeMu.Lock()
+	s.recheckReconciledWake = wake
+	s.writeMu.Unlock()
+}
+
 const schemaRecreateInstruction = "stop Karma and recreate the disposable lifecycle database, including its -wal and -shm sidecar files; automatic migration is not supported"
 
 func schemaIncompatibleError(message string, cause error) error {
@@ -507,13 +608,20 @@ func withWriterTxValueAfterCommit[T any](ctx context.Context, s *Store, operatio
 		s.writeMu.Unlock()
 		runWriterFinalizer(detachedFinalizer)
 	}()
-	var readyFinalizer *writerAfterCommitFinalizer
-	if readyFinalizer, err = s.ensureWriterReadyLocked(ctx); err != nil {
-		detachedFinalizer = readyFinalizer
-		return value, err
-	}
 	value, detachedFinalizer, err = withOwnedWriterTxValueAfterCommit(ctx, s, operationKind, operation, finalizer)
 	return value, err
+}
+
+func (s *Store) handoffRecheckCommitLocked() {
+	if s != nil && s.recheckCommitWake != nil {
+		s.recheckCommitWake()
+	}
+}
+
+func (s *Store) handoffRecheckReconciledLocked() {
+	if s != nil && s.recheckReconciledWake != nil {
+		s.recheckReconciledWake()
+	}
 }
 
 func withOwnedWriterTxValueAfterCommit[T any](ctx context.Context, s *Store, operationKind string, operation func(*sql.Tx) (T, error), finalizer *writerAfterCommitFinalizer) (value T, detachedFinalizer *writerAfterCommitFinalizer, err error) {
@@ -522,21 +630,24 @@ func withOwnedWriterTxValueAfterCommit[T any](ctx context.Context, s *Store, ope
 	}
 	var readyFinalizer *writerAfterCommitFinalizer
 	if readyFinalizer, err = s.ensureWriterReadyLocked(ctx); err != nil {
+		if errors.Is(err, ErrWriterUnavailable) && !errors.Is(err, ErrWriterCommitOutcomeUnknown) && !IsWriterAcquisitionError(err) {
+			err = &writerAcquisitionError{operation: operationKind, err: err}
+		}
 		return value, readyFinalizer, err
 	}
 	if err = validateWriterOperationKind(operationKind); err != nil {
 		return value, nil, err
 	}
-	token, err := newWriterOperationToken()
+	token, err := s.nextWriterOperationToken()
 	if err != nil {
-		return value, nil, fmt.Errorf("failed to create writer operation token: %w", err)
+		return value, nil, fmt.Errorf("%w: %w", ErrWriterOperationToken, err)
 	}
 	tx, err := s.writerTransactionStarter.BeginTx(ctx, nil)
 	if err != nil {
 		acquisitionErr := &writerAcquisitionError{operation: operationKind, err: err}
 		if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
 			if recoveryErr := s.recoverWriterConnectionLocked(ctx); recoveryErr != nil {
-				return value, nil, errors.Join(acquisitionErr, recoveryErr)
+				return value, nil, errors.Join(acquisitionErr, fmt.Errorf("%w: %w", ErrWriterUnavailable, recoveryErr))
 			}
 		}
 		return value, nil, acquisitionErr
@@ -551,7 +662,7 @@ func withOwnedWriterTxValueAfterCommit[T any](ctx context.Context, s *Store, ope
 					}
 				}
 			} else {
-				s.markWriterCommitUnknownLocked(token, operationKind, finalizer)
+				s.markWriterCommitUnknownLocked(token, operationKind, nil, finalizer)
 				if recoveryErr := s.recoverWriterConnectionLocked(ctx); recoveryErr != nil {
 					s.writerRecoveryState = writerRecoveryUnavailable
 				}
@@ -589,7 +700,18 @@ VALUES(?, ?, ?)
 	}
 	commitErr := commitFn(tx)
 	if commitErr == nil {
-		if handoffErr := runWriterHandoffLocked(finalizer, false); handoffErr != nil {
+		if reconcileErr := runWriterReconciliationLocked(finalizer, true); reconcileErr != nil {
+			if errors.Is(reconcileErr, ErrWriterCommitOutcomeUnknown) {
+				s.markWriterCommitUnknownLocked(token, operationKind, nil, finalizer)
+				if recoveryErr := s.recoverWriterConnectionLocked(ctx); recoveryErr != nil {
+					return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: operationKind, err: errors.Join(ErrWriterCommitOutcomeUnknown, ErrWriterUnavailable, fmt.Errorf("failed to recover after reconciliation error: %w", recoveryErr)), cause: reconcileErr}
+				}
+				return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: operationKind, err: reconcileErr, cause: reconcileErr}
+			}
+			s.writerRecoveryState = writerRecoveryInvariant
+			return value, finalizer, errors.Join(ErrWriterOperationInvariant, reconcileErr)
+		}
+		if handoffErr := runWriterHandoffLocked(finalizer, writerHandoffImmediate); handoffErr != nil {
 			s.writerRecoveryState = writerRecoveryInvariant
 			return value, finalizer, errors.Join(ErrWriterOperationInvariant, handoffErr)
 		}
@@ -599,9 +721,9 @@ VALUES(?, ?, ?)
 	// is ErrTxDone; after an ambiguous/failed commit it closes any open tx.
 	_ = s.rollbackWriterTxLocked(tx)
 
-	s.markWriterCommitUnknownLocked(token, operationKind, finalizer)
+	s.markWriterCommitUnknownLocked(token, operationKind, commitErr, finalizer)
 	if recoveryErr := s.recoverWriterConnectionLocked(ctx); recoveryErr != nil {
-		return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: failed to recover after commit error: %w", ErrWriterCommitOutcomeUnknown, recoveryErr)}
+		return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: operationKind, err: fmt.Errorf("%w: failed to recover after commit error: %w", ErrWriterCommitOutcomeUnknown, recoveryErr), cause: commitErr}
 	}
 	recoveryCtx, cancel := newWriterRecoveryContext(ctx)
 	committed, lookupErr := s.lookupWriterCommitLocked(recoveryCtx, token, operationKind)
@@ -611,22 +733,43 @@ VALUES(?, ?, ?)
 			s.writerRecoveryState = writerRecoveryInvariant
 			return value, nil, lookupErr
 		}
-		return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: failed to reconcile commit: %w", ErrWriterCommitOutcomeUnknown, lookupErr)}
+		lookupErr = s.recoverWriterAfterReconciliationErrorLocked(ctx, lookupErr)
+		return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: operationKind, err: fmt.Errorf("%w: failed to reconcile commit: %w", ErrWriterCommitOutcomeUnknown, lookupErr), cause: commitErr}
 	}
 	if committed {
-		detachedFinalizer = s.pendingWriterCommit.finalizer
-		if detachedFinalizer != nil {
-			detachedFinalizer.reconciled = true
-			if handoffErr := runWriterHandoffLocked(detachedFinalizer, true); handoffErr != nil {
+		pendingFinalizer := s.pendingWriterCommit.finalizer
+		if pendingFinalizer != nil {
+			pendingFinalizer.reconciled = true
+			if reconcileErr := runWriterReconciliationLocked(pendingFinalizer, true); reconcileErr != nil {
+				if errors.Is(reconcileErr, ErrWriterCommitOutcomeUnknown) {
+					reconcileErr = s.recoverWriterAfterReconciliationErrorLocked(ctx, reconcileErr)
+					return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: operationKind, err: reconcileErr, cause: commitErr}
+				}
 				s.writerRecoveryState = writerRecoveryInvariant
-				return value, detachedFinalizer, errors.Join(ErrWriterOperationInvariant, handoffErr)
+				return value, pendingFinalizer, errors.Join(ErrWriterOperationInvariant, reconcileErr)
+			}
+			if handoffErr := runWriterHandoffLocked(pendingFinalizer, writerHandoffImmediate); handoffErr != nil {
+				s.writerRecoveryState = writerRecoveryInvariant
+				return value, pendingFinalizer, errors.Join(ErrWriterOperationInvariant, handoffErr)
 			}
 		}
+		detachedFinalizer = pendingFinalizer
 		s.clearPendingWriterCommitLocked()
 		return value, detachedFinalizer, nil
 	}
+	pendingFinalizer := s.pendingWriterCommit.finalizer
+	if pendingFinalizer != nil {
+		if reconcileErr := runWriterReconciliationLocked(pendingFinalizer, false); reconcileErr != nil {
+			if errors.Is(reconcileErr, ErrWriterCommitOutcomeUnknown) {
+				reconcileErr = s.recoverWriterAfterReconciliationErrorLocked(ctx, reconcileErr)
+				return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: operationKind, err: reconcileErr, cause: commitErr}
+			}
+			s.writerRecoveryState = writerRecoveryInvariant
+			return value, pendingFinalizer, errors.Join(ErrWriterOperationInvariant, reconcileErr)
+		}
+	}
 	s.clearPendingWriterCommitLocked()
-	return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeNotCommitted, err: fmt.Errorf("failed to commit writer transaction: %w", commitErr)}
+	return value, nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeNotCommitted, operation: operationKind, err: fmt.Errorf("failed to commit writer transaction: %w", commitErr), cause: commitErr}
 }
 
 type writerTupleResult struct {
@@ -642,6 +785,13 @@ func newWriterOperationToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(raw[:]), nil
+}
+
+func (s *Store) nextWriterOperationToken() (string, error) {
+	if s != nil && s.writerOperationToken != nil {
+		return s.writerOperationToken()
+	}
+	return newWriterOperationToken()
 }
 
 func validateWriterOperationKind(kind string) error {
@@ -673,7 +823,7 @@ func runWriterFinalizer(finalizer *writerAfterCommitFinalizer) {
 	finalizer.run(finalizer.reconciled)
 }
 
-func runWriterHandoffLocked(finalizer *writerAfterCommitFinalizer, reconciled bool) (handoffErr error) {
+func runWriterHandoffLocked(finalizer *writerAfterCommitFinalizer, disposition writerHandoffDisposition) (handoffErr error) {
 	if finalizer == nil || finalizer.handoffDone {
 		if finalizer == nil {
 			return nil
@@ -696,8 +846,24 @@ func runWriterHandoffLocked(finalizer *writerAfterCommitFinalizer, reconciled bo
 			}
 		}
 	}()
-	finalizer.handoff(reconciled)
+	finalizer.handoff(disposition)
 	return nil
+}
+
+func runWriterReconciliationLocked(finalizer *writerAfterCommitFinalizer, writerCommitted bool) error {
+	if finalizer == nil || finalizer.reconcile == nil {
+		return nil
+	}
+	if finalizer.reconcileDone {
+		return finalizer.reconcileErr
+	}
+	reconcileErr := finalizer.reconcile(writerCommitted)
+	if errors.Is(reconcileErr, ErrWriterCommitOutcomeUnknown) {
+		return reconcileErr
+	}
+	finalizer.reconcileDone = true
+	finalizer.reconcileErr = reconcileErr
+	return finalizer.reconcileErr
 }
 
 func (s *Store) ensureWriterReadyLocked(ctx context.Context) (*writerAfterCommitFinalizer, error) {
@@ -719,7 +885,7 @@ func (s *Store) ensureWriterReadyLocked(ctx context.Context) (*writerAfterCommit
 		}
 		if s.writerConn == nil || s.writerTransactionStarter == nil {
 			if err := s.recoverWriterConnectionLocked(ctx); err != nil {
-				return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: %w", ErrWriterCommitOutcomeUnknown, err)}
+				return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: s.pendingWriterCommit.kind, err: errors.Join(ErrWriterCommitOutcomeUnknown, ErrWriterUnavailable, err), cause: s.pendingWriterCommit.cause}
 			}
 		}
 		recoveryCtx, cancel := newWriterRecoveryContext(ctx)
@@ -730,19 +896,40 @@ func (s *Store) ensureWriterReadyLocked(ctx context.Context) (*writerAfterCommit
 				s.writerRecoveryState = writerRecoveryInvariant
 				return nil, err
 			}
-			return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, err: fmt.Errorf("%w: %w", ErrWriterCommitOutcomeUnknown, err)}
+			err = s.recoverWriterAfterReconciliationErrorLocked(ctx, err)
+			return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: s.pendingWriterCommit.kind, err: fmt.Errorf("%w: %w", ErrWriterCommitOutcomeUnknown, err), cause: s.pendingWriterCommit.cause}
 		}
 		if committed {
 			detachedFinalizer := s.pendingWriterCommit.finalizer
+			operation := s.pendingWriterCommit.kind
 			if detachedFinalizer != nil {
 				detachedFinalizer.reconciled = true
-				if handoffErr := runWriterHandoffLocked(detachedFinalizer, true); handoffErr != nil {
+				if reconcileErr := runWriterReconciliationLocked(detachedFinalizer, true); reconcileErr != nil {
+					if errors.Is(reconcileErr, ErrWriterCommitOutcomeUnknown) {
+						reconcileErr = s.recoverWriterAfterReconciliationErrorLocked(ctx, reconcileErr)
+						return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: s.pendingWriterCommit.kind, err: reconcileErr, cause: s.pendingWriterCommit.cause}
+					}
+					s.writerRecoveryState = writerRecoveryInvariant
+					return detachedFinalizer, errors.Join(ErrWriterOperationInvariant, reconcileErr)
+				}
+				if handoffErr := runWriterHandoffLocked(detachedFinalizer, writerHandoffCrossOperation); handoffErr != nil {
 					s.writerRecoveryState = writerRecoveryInvariant
 					return detachedFinalizer, errors.Join(ErrWriterOperationInvariant, handoffErr)
 				}
 			}
 			s.clearPendingWriterCommitLocked()
-			return detachedFinalizer, &writerCommitOutcomeError{outcome: writerCommitOutcomeCommitted, err: ErrWriterCommitReconciled}
+			return detachedFinalizer, &writerCommitOutcomeError{outcome: writerCommitOutcomeCommitted, operation: operation, err: ErrWriterCommitReconciled}
+		}
+		detachedFinalizer := s.pendingWriterCommit.finalizer
+		if detachedFinalizer != nil {
+			if reconcileErr := runWriterReconciliationLocked(detachedFinalizer, false); reconcileErr != nil {
+				if errors.Is(reconcileErr, ErrWriterCommitOutcomeUnknown) {
+					reconcileErr = s.recoverWriterAfterReconciliationErrorLocked(ctx, reconcileErr)
+					return nil, &writerCommitOutcomeError{outcome: writerCommitOutcomeUnknown, operation: s.pendingWriterCommit.kind, err: reconcileErr, cause: s.pendingWriterCommit.cause}
+				}
+				s.writerRecoveryState = writerRecoveryInvariant
+				return detachedFinalizer, errors.Join(ErrWriterOperationInvariant, reconcileErr)
+			}
 		}
 		s.clearPendingWriterCommitLocked()
 	}
@@ -752,6 +939,44 @@ func (s *Store) ensureWriterReadyLocked(ctx context.Context) (*writerAfterCommit
 		}
 	}
 	return nil, nil
+}
+
+type recheckWriterReconciliation struct {
+	attempted bool
+	resolved  bool
+	operation string
+	outcome   string
+}
+
+func (s *Store) reconcileWriterForRecheck(ctx context.Context) (recheckWriterReconciliation, error) {
+	if s == nil {
+		return recheckWriterReconciliation{}, ErrStoreNotInitialized
+	}
+	s.writeMu.Lock()
+	result := recheckWriterReconciliation{}
+	if s.pendingWriterCommit != nil {
+		result.attempted = true
+		result.operation = s.pendingWriterCommit.kind
+	} else if s.writerRecoveryState == writerRecoveryCommitUnknown {
+		result.attempted = true
+	}
+	finalizer, err := s.ensureWriterReadyLocked(ctx)
+	if err != nil && errors.Is(err, ErrWriterUnavailable) && !errors.Is(err, ErrWriterCommitOutcomeUnknown) && !IsWriterAcquisitionError(err) {
+		err = &writerAcquisitionError{operation: writerOperationRecheckFailure, err: err}
+	}
+	if err == nil && result.attempted {
+		result.resolved = true
+		result.outcome = "absent"
+	}
+	if outcomeOperation, outcome, ok := RecheckWriterCommitDisposition(err); ok && outcome == "committed" {
+		result.attempted = true
+		result.resolved = true
+		result.operation = outcomeOperation
+		result.outcome = "committed"
+	}
+	s.writeMu.Unlock()
+	runWriterFinalizer(finalizer)
+	return result, err
 }
 
 func (s *Store) rollbackWriterTxLocked(tx *sql.Tx) error {
@@ -777,8 +1002,8 @@ func (s *Store) finishWriterCallbackErrorLocked(ctx context.Context, tx *sql.Tx,
 	return errors.Join(operationErr, errWriterRollbackFailed, rollbackErr, ErrWriterUnavailable, recoveryErr)
 }
 
-func (s *Store) markWriterCommitUnknownLocked(token, kind string, finalizer *writerAfterCommitFinalizer) {
-	s.pendingWriterCommit = &pendingWriterCommit{token: token, kind: kind, finalizer: finalizer}
+func (s *Store) markWriterCommitUnknownLocked(token, kind string, cause error, finalizer *writerAfterCommitFinalizer) {
+	s.pendingWriterCommit = &pendingWriterCommit{token: token, kind: kind, cause: cause, finalizer: finalizer}
 	s.writerRecoveryState = writerRecoveryCommitUnknown
 }
 
@@ -803,6 +1028,16 @@ func (s *Store) recoverWriterConnectionLocked(parent context.Context) error {
 	ctx, cancel := newWriterRecoveryContext(parent)
 	defer cancel()
 	return s.replaceWriterConnectionLocked(ctx)
+}
+
+func (s *Store) recoverWriterAfterReconciliationErrorLocked(parent context.Context, reconciliationErr error) error {
+	if !errors.Is(reconciliationErr, driver.ErrBadConn) && !errors.Is(reconciliationErr, sql.ErrConnDone) {
+		return reconciliationErr
+	}
+	if recoveryErr := s.recoverWriterConnectionLocked(parent); recoveryErr != nil {
+		return errors.Join(reconciliationErr, ErrWriterUnavailable, recoveryErr)
+	}
+	return reconciliationErr
 }
 
 func (s *Store) lookupWriterCommitLocked(ctx context.Context, token, kind string) (bool, error) {
@@ -1187,6 +1422,7 @@ CREATE TABLE IF NOT EXISTS silence_recheck_jobs (
     OR (status IN ('failed', 'completed', 'abandoned') AND next_attempt_at IS NULL AND finished_at IS NOT NULL)
     OR (status IN ('queued', 'running') AND next_attempt_at IS NULL AND finished_at IS NULL)
   ),
+  CHECK (status = 'queued' OR started_at IS NOT NULL),
   CHECK (
     (status = 'abandoned' AND abandoned_at IS NOT NULL AND abandoned_at = finished_at)
     OR (status != 'abandoned' AND abandoned_at IS NULL AND abandoned_by IS NULL AND abandon_reason IS NULL)
@@ -1260,13 +1496,18 @@ CREATE TABLE IF NOT EXISTS silence_recheck_job_attempts (
   attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL,
   attempt_token TEXT NOT NULL UNIQUE,
-  attempt_number INTEGER NOT NULL,
+  attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
   started_at TEXT NOT NULL,
-  finished_at TEXT,
+  finished_at TEXT NOT NULL,
   outcome TEXT NOT NULL CHECK (outcome IN ('committed', 'retry_scheduled', 'failed')),
   failure_class TEXT,
   failure_stage TEXT,
   scheduled_retry_at TEXT,
+  CHECK (
+    (outcome = 'committed' AND failure_class IS NULL AND failure_stage IS NULL AND scheduled_retry_at IS NULL)
+    OR (outcome = 'retry_scheduled' AND failure_class IS NOT NULL AND failure_stage IS NOT NULL AND scheduled_retry_at IS NOT NULL)
+    OR (outcome = 'failed' AND failure_class IS NOT NULL AND failure_stage IS NOT NULL AND scheduled_retry_at IS NULL)
+  ),
   UNIQUE (job_id, attempt_number),
   FOREIGN KEY (job_id) REFERENCES silence_recheck_jobs(job_id) ON DELETE CASCADE
 );
@@ -1283,9 +1524,9 @@ CREATE TABLE IF NOT EXISTS silence_recheck_job_operator_actions (
   reason TEXT NOT NULL DEFAULT '',
   request_fingerprint TEXT NOT NULL,
   requested_at TEXT NOT NULL,
-  applied_at TEXT,
-  applied_result TEXT,
-  resulting_status TEXT,
+  applied_at TEXT NOT NULL,
+  applied_result TEXT NOT NULL CHECK (applied_result <> ''),
+  resulting_status TEXT NOT NULL CHECK (resulting_status IN ('queued', 'abandoned')),
   UNIQUE (job_id, request_id),
   FOREIGN KEY (job_id) REFERENCES silence_recheck_jobs(job_id) ON DELETE CASCADE
 );
@@ -3233,6 +3474,11 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 	pollFinalizer := &writerAfterCommitFinalizer{
 		ctx:           ctx,
 		operationKind: writerOperationPoll,
+		handoff: func(writerHandoffDisposition) {
+			if committedPollResult.result.RecheckJobsQueued > 0 {
+				s.handoffRecheckCommitLocked()
+			}
+		},
 		run: func(bool) {
 			emitRuntimeEvents(committedPollResult.events)
 		},
@@ -5245,29 +5491,40 @@ type recheckCandidate struct {
 }
 
 func selectNextRecheckJobTx(tx *sql.Tx) (int64, *string, string, error) {
+	jobID, cursor, status, _, err := selectNextRecheckJobWithDueTx(tx)
+	return jobID, cursor, status, err
+}
+
+func selectNextRecheckJobWithDueTx(tx *sql.Tx) (int64, *string, string, *string, error) {
 	var (
-		jobID  int64
-		cursor sql.NullString
-		status string
+		jobID       int64
+		cursor      sql.NullString
+		status      string
+		nextAttempt sql.NullString
 	)
 	err := tx.QueryRow(`
-SELECT job_id, cursor_alert_id, status
+SELECT job_id, cursor_alert_id, status, next_attempt_at
 FROM silence_recheck_jobs
-WHERE status IN ('queued','running','failed')
+WHERE status IN ('queued','running','retry_wait','failed')
 ORDER BY job_id ASC
 LIMIT 1
-`).Scan(&jobID, &cursor, &status)
+`).Scan(&jobID, &cursor, &status, &nextAttempt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, nil, "", nil
+			return 0, nil, "", nil, nil
 		}
-		return 0, nil, "", fmt.Errorf("failed to select next recheck job: %w", err)
+		return 0, nil, "", nil, fmt.Errorf("failed to select next recheck job: %w", err)
+	}
+	var next *string
+	if nextAttempt.Valid {
+		value := nextAttempt.String
+		next = &value
 	}
 	if cursor.Valid {
 		v := cursor.String
-		return jobID, &v, status, nil
+		return jobID, &v, status, next, nil
 	}
-	return jobID, nil, status, nil
+	return jobID, nil, status, next, nil
 }
 
 func loadRecheckJobRulesTx(tx *sql.Tx, jobID int64) ([]recheckJobRule, error) {

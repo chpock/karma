@@ -220,11 +220,17 @@ warning.
 | `candidate_promoted` | `debug` | Job ID, alert ID, target if target-only, transition ID. |
 | `job_completed` | `info` | Job ID, total counters, total duration. |
 | `job_failed` | `error` on transition | Job ID, stage, preserved root error. |
+| `retry_scheduled` | `info` | Job ID, durable `next_attempt_at`, typed failure class/stage. Emit only after the retry bookkeeping transaction commits. |
+| `failure_persistence_failed` | `error` | Job ID and `stage=persist_failure`; emit when retry/terminal bookkeeping is not confirmed. Keep the process-local pending record and do not start another candidate batch. |
+| `operator_action_applied` | `info` | Job ID, action, opaque request ID, resulting status. Never include the persisted operator reason. |
+| `operator_action_rejected` | `warning` for 4xx, `error` otherwise | Job ID, action, stable reason code, and sanitized error; never include the operator reason. |
 | `job_commit_outcome_unknown` | `error` | `writer_operation=recheck_batch`, job ID, status, queue depth, retry count, `stage=commit_reconcile`, duration. Do not persist a false failed-job state. |
-| `job_commit_reconciled` | `info` | `writer_operation` and duration when a prior durable commit is found; no callback is re-run. |
-| `job_infrastructure_blocked` | `error` except the registered cancellation/deadline and Store lifecycle classes at `debug` | `writer_operation=recheck_batch|recheck_failure`, `stage=batch|failure_persistence`, job ID, exact stage-specific reason code, error; no job failure mutation for infrastructure errors. Batch reasons are `commit_not_committed`, `writer_invariant`, `rollback_failed`, `worker_cancelled`, and `worker_deadline`. Failure-persistence reasons are `failure_persistence_commit_unknown`, `failure_persistence_not_committed`, `failure_persistence_sql_error`, `failure_persistence_rollback_failed`, `failure_persistence_writer_invariant`, `failure_persistence_writer_unavailable`, `failure_persistence_store_closing`, `failure_persistence_store_closed`, `failure_persistence_cancelled`, and `failure_persistence_deadline`. |
+| `job_commit_reconciled` | `info` | Original `writer_operation` and duration when a prior durable commit and its full attempt tuple are found; no callback is re-run, and the original post-commit handoff runs exactly once. |
+| `job_infrastructure_blocked` | `error` except the registered cancellation/deadline and Store lifecycle classes at `debug` | `writer_operation=recheck_batch|recheck_failure`, `stage=batch|failure_persistence`, job ID, exact stage-specific reason code, error; no job failure mutation for infrastructure errors. Batch reasons are `commit_not_committed`, `commit_outcome_unknown`, `writer_unavailable`, `writer_invariant`, `rollback_failed`, `store_closing`, `store_closed`, `worker_cancelled`, and `worker_deadline`. Failure-persistence reasons are `failure_persistence_commit_unknown`, `failure_persistence_not_committed`, `failure_persistence_sql_error`, `failure_persistence_rollback_failed`, `failure_persistence_writer_invariant`, `failure_persistence_writer_unavailable`, `failure_persistence_store_closing`, `failure_persistence_store_closed`, `failure_persistence_cancelled`, and `failure_persistence_deadline`. |
 | `job_infrastructure_contract_violation` | `error` | Job ID when selected, supplied stage/reason, and invariant error. Invalid stage/reason pairs are never normalized and do not mutate job state. |
+| `scheduler_stopped` | `error` | Stable reason (`writer_invariant`, `writer_acquisition_terminal`, `writer_token_generation`, `failure_persistence_terminal`, `select_job`, `read_job_state`, `create_attempt`, `invalid_next_attempt_at`, `queue_state_invariant`, `queue_read_terminal`, or `infrastructure_unclassified`) and sanitized infrastructure error when a terminal pre-attempt, queue-read, or bookkeeping/invariant failure requires operator intervention; no job failure mutation. Internal reconciliation deadlines use reconciliation backoff and never use this event as shutdown. This event terminates the scheduler owner until application restart; later wakes cannot re-enter the terminal path. Durable failed heads are not scheduler stops and remain wakeable for Retry/Abandon. |
 | `failed_job_blocks_queue` | `warning` once, then `debug` while unchanged | Failed job ID and queue depth. Do not overwrite the persisted root error. |
+| `queue_blocked` | `debug` | Failed FIFO head ID/status; a not-yet-due retry head also blocks later jobs. |
 | `queue_empty` | `debug` | Emitted at most once per worker invocation, not per candidate. |
 
 ## 9. Housekeeping and Regroup Events
@@ -236,6 +242,10 @@ warning.
   `debug`): alert TTL deletions, max-limit deletions, silence-history deletions by
   category, vacuum pages, resulting row counts, duration.
 - `housekeeping_failed` (`error`): stage and error.
+- Housekeeping never wakes the recheck scheduler. Startup, committed job creation,
+  committed operator action, persisted due time, and delayed cross-operation reconciliation
+  of a selected recheck attempt are the complete wake-owner set. Ordinary or immediately
+  reconciled empty/no-work commits never wake it.
 
 ### 9.2 Regroup
 

@@ -101,10 +101,9 @@ Delayed-reconciliation and shutdown coverage additionally includes:
 - `TestHistoryPollerStartupReportsStopWinner`, which verifies startup readiness is
   an explicit result rather than a signal-only channel.
 
-Problem 1 remediation is complete and independently accepted. The verification below
+Problem 1 is implemented. The verification below
 names PID ownership, exact regroup severity, deterministic ordering, and real-component
-coverage. Problem 2 is implemented and independently accepted; Problem 3
-retry/scheduler behavior remains pending.
+coverage. Problems 2 and 3 are implemented.
 
 Additional writer/shutdown evidence includes:
 
@@ -180,8 +179,7 @@ These tests enforce the normative rule that an invalid individual silence is abs
 from a successful source snapshot while valid neighbors continue. A structurally
 malformed top-level array fails the complete refresh.
 
-Problem 2 immutable recheck input is implemented and independently accepted. Its evidence
-includes:
+Problem 2 immutable recheck input is implemented. Its evidence includes:
 
 - `TestProblem2SchemaContainsImmutableJobInputAndCombinedRetryTables`,
   `TestProblem2SchemaEnforcesInputConstraintsAndIndexes`,
@@ -260,8 +258,119 @@ make lint
 git diff --check
 ```
 
-Problem 3 retry, scheduler, failure, and operator-recovery behavior is not included in
-this acceptance.
+Problem 3 verification is organized by runtime capability.
+
+**State machine, durable attempts, and retry history**
+
+- `TestProblem3RetryDelay`, `TestProblem3QueueEligibility`, and
+  `TestProblem3StateTransitions` cover the six-state machine, due-time FIFO eligibility,
+  five retry delays, budget exhaustion, committed-progress reset, and operator terminal
+  transitions.
+- `TestProblem3CommittedBatchWritesAttemptLedger`,
+  `TestProblem3TerminalFailurePersistsAttemptWithoutRetry`,
+  `TestProblem3Review2ExactRetryScheduleAndErrorHistory`,
+  `TestProblem3Review2IsolatedFailuresAcrossCommittedBatchesResetBudget`, and
+  `TestProblem3Review2RunningJobResumesAfterRestart` cover committed/retry/failed attempt
+  rows, exact counters and schedule, first/last error history, rollback before failure
+  bookkeeping, and restart.
+- `TestProblem3Review5SixthRetryableFailureLeavesLiveFailedHead` covers the exact fifth
+  retry to sixth terminal-failure boundary while leaving the scheduler owner alive.
+
+**Commit reconciliation and writer recovery**
+
+- `TestProblem3Review2InternalReconciliationDeadlinePreservesAttempt`,
+  `TestProblem3Review2InternalDeadlineResolvesPresentAndAbsent`,
+  `TestProblem3Review2AttemptTupleTransientLookupRetries`,
+  `TestProblem3Review2AttemptTupleTransientClassesRetryAtTransactionBoundary`,
+  `TestProblem3Review2FailureBookkeepingTupleTransientRetriesWithoutSecondAttempt`, and
+  `TestProblem3Review2CommittedRetryBookkeepingRestoresSchedule` cover generic-ledger plus
+  full-attempt-tuple reconciliation without duplicate domain effects.
+- `TestProblem3Review3InvalidGenericLookupConnectionIsReplaced`,
+  `TestProblem3Review3InvalidAttemptTupleConnectionIsReplaced`, and
+  `TestProblem3Review3ReplacementFailurePreservesPendingReconciliation` prove physical
+  connection replacement and pending-state preservation after invalidation.
+- `TestProblem3Review3GenericAbsentAttemptPresentIsInvariant` and
+  `TestProblem3Review3RepresentativeTupleMismatchPreservesCompleteState` enforce
+  dual-ledger agreement with complete no-effects snapshots.
+- `TestProblem3Review6FailureReconciliationUnknownThenPresentThenUnknownUsesFreshBackoff`
+  and the unknown/committed reset tests verify operation provenance, fresh reconciliation
+  backoff, and no duplicate attempt.
+
+**Single scheduler owner and timer semantics**
+
+- `TestRecheckSchedulerWakeIsCapacityOne`,
+  `TestRecheckSchedulerStartsOneOwnerAndStopsIdempotently`,
+  `TestRecheckSchedulerProductionRunnerBackoffAndReset`,
+  `TestRecheckSchedulerReplacesHeadTimerWithoutSleep`, and
+  `TestRecheckSchedulerStartupAndCancellationOwnOneRunner` cover owner startup/shutdown,
+  wake coalescing, acquisition backoff, persisted due-time replacement, and cancellation.
+- `TestRecheckSchedulerLoopUsesIndependentBackoffs`,
+  `TestRecheckSchedulerEachProcessOwnerHasOwnCappedSequence`,
+  `TestRecheckSchedulerLoopCoalescesWakeWhileBatchActive`,
+  `TestRecheckSchedulerLoopDeliversPersistedDueTimer`, and
+  `TestCloseAlertLifecycleStoreJoinsSchedulerBeforeStoreClose` cover independent backoff
+  owners, active-batch wake handling, timer delivery, and Store-close ordering.
+- `TestProblem3Review3SchedulerUsesRealStoreReconciliation`,
+  `TestProblem3Review3JoinedBookkeepingUnknownUsesRealStoreReconciliation`, and
+  `TestProblem3Review3SchedulerCancellationJoinsActiveStoreTransaction` run the real Store
+  boundary with deterministic causal barriers and no sleeps.
+- `TestProblem3Review4WakeCannotBypassProcessLocalBackoff`,
+  `TestProblem3Review4WakeCannotBypassPersistedRetryDueTimer`,
+  `TestProblem3Review4EmptyStoreRunDoesNotSelfWake`,
+  `TestProblem3Review4ReconciledHandoffWakesIdleSchedulerExactlyOnce`, and
+  `TestProblem3Review5ImmediateReconciledEmptyRunDoesNotWake` cover timer ownership,
+  no-spin empty work, and ordinary versus delayed reconciliation handoff.
+- `TestProblem3Review3HousekeepingDoesNotWakeRecheckScheduler` and
+  `TestProblem3Review3TerminalDispositionStopsSchedulerOwner` cover excluded ambient wake
+  ownership and terminal infrastructure shutdown.
+
+**Failure bookkeeping and acquisition classification**
+
+- `TestProblem3Review5FailurePersistenceClassificationMatrix`,
+  `TestProblem3Review5TerminalBookkeepingErrorsDoNotBackoff`, and the retained failure-log
+  regression cover BUSY versus terminal classification, operation-token failure,
+  unchanged state, and exactly-once `job_failed` emission.
+- `TestProblem3Review6FailureBookkeepingAcquisitionIsRetryable`,
+  `TestProblem3Review6FailureBookkeepingSQLConnDoneIsRetryable`, and
+  `TestProblem3Review6TerminalCallbackWithUnavailableCleanupStaysTerminal` preserve the
+  pending attempt across writer recovery without allowing cleanup unavailability to mask a
+  terminal callback.
+- `TestProblem3Review7FailureBookkeepingAcquisitionPrecedence`,
+  `TestProblem3Review7SchedulerAcquisitionPrecedenceMatrix`,
+  `TestProblem3Review8FirstReadinessReplacementCausePrecedenceAndNoEffects`, and
+  `TestProblem3Review8SchedulerRawUnavailableFailsClosed` cover bad/closed connections,
+  BUSY, FULL, corruption, unknown causes, and raw unavailable fail-closed behavior.
+- `TestProblem3Review9RecoveryLinksRetainedAttemptAndCandidateLoop` links the retained
+  pending token to the sole `retry_scheduled` row and proves one candidate-loop entry;
+  `TestProblem3Review9SchedulerTypedUnavailableTerminalCausesStopWithoutTimer` proves the
+  unavailable marker cannot override a terminal underlying cause.
+
+**FIFO and operator recovery**
+
+- `TestProblem3OperatorRetryAbandonAndReplayCAS`,
+  `TestProblem3Review2CompleteFIFOAcrossRestartRetryAndAbandon`,
+  `TestProblem3Review2OperatorReplaySurvivesRestartAndPreservesInput`, and
+  `TestProblem3Review2AbandonReplaySurvivesRestartAndPreservesInput` cover same-job retry,
+  abandonment, exact replay after restart, actor/payload conflicts, and FIFO release.
+- `TestProblem3Review5FailedHeadRetryResumesSameJobThroughLiveScheduler`,
+  `TestProblem3Review5FailedHeadAbandonReleasesLiveSchedulerSuccessor`,
+  `TestProblem3Review6RetryPreservesImmutableInputAndFailureHistory`, and
+  `TestProblem3Review6AbandonPreservesFailedHeadHistoryAndReleasesOnlySuccessor` cover live
+  scheduler recovery plus immutable input, original-attempt, and first-error preservation.
+- `TestRecheckSchedulerCommittedAbandonRunsQueuedSuccessor` proves committed abandonment
+  immediately wakes the successor without a poll or unrelated timer.
+
+**Schema and HTTP boundaries**
+
+- `TestProblem3Review2CompleteSchemaRejectionMatrix` and the extended Problem 3 schema
+  matrix cover status/timestamp, outcome, foreign-key, uniqueness, and accounting
+  constraints with unchanged-state assertions.
+- `TestProblem3Review3RegisteredRouterOperatorContract` and
+  `TestProblem3Review4ApplicationRouterAuthenticationAndActorPropagation` cover actual
+  route registration, configured prefix, strict JSON/body limits, 400/401/404/409 mapping,
+  authenticated actor propagation, and post-commit wake.
+
+Problem 3 is implemented. D10 remains open for Problem 4 observability presentation.
 
 ## Runtime logging
 

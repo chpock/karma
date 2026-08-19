@@ -2,11 +2,9 @@ package alertlifecycle
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"log/slog"
 	"sync"
-	"time"
 
 	runtimeLog "github.com/prymitive/karma/internal/log"
 )
@@ -107,7 +105,7 @@ func validRecheckInfrastructurePair(stage, reason string) bool {
 	switch stage {
 	case "batch":
 		switch reason {
-		case "commit_not_committed", "writer_invariant", "rollback_failed", "worker_cancelled", "worker_deadline":
+		case "commit_not_committed", "commit_outcome_unknown", "writer_unavailable", "writer_invariant", "rollback_failed", "store_closing", "store_closed", "worker_cancelled", "worker_deadline":
 			return true
 		}
 	case "failure_persistence":
@@ -127,94 +125,4 @@ func recheckInfrastructureLogLevel(stage, reason string) slog.Level {
 		return slog.LevelDebug
 	}
 	return slog.LevelError
-}
-
-func recheckFailurePersistenceReason(reason string) string {
-	switch reason {
-	case "commit_outcome_unknown":
-		return "failure_persistence_commit_unknown"
-	case "commit_not_committed":
-		return "failure_persistence_not_committed"
-	case "rollback_failed":
-		return "failure_persistence_rollback_failed"
-	case "writer_invariant":
-		return "failure_persistence_writer_invariant"
-	case "writer_unavailable":
-		return "failure_persistence_writer_unavailable"
-	case "store_closing":
-		return "failure_persistence_store_closing"
-	case "store_closed":
-		return "failure_persistence_store_closed"
-	case "worker_cancelled":
-		return "failure_persistence_cancelled"
-	case "worker_deadline":
-		return "failure_persistence_deadline"
-	default:
-		return "failure_persistence_sql_error"
-	}
-}
-
-func (s *Store) persistRecheckFailure(ctx context.Context, jobID int64, domainErr error, startedAt time.Time) error {
-	completion := newRecheckFailureCompletion()
-	finalizer := &writerAfterCommitFinalizer{
-		ctx:           ctx,
-		operationKind: writerOperationRecheckFailure,
-		handoff: func(bool) {
-			completion.completeCommitted()
-		},
-		onHandoffError: func(err error) {
-			_ = err
-			completion.completeCommitted()
-			completion.completeFinalized()
-		},
-		run: func(bool) {
-			if completion.isCommitted() {
-				runtimeLog.ErrorContext(ctx, "silence_recheck", "job_failed", "Silence recheck job failed", slog.Int64("job_id", jobID), slog.String("stage", "worker"), slog.Any("error", domainErr), slog.Duration("duration", time.Since(startedAt)))
-			}
-			completion.completeFinalized()
-		},
-	}
-
-	for {
-		_, persistErr := withWriterTxValueAfterCommit(ctx, s, writerOperationRecheckFailure, func(tx *sql.Tx) (struct{}, error) {
-			nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
-			_, err := tx.Exec(`
-UPDATE silence_recheck_jobs
-SET status='failed',
-    first_error_message=COALESCE(first_error_message, ?),
-    first_error_class=COALESCE(first_error_class, 'terminal'),
-    first_error_stage=COALESCE(first_error_stage, 'worker'),
-    first_error_at=COALESCE(first_error_at, ?),
-    last_error_message=?,
-    last_error_class='terminal',
-    last_error_stage='worker',
-    last_error_at=?,
-    finished_at=COALESCE(finished_at, ?),
-    next_attempt_at=NULL
-WHERE job_id=? AND status IN ('queued','running','failed')
-`, domainErr.Error(), nowRaw, domainErr.Error(), nowRaw, nowRaw, jobID)
-			return struct{}{}, err
-		}, finalizer)
-		if persistErr == nil {
-			return domainErr
-		}
-		if errors.Is(persistErr, ErrWriterCommitReconciled) {
-			if completion.isCommitted() {
-				return domainErr
-			}
-			continue
-		}
-		reason := recheckSelectedInfrastructureReason(ctx, persistErr)
-		if reason == "commit_outcome_unknown" {
-			if contractErr := emitRecheckInfrastructureBlocked(ctx, jobID, writerOperationRecheckFailure, "failure_persistence_commit_unknown", persistErr); contractErr != nil {
-				return errors.Join(domainErr, persistErr, contractErr)
-			}
-			return errors.Join(domainErr, persistErr)
-		}
-		failureReason := recheckFailurePersistenceReason(reason)
-		if contractErr := emitRecheckInfrastructureBlocked(ctx, jobID, writerOperationRecheckFailure, failureReason, persistErr); contractErr != nil {
-			return errors.Join(domainErr, persistErr, contractErr)
-		}
-		return errors.Join(domainErr, persistErr)
-	}
 }

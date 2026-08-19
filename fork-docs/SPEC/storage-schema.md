@@ -179,8 +179,7 @@ links the effective target history IDs rather than copying or re-evaluating rule
 
 ## 5. Silence-awareness tables
 
-Phase 2 tables in the fresh v1 schema (Problem 2 is implemented and independently
-accepted):
+Phase 2 tables in the implemented fresh-v1 schema for Problems 2 and 3:
 
 - `alertmanager_sources`
 - `silence_rules`
@@ -190,8 +189,8 @@ accepted):
 - `silence_recheck_jobs`
 - `silence_recheck_job_rules`
 - `silence_recheck_job_candidates`
-- `silence_recheck_job_attempts` (reserved for Problem 3 retry history)
-- `silence_recheck_job_operator_actions` (reserved for Problem 3 operator recovery)
+- `silence_recheck_job_attempts` (append-only Problem 3 retry/attempt history)
+- `silence_recheck_job_operator_actions` (append-only Problem 3 operator recovery history)
 - `alert_suppression_cause_history`
 - `alert_suppression_cause_members`
 - `alertmanager_cluster_consistency`
@@ -220,8 +219,15 @@ rows have no foreign key to mutable alert current-state tables and survive alert
 retention. The worker writes one constrained terminal `outcome` and one parent counter
 per candidate.
 
-The attempts and operator-action tables are present in the combined v1 schema for
-Problem 3, but retry scheduling and operator recovery are not implemented by Problem 2.
+Problem 3 uses the v1 rows for durable selected-attempt outcomes, bounded retry schedule,
+full attempt-tuple reconciliation, and idempotent operator retry/abandon actions.
+Attempt rows require positive numbers, non-null start/end timestamps, and outcome-specific
+failure/schedule fields. Operator action rows require both requested/applied timestamps,
+an applied result, and a resulting queued/abandoned status. The parent attempt counter is
+validated against the durable attempt-row count before a new attempt or idempotent
+bookkeeping is accepted. Only `queued` jobs may have null `started_at`; rollback-safe
+failure bookkeeping restores it from the selected attempt. The fresh v1 fingerprint was
+refreshed after these constraints; no migration or compatibility path exists.
 
 Phase 2 matching inputs:
 

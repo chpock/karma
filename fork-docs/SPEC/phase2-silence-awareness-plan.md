@@ -3,8 +3,7 @@
 ## 1. Purpose of this document
 
 This document records the requirements, findings, decisions, and rationale for the
-silence-aware lifecycle. Problem 2 immutable recheck input is implemented and
-independently accepted.
+silence-aware lifecycle. Problem 2 immutable recheck input is implemented.
 
 The original planning order was:
 
@@ -12,11 +11,10 @@ The original planning order was:
 2. derive required data inputs,
 3. design DB schema/storage contracts.
 
-The document contains reviewed requirements, data inputs, and decided architecture
+The document contains approved requirements, data inputs, and decided architecture
 contracts. Exact SQLite DDL lives in `phase2-silence-awareness-schema.md`. The
 feature runtime is in `internal/fork/alertlifecycle`; this document remains the
-design rationale record. Problem 2 implementation status is controlled by the review
-acceptance gate, not by the presence of these tables or functions.
+design rationale record.
 
 ## 2. Why Phase 2 is needed
 
@@ -25,8 +23,8 @@ Primary goal of Phase 2 (original requirement):
 - when silence rules change, the system must re-check stored `inactive` alerts and decide whether some of them should now become `suppressed`.
 
 Before Phase 2, newly created/updated silences could not affect already-stored
-inactive alerts. The runtime recheck worker is intended to provide that behavior under
-the reliability rules below; Problem 2 implementation is independently accepted.
+inactive alerts. The runtime recheck worker provides that behavior under the reliability
+rules below.
 
 Secondary goal:
 
@@ -826,7 +824,8 @@ Decision:
 - jobs run in background batches of 1000 with immutable target-scoped candidate membership,
   persisted terminal outcomes, and no startup blocking or artificial throttle,
 - crash/restart resumes the same job idempotently,
-- a failed predecessor blocks later jobs and keeps persistent warning,
+- a failed predecessor blocks later jobs and keeps persistent warning; retry state,
+  attempt history, and explicit operator recovery are durable,
 - current semantic state and observation tokens are checked immediately before the
   conditional update; correctness-critical labels and source membership come only from
   the pinned candidate input,
@@ -846,7 +845,7 @@ Required observability:
 - processed/total candidates,
 - queue depth and oldest pending run,
 - skipped candidate counts by reason,
-- last error; retry state is reserved for Problem 3 and is not implemented here.
+- last error, retry state, attempt count, and operator recovery status.
 
 ### D11. Original event-evidence linkage decision (superseded by D15/D20)
 
@@ -1247,6 +1246,6 @@ Schema-stage completion required:
 2. normalized suppression and append-only causal history remain separate concepts in schema/API,
 3. raw matching-label capture point and missing-label behavior are selected,
 4. current source set plus immutable per-job input model is accepted,
-5. exact schema v1 DDL, FKs, indexes, and retention rules are written and reviewed.
+5. exact schema v1 DDL, FKs, indexes, and retention rules are written and verified.
 
 All five conditions are satisfied and implemented in fresh schema v1.

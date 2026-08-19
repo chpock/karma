@@ -233,7 +233,7 @@ func newRegroupPhaseFinalizer(ctx context.Context, operationKind string, complet
 	return &writerAfterCommitFinalizer{
 		ctx:           ctx,
 		operationKind: operationKind,
-		handoff: func(bool) {
+		handoff: func(writerHandoffDisposition) {
 			completion.completeCommitted()
 		},
 		onHandoffError: func(err error) {
@@ -535,7 +535,7 @@ func (s *Store) persistRegroupFailure(ctx context.Context, targetFingerprint str
 		return &writerAfterCommitFinalizer{
 			ctx:           ctx,
 			operationKind: writerOperationRegroupFailure,
-			handoff:       func(bool) { completion.completeCommitted() },
+			handoff:       func(writerHandoffDisposition) { completion.completeCommitted() },
 			onHandoffError: func(err error) {
 				_ = err
 				completion.completeCommitted()
