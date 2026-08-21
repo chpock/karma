@@ -1,12 +1,8 @@
 package alertlifecycle
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"log/slog"
-	"strings"
 	"testing"
 )
 
@@ -15,46 +11,75 @@ func TestRecheckInfrastructureVocabularyUsesExactPairs(t *testing.T) {
 		stage  string
 		reason string
 	}{
-		{stage: "batch", reason: "commit_not_committed"},
+		{stage: "batch", reason: "writer_unavailable"},
 		{stage: "batch", reason: "writer_invariant"},
 		{stage: "batch", reason: "rollback_failed"},
+		{stage: "batch", reason: "store_closing"},
+		{stage: "batch", reason: "store_closed"},
 		{stage: "batch", reason: "worker_cancelled"},
 		{stage: "batch", reason: "worker_deadline"},
-		{stage: "failure_persistence", reason: "failure_persistence_commit_unknown"},
-		{stage: "failure_persistence", reason: "failure_persistence_not_committed"},
+		{stage: "batch", reason: "infrastructure_unclassified"},
+		{stage: "batch", reason: "queue_read_terminal"},
 		{stage: "failure_persistence", reason: "failure_persistence_sql_error"},
+		{stage: "failure_persistence", reason: "failure_persistence_rollback_failed"},
+		{stage: "failure_persistence", reason: "failure_persistence_writer_invariant"},
+		{stage: "failure_persistence", reason: "failure_persistence_writer_unavailable"},
+		{stage: "failure_persistence", reason: "failure_persistence_store_closing"},
+		{stage: "failure_persistence", reason: "failure_persistence_store_closed"},
 		{stage: "failure_persistence", reason: "failure_persistence_cancelled"},
+		{stage: "failure_persistence", reason: "failure_persistence_deadline"},
 	}
 	for _, pair := range valid {
-		if !validRecheckInfrastructurePair(pair.stage, pair.reason) {
+		if !ValidRecheckInfrastructurePair(pair.stage, pair.reason) {
 			t.Fatalf("valid pair rejected: %s/%s", pair.stage, pair.reason)
 		}
 	}
-	for _, pair := range [][2]string{{"batch", "custom_cancelled"}, {"failure_persistence", "failure_persistence_custom"}, {"batch", "failure_persistence_not_committed"}} {
-		if validRecheckInfrastructurePair(pair[0], pair[1]) {
+	for _, pair := range [][2]string{{"batch", "custom_cancelled"}, {"failure_persistence", "failure_persistence_custom"}, {"failure_persistence", "failure_persistence_commit_unknown"}, {"failure_persistence", "failure_persistence_not_committed"}, {"batch", "commit_not_committed"}} {
+		if ValidRecheckInfrastructurePair(pair[0], pair[1]) {
 			t.Fatalf("invalid pair accepted: %s/%s", pair[0], pair[1])
 		}
 	}
 }
 
-func TestRecheckInfrastructureInvalidPairEmitsContractViolation(t *testing.T) {
-	previousLogger := slog.Default()
-	var output bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previousLogger) })
-	rootErr := errors.New("invalid reason")
-	err := emitRecheckInfrastructureBlocked(context.Background(), 17, writerOperationRecheckBatch, "custom_cancelled", rootErr)
-	if !errors.Is(err, ErrRecheckInfrastructureContract) || !errors.Is(err, ErrWriterOperationInvariant) {
-		t.Fatalf("invalid pair error: %v", err)
+func TestRecheckInfrastructureInvalidPairIsRejectedBeforeLogging(t *testing.T) {
+	if ValidRecheckInfrastructurePair("batch", "custom_cancelled") {
+		t.Fatal("invalid infrastructure pair was accepted")
 	}
-	if strings.Contains(output.String(), `"event":"job_infrastructure_blocked"`) || !strings.Contains(output.String(), `"event":"job_infrastructure_contract_violation"`) {
-		t.Fatalf("invalid pair event output: %s", output.String())
+}
+
+func TestRecheckFailurePersistenceReasonRoutesOnlyTerminalBookkeepingCauses(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		reason string
+	}{
+		{name: "sql error", err: errors.New("storage failure"), reason: "failure_persistence_sql_error"},
+		{name: "rollback precedence", err: errors.Join(errWriterRollbackFailed, ErrWriterOperationInvariant), reason: "failure_persistence_rollback_failed"},
+		{name: "invariant", err: ErrWriterOperationInvariant, reason: "failure_persistence_writer_invariant"},
+		{name: "writer unavailable", err: ErrWriterUnavailable, reason: "failure_persistence_writer_unavailable"},
+		{name: "closing", err: ErrStoreClosing, reason: "failure_persistence_store_closing"},
+		{name: "closed", err: ErrStoreClosed, reason: "failure_persistence_store_closed"},
+		{name: "cancelled", err: context.Canceled, reason: "failure_persistence_cancelled"},
+		{name: "deadline", err: context.DeadlineExceeded, reason: "failure_persistence_deadline"},
 	}
-	var record map[string]any
-	if err = json.Unmarshal(output.Bytes(), &record); err != nil {
-		t.Fatal(err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RecheckFailurePersistenceReason(tc.err); got != tc.reason {
+				t.Fatalf("reason=%q want=%q", got, tc.reason)
+			}
+			if !ValidRecheckInfrastructurePair("failure_persistence", tc.reason) {
+				t.Fatalf("classified reason is not registered: %s", tc.reason)
+			}
+		})
 	}
-	if record["level"] != "ERROR" || record["supplied_stage"] != "batch" || record["supplied_reason"] != "custom_cancelled" {
-		t.Fatalf("contract violation fields: %v", record)
+	for _, reason := range []string{"failure_persistence_commit_unknown", "failure_persistence_not_committed"} {
+		if ValidRecheckInfrastructurePair("failure_persistence", reason) {
+			t.Fatalf("forbidden commit outcome reason is registered: %q", reason)
+		}
+	}
+	for _, err := range []error{NewRecheckWriterCommitUnknownError("recheck_failure", errors.New("commit unknown")), errors.New("commit not committed")} {
+		if reason := RecheckFailurePersistenceReason(err); reason == "failure_persistence_commit_unknown" || reason == "failure_persistence_not_committed" {
+			t.Fatalf("commit outcome leaked into terminal reason: %q", reason)
+		}
 	}
 }

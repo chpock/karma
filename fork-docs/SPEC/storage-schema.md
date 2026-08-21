@@ -100,7 +100,9 @@ semantic recheck source-context generation.
 
 ### 3.4 `lifecycle_writer_commits`
 
-Durable commit ledger used only to reconcile an uncertain SQLite commit.
+Durable commit ledger whose only semantic purpose is reconciling an uncertain SQLite
+commit. Every committed Store writer invocation appends one row, including an invocation
+that returns an existing idempotent operator result without changing domain state.
 
 - `operation_token TEXT PRIMARY KEY` (opaque, generated before the transaction)
 - `operation_kind TEXT NOT NULL`

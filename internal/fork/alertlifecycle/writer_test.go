@@ -1998,8 +1998,9 @@ func TestRecheckDelayedCommitReplaysCommittedEventsExactlyOnce(t *testing.T) {
 	if _, err = store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitOutcomeUnknown) {
 		t.Fatalf("first recheck outcome: %v", err)
 	}
-	if _, err = store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-		t.Fatalf("delayed recheck outcome: %v", err)
+	result, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+	if err != nil || result.Disposition != RecheckBatchCommitted || result.Status != "completed" {
+		t.Fatalf("delayed recheck result=%+v err=%v", result, err)
 	}
 	logged := logOutput.String()
 	for _, event := range []string{"job_commit_reconciled", "job_started", "job_completed"} {

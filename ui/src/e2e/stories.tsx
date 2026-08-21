@@ -17,6 +17,7 @@ import { AlertStore } from "Stores/AlertStore";
 import { Settings } from "Stores/Settings";
 import { SilenceFormStore } from "Stores/SilenceFormStore";
 
+import { EmptyAPIResponse } from "__fixtures__/Fetch";
 import { MockGrid, MockGroup } from "__fixtures__/Stories";
 import { MockAlert, MockAlertGroup, MockSilence } from "__fixtures__/Alerts";
 
@@ -34,6 +35,7 @@ import { OverviewModalContent } from "Components/OverviewModal/OverviewModalCont
 import { ManagedSilence } from "Components/ManagedSilence";
 import { SilenceModalContent } from "Components/SilenceModal/SilenceModalContent";
 import { Toast } from "Components/Toast";
+import { ForkLifecycleWarning } from "Components/ForkLifecycleWarning";
 import {
   ToastMessage,
   UpgradeToastMessage,
@@ -121,6 +123,8 @@ const countersData = {
 };
 
 const originalFetch = window.fetch;
+const forkLifecycleWarningActionCounts = new Map<string, number>();
+const forkLifecycleWarningGetCounts = new Map<string, number>();
 window.fetch = async (
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -132,6 +136,10 @@ window.fetch = async (
         ? input.toString()
         : input.url;
   const story = window.location.hash.replace("#", "").split("?")[0];
+  const visualState = sessionStorage.getItem("forkLifecycleWarningVisualState") || "all";
+  const visualTheme = sessionStorage.getItem("forkLifecycleWarningVisualTheme") || "default";
+  const forkLifecycleWarningKey =
+    `${visualTheme}:${visualState}`;
 
   if (url.includes("/silence-editor/labels")) {
     return jsonResponse({
@@ -275,6 +283,126 @@ window.fetch = async (
       submittedBy: "storybook",
       silenceID: "silence-storybook",
     });
+  }
+
+  if (
+    url.includes("/alerts-history/warning") &&
+    story === "ForkLifecycleWarning"
+  ) {
+    const getCount = (forkLifecycleWarningGetCounts.get(forkLifecycleWarningKey) ?? 0) + 1;
+    forkLifecycleWarningGetCounts.set(forkLifecycleWarningKey, getCount);
+    if (visualState === "refresh-error" && getCount > 2) {
+      return new Response(JSON.stringify({ error: "private backend detail" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (
+      (visualState === "success" &&
+        (forkLifecycleWarningActionCounts.get(forkLifecycleWarningKey) ?? 0) >= 1) ||
+      (forkLifecycleWarningActionCounts.get(forkLifecycleWarningKey) ?? 0) >= 2
+    ) {
+      return jsonResponse({
+        status: "ok",
+        storageEnabled: true,
+        dbExpectedState: true,
+        issues: [],
+      });
+    }
+    const issues = [
+      {
+        kind: "regroup_out_of_date",
+        severity: "warning",
+        summary: "Alert lifecycle grouping is out of date",
+        metadata: {
+          storedFingerprint: "sha256:old",
+          expectedFingerprint: "sha256:new",
+        },
+      },
+      {
+        kind: "regroup_in_progress",
+        severity: "warning",
+        summary: "Alert lifecycle regroup is in progress",
+        metadata: { processed: 42, total: 100 },
+      },
+      {
+        kind: "regroup_failed",
+        severity: "error",
+        summary: "Alert lifecycle regroup failed",
+        metadata: { error: "writer unavailable", processed: 12, total: 100 },
+      },
+      {
+        kind: "silence_ha_inconsistent",
+        severity: "warning",
+        summary: "Alertmanager silence state is inconsistent across HA members",
+        metadata: { targetNames: ["production", "staging"] },
+      },
+      {
+        kind: "recheck_retrying",
+        severity: "warning",
+        summary: "Silence recheck is waiting to retry",
+        metadata: {
+          jobId: 546,
+          status: "retry_wait",
+          retryCount: 2,
+          nextAttemptAt: "2018-08-14T17:10:00Z",
+          lastFailureStage: "persist_candidate",
+        },
+      },
+      {
+        kind: "recheck_blocked",
+        severity: "error",
+        summary: "Silence recheck queue is blocked",
+        metadata: {
+          jobId: 547,
+          status: "failed",
+          firstFailureStage: "persist_candidate",
+          firstFailureAt: "2018-08-14T16:55:00Z",
+        },
+      },
+    ].map((issue) =>
+      visualState === "overflow" && issue.kind === "recheck_blocked"
+        ? {
+            ...issue,
+            summary: `${issue.summary}: ${"long-unbroken-observability-content-".repeat(8)}`,
+          }
+        : issue,
+    ).filter((issue) =>
+      visualState === "warning-only"
+        ? issue.severity === "warning"
+        : visualState === "blocked-only"
+          ? issue.kind === "recheck_blocked"
+          : true,
+    );
+    return jsonResponse({
+      status: "ok",
+      storageEnabled: true,
+      dbExpectedState: false,
+      issues,
+    });
+  }
+
+  if (
+    url.includes("/alerts-history/recheck/") &&
+    story === "ForkLifecycleWarning"
+  ) {
+    const actionCount = (forkLifecycleWarningActionCounts.get(forkLifecycleWarningKey) ?? 0) + 1;
+    forkLifecycleWarningActionCounts.set(forkLifecycleWarningKey, actionCount);
+    if (visualState === "action-error") {
+      return new Response("queue changed", { status: 409 });
+    }
+    if (visualState === "refresh-error" || visualState === "success") {
+      return jsonResponse({ status: "success" });
+    }
+    if (actionCount === 1) {
+      await new Promise<void>((resolve) => {
+        window.addEventListener("fork-warning-release", () => resolve(), {
+          once: true,
+        });
+      });
+      return new Response("queue changed", { status: 409 });
+    }
+    return jsonResponse({ status: "success" });
   }
 
   if (url.includes("labelNames.json"))
@@ -559,6 +687,22 @@ const navBarPausedStory = (): React.ReactNode => {
       silenceFormStore={silenceFormStore}
       fixedTop={false}
     />
+  );
+};
+
+const forkLifecycleWarningStory = (): React.ReactNode => {
+  const alertStore = makeAlertStore();
+  const alertsResponse = EmptyAPIResponse();
+  alertsResponse.filters = [];
+  alertsResponse.authentication = {
+    enabled: true,
+    username: "operator@example.com",
+  };
+  alertStore.parseAPIResponse(alertsResponse);
+  return (
+    <div className="p-3" style={{ maxWidth: "900px" }}>
+      <ForkLifecycleWarning alertStore={alertStore} />
+    </div>
   );
 };
 
@@ -860,6 +1004,7 @@ const stories: StoryMap = {
   RetainedSuppressionEvidence: retainedSuppressionEvidenceStory,
   NavBar: navBarStory,
   NavBarPaused: navBarPausedStory,
+  ForkLifecycleWarning: forkLifecycleWarningStory,
   FatalError: fatalErrorStory,
   UpgradeNeeded: upgradeNeededStory,
   ReloadNeeded: reloadNeededStory,

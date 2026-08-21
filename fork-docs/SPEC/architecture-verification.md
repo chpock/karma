@@ -370,7 +370,103 @@ Problem 3 verification is organized by runtime capability.
   route registration, configured prefix, strict JSON/body limits, 400/401/404/409 mapping,
   authenticated actor propagation, and post-commit wake.
 
-Problem 3 is implemented. D10 remains open for Problem 4 observability presentation.
+Problem 8 in `silence-recheck-problems.md` records the post-acceptance selected-error and
+shutdown-precedence branch that is not covered by this accepted Problem 3 matrix and must
+close before the final end-to-end gate.
+
+Problem 9 records the independent generic writer diagnostic redaction/event-registration
+gap that must close before the final runtime-logging and end-to-end gate.
+
+Problem 4 verification is organized by presentation capability. It is implemented and
+independently accepted. Operator replay-ledger semantics are defined by ADR-005, ADR-007,
+`storage-schema.md`, and `implementation-contracts.md`.
+
+**Typed worker result and event ownership**
+
+- Nil-error queue dispositions, transaction-owned snapshots, nullable queue depth,
+  final-batch events, and selection-status capture are implemented. Delayed batch,
+  retry, and terminal reconciliation return the retained pre-Commit typed payload even
+  when the read pool is unavailable. Immediate and delayed retry/terminal failures use one
+  after-unlock finalizer for Store-owned events and cleanup. Operator transitions publish a
+  separate finalization barrier before writer release; worker pre-check and in-transaction
+  checks prevent selection before `operator_action_applied` and its scheduler wake. An absent
+  `recheck_batch` reconciliation transfers the retained pending record to
+  `recheck_failure` before retrying bookkeeping, so the failure finalizer owns cleanup.
+- The pre-selection/selected ownership split, acquisition-edge reset, terminal registry,
+  safe optional job identity, and exact `job_state_conflict` category are implemented.
+  Immediate/delayed barrier tests cover causal ordering, wakes, pending completion, replay,
+  and subsequent Retry/Abandon progress. Exact event values, delayed operator-finalizer
+  blocking, semantic replay equality, and the one-row operational writer-ledger delta are
+  implemented. Expected semantic phases, all-field pending state, deterministic ledger
+  token/kind/order, delayed pre-finalization records, complete replay event sets,
+  no-new-attempt checks, and exact zero-offset UTC ledger bounds are present. The
+  operator-triggered delayed reconciliation/finalizer/retry race is covered by the
+  first/second `after_precheck` causal matrix.
+- `TestProblem4PromotionEventsCarryCommittedTransitionIDs` and the deterministic multi-batch
+  matrix cover committed transition IDs, exact immediate/delayed batch-local records,
+  cumulative completion counters/duration, levels, ordering, and stable repeated deferral.
+
+**Strict stats and warning APIs**
+
+- Registered HTTP tests cover all six warning variants and all six job statuses with exact
+  recursive values, nullability, types, field counts, and no extras. The malformed tuple matrix
+  covers every missing, empty, whitespace, and invalid-time first/last member.
+  `TestProblem4RegisteredRouterExactMatrix` covers both actions across authentication,
+  marker, Fetch Metadata, media, body, not-found, state/request conflict, storage failure,
+  success, and replay with exact response bodies. The success transition decodes all six tables,
+  validates semantic and writer-ledger changes, runs reachable success/replay redaction, and
+  compares every operator-action column. Exact zero-offset UTC action/ledger causal bounds are
+  checked against the measured request interval without tolerance.
+
+**Best-effort metadata and UI presentation**
+
+- Transaction-local/post-commit seams, typed infrastructure precedence, safe success
+  projections, poll redaction, and retained operator event ownership are implemented. Control
+  and fault runs compare operation-owned state on the main paths.
+   `TestProblem4FailureEventPanicMatchesControlAndRecovers` compares exact write sets and
+  typed results for immediate/delayed `job_selected`/`job_failed` panics, then proves
+  Retry/Abandon recovery and pending cleanup. The same matrix observes wakes before failure,
+  compares failure/operator/progress event sequences, phase snapshots, final normalized
+   writer-ledger rows, and real Abandon next-head progress. Controlled result timestamps are
+   compared without normalization and each path requires the exact expected wake-phase sequence.
+- Production request generations and safe error normalization are implemented. Tests start a
+  stale JSON parse before advancing generation and prove its rejection cannot replace the new
+  result. A stale retry timer cannot clear a newer pending generation's loading/retry state.
+- Chromium, Firefox, and Android remain the scoped visual projects. Fixtures isolate and assert
+  exact issue kinds and confirmation/cancel/loading/error/success/overflow states. Disabled
+  controls differ by color, dashed border, and cursor while retaining semantic colors. Durable
+  project-specific JSON snapshots record every simultaneously visible control. Interactive
+  captures are measured before screenshots and focus states prove required contrast. The
+  `focus-cancel-confirmation` and `focus-cancel-dismiss` states prove keyboard-visible focus.
+  The `Fork lifecycle warning warning-only state`, `blocked-only state`, and `independent states
+  are visually distinct` tests call `measureProblem4WarningState` before capture and persist
+  state-specific JSON artifacts. Problem 4 visual evidence is closed.
+
+**Problem 4 final completion gate (2026-08-21)**
+
+```sh
+go test ./internal/fork/alertlifecycle -run Problem4 -count=1 -timeout 180s
+go test ./cmd/karma -run Problem4 -count=1 -timeout 180s
+npm --prefix ui test -- --runInBand \
+  src/Components/ForkLifecycleWarning/index.test.tsx \
+  src/Components/MainModal/Configuration/ForkStorageStats.test.tsx \
+  src/Hooks/useFetchGet.test.tsx \
+  src/Stores/AlertStore.test.ts
+npm --prefix ui run test:visual -- --grep "Fork lifecycle warning"
+go test ./... -count=1 -timeout 180s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test -race ./cmd/karma -count=1 -timeout 180s
+npm --prefix ui test -- --runInBand
+npm --prefix ui run build
+make lint
+git diff --check
+```
+
+All commands passed. The focused UI matrix ran 108 tests; the scoped Chromium, Firefox,
+and Android visual matrix ran 18 tests; the full UI matrix ran 1200 tests with two intentional
+skips and 78 snapshots; lint reported zero issues. The two race packages ran sequentially as
+required by the shared testscript-resource contract. Problem 4 is implemented and
+independently accepted.
 
 ## Runtime logging
 

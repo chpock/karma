@@ -293,8 +293,8 @@ func TestProblem3Review6UnknownFailureReconciliationResetsSelectionOwners(t *tes
 	timer := clock.NewTimer(time.Second)
 	scheduler.backoffStep[recheckBackoffAcquisition] = 4
 	scheduler.backoffStep[recheckBackoffPreAttempt] = 3
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, alertlifecycle.NewRecheckWriterCommitUnknownError(
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckWriterCommitUnknownError(
 			alertlifecycle.RecheckFailureWriterOperation,
 			errors.New("review6 failure bookkeeping commit unknown"),
 		)
@@ -320,8 +320,8 @@ func TestProblem3Review6FailureBookkeepingAcquisitionUsesAcquisitionOwner(t *tes
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
 	scheduler.backoffStep[recheckBackoffBookkeeping] = 3
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, alertlifecycle.NewRecheckFailurePersistenceError(
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckFailurePersistenceError(
 			errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5)),
 			true,
 		)
@@ -348,12 +348,12 @@ func TestProblem3Review6CommittedFailureReconciliationResetsAllCompletedOwners(t
 	scheduler.backoffStep[recheckBackoffBookkeeping] = 2
 	scheduler.backoffStep[recheckBackoffReconciliation] = 4
 	runs := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		runs++
 		if runs == 1 {
-			return 0, alertlifecycle.NewRecheckWriterCommitReconciledError(alertlifecycle.RecheckFailureWriterOperation)
+			return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckWriterCommitReconciledError(alertlifecycle.RecheckFailureWriterOperation)
 		}
-		return 0, schedulerPreAttemptError{}
+		return alertlifecycle.RecheckBatchResult{}, schedulerPreAttemptError{}
 	}
 
 	scheduler.process(timer, nil)
@@ -393,8 +393,11 @@ func TestProblem3Review6FailureReconciliationUnknownThenPresentThenUnknownUsesFr
 			}
 			return schedulerSQLiteError(5)
 		},
-		WriterCommitLookup: func(context.Context, string, string) (bool, error) {
+		WriterCommitLookup: func(_ context.Context, _, operation string) (bool, error) {
 			lookupCalls++
+			if operation == "recheck_operator_action" {
+				return true, nil
+			}
 			if lookupCalls == 2 {
 				return true, nil
 			}
@@ -416,8 +419,12 @@ func TestProblem3Review6FailureReconciliationUnknownThenPresentThenUnknownUsesFr
 	}
 	clock.timer.ch <- now.Add(time.Second)
 	second := <-runs
-	if !errors.Is(second.err, alertlifecycle.ErrWriterCommitReconciled) {
+	if !alertlifecycle.IsRecheckDurableFailure(second.err) || second.result.Disposition != alertlifecycle.RecheckBatchJobFailed {
 		t.Fatalf("present reconciliation result=%+v", second)
+	}
+	actor := "review6-reconciliation"
+	if _, err := store.RetryRecheckJobContext(context.Background(), 1, "review6-reconciliation-retry", "retry after durable failure", &actor, now.Add(time.Second)); err != nil {
+		t.Fatalf("retry after present reconciliation=%v", err)
 	}
 	third := <-runs
 	if !errors.Is(third.err, alertlifecycle.ErrWriterCommitOutcomeUnknown) || !errors.Is(third.err, alertlifecycle.ErrRecheckFailurePersistence) {
@@ -442,8 +449,8 @@ func TestProblem3Review6FailureReconciliationUnknownThenPresentThenUnknownUsesFr
 	if err := db.QueryRow(`SELECT attempt_count FROM silence_recheck_jobs WHERE job_id=1`).Scan(&attemptCount); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != 1 || attemptCount != 1 {
-		t.Fatalf("reconciliation created duplicate attempt rows=%d parent=%d", attempts, attemptCount)
+	if attempts != 2 || attemptCount != 2 {
+		t.Fatalf("reconciliation attempt accounting rows=%d parent=%d", attempts, attemptCount)
 	}
 	scheduler.Stop()
 }

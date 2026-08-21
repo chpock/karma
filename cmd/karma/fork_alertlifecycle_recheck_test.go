@@ -37,12 +37,16 @@ func TestRecheckOperatorRoutesValidateBodyAuthenticationAndJob(t *testing.T) {
 	t.Cleanup(func() { config.Config.Authentication.Enabled = previousAuth })
 	requestWithJob := func(body []byte) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, "/alerts-history/recheck/1/retry", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(recheckOperatorRequestHeader, "recheck-operator")
 		routeContext := chi.NewRouteContext()
 		routeContext.URLParams.Add("jobID", "1")
 		return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeContext))
 	}
 	requestWithJobID := func(jobID string, body []byte) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, "/alerts-history/recheck/"+jobID+"/retry", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(recheckOperatorRequestHeader, "recheck-operator")
 		routeContext := chi.NewRouteContext()
 		routeContext.URLParams.Add("jobID", jobID)
 		return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeContext))
@@ -190,19 +194,35 @@ func TestRecheckOperatorRoutesValidateBodyAuthenticationAndJob(t *testing.T) {
 		router := chi.NewRouter()
 		router.Post(getViewURL("/alerts-history/recheck/{jobID}/retry"), retryRecheckJob)
 		recorder := httptest.NewRecorder()
-		router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/review-prefix/alerts-history/recheck/1/retry", bytes.NewReader([]byte(`{"requestId":"prefixed"}`))))
+		prefixed := httptest.NewRequest(http.MethodPost, "/review-prefix/alerts-history/recheck/1/retry", bytes.NewReader([]byte(`{"requestId":"prefixed"}`)))
+		prefixed.Header.Set("Content-Type", "application/json")
+		prefixed.Header.Set(recheckOperatorRequestHeader, "recheck-operator")
+		router.ServeHTTP(recorder, prefixed)
 		if recorder.Code != http.StatusConflict {
 			t.Fatalf("prefixed route status=%d body=%s", recorder.Code, recorder.Body.String())
 		}
 	})
 
 	t.Run("missing actor is unauthorized", func(t *testing.T) {
+		var logs bytes.Buffer
+		previousLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		defer slog.SetDefault(previousLogger)
 		config.Config.Authentication.Enabled = true
-		req := requestWithJob([]byte(`{"requestId":"r1"}`))
-		recorder := httptest.NewRecorder()
-		retryRecheckJob(recorder, req)
-		if recorder.Code != http.StatusUnauthorized {
-			t.Fatalf("status=%d, want 401", recorder.Code)
+		for _, action := range []string{"retry", "abandon"} {
+			req := requestWithJob([]byte(`{"requestId":"r1","reason":"private"}`))
+			recorder := httptest.NewRecorder()
+			if action == "retry" {
+				retryRecheckJob(recorder, req)
+			} else {
+				abandonRecheckJob(recorder, req)
+			}
+			if recorder.Code != http.StatusUnauthorized || strings.TrimSpace(recorder.Body.String()) != `{"error":"authentication required"}` {
+				t.Fatalf("%s status=%d body=%s, want exact 401", action, recorder.Code, recorder.Body.String())
+			}
+		}
+		if strings.Contains(logs.String(), `"component":"silence_recheck"`) || strings.Contains(logs.String(), "private") {
+			t.Fatalf("global auth emitted Problem 4 event or body: %s", logs.String())
 		}
 		config.Config.Authentication.Enabled = false
 	})
@@ -218,6 +238,36 @@ func TestRecheckOperatorRoutesValidateBodyAuthenticationAndJob(t *testing.T) {
 		config.Config.Authentication.Enabled = false
 		if recorder.Code != http.StatusUnauthorized {
 			t.Fatalf("status=%d, want 401", recorder.Code)
+		}
+	})
+
+	t.Run("operator boundary rejects missing marker before storage access", func(t *testing.T) {
+		req := requestWithJob([]byte(`{"requestId":"boundary"}`))
+		req.Header.Del(recheckOperatorRequestHeader)
+		recorder := httptest.NewRecorder()
+		retryRecheckJob(recorder, req)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("status=%d, want 403", recorder.Code)
+		}
+	})
+
+	t.Run("operator boundary rejects non-json content", func(t *testing.T) {
+		req := requestWithJob([]byte(`{"requestId":"boundary"}`))
+		req.Header.Set("Content-Type", "text/plain")
+		recorder := httptest.NewRecorder()
+		retryRecheckJob(recorder, req)
+		if recorder.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("status=%d, want 415", recorder.Code)
+		}
+	})
+
+	t.Run("operator boundary rejects cross-site fetch", func(t *testing.T) {
+		req := requestWithJob([]byte(`{"requestId":"boundary"}`))
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		recorder := httptest.NewRecorder()
+		retryRecheckJob(recorder, req)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("status=%d, want 403", recorder.Code)
 		}
 	})
 }

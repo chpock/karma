@@ -89,10 +89,10 @@ func TestProblem3Review2InternalDeadlineResolvesPresentAndAbsent(t *testing.T) {
 				t.Fatal("pending attempt was not retained")
 			}
 			token := pending.Attempt.Token
-			_, secondErr := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+			secondResult, secondErr := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
 			if present {
-				if !errors.Is(secondErr, ErrWriterCommitReconciled) {
-					t.Fatalf("present reconciliation=%v", secondErr)
+				if secondErr != nil || secondResult.Disposition != RecheckBatchCommitted || secondResult.Status != "completed" {
+					t.Fatalf("present reconciliation result=%+v err=%v", secondResult, secondErr)
 				}
 				if _, thirdErr := store.RunSilenceRecheckBatchContext(context.Background(), 1000); thirdErr != nil {
 					t.Fatal(thirdErr)
@@ -321,8 +321,9 @@ func TestProblem3Review2AttemptTupleTransientLookupRetries(t *testing.T) {
 	if store.writerRecoveryState != writerRecoveryCommitUnknown || store.pendingWriterCommit == nil || store.pendingWriterCommit.finalizer.reconcileDone {
 		t.Fatalf("transient tuple lookup was finalized: state=%d pending=%+v", store.writerRecoveryState, store.pendingWriterCommit)
 	}
-	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-		t.Fatalf("tuple retry outcome=%v", err)
+	result, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+	if err != nil || result.Disposition != RecheckBatchCommitted || result.Status != "completed" {
+		t.Fatalf("tuple retry result=%+v err=%v", result, err)
 	}
 	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); err != nil {
 		t.Fatal(err)
@@ -334,7 +335,7 @@ func TestProblem3Review2AttemptTupleTransientLookupRetries(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_job_attempts WHERE job_id=1`).Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if lookupCalls != 3 || attempts != 1 || attemptCount != 1 || processed != 1 || store.pendingRecheckFailureSnapshot() != nil {
+	if lookupCalls != 2 || attempts != 1 || attemptCount != 1 || processed != 1 || store.pendingRecheckFailureSnapshot() != nil {
 		t.Fatalf("tuple retry state: lookups=%d attempts=%d count=%d processed=%d pending=%+v", lookupCalls, attempts, attemptCount, processed, store.pendingRecheckFailureSnapshot())
 	}
 }
@@ -371,8 +372,9 @@ func TestProblem3Review2AttemptTupleTransientClassesRetryAtTransactionBoundary(t
 			if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitOutcomeUnknown) || errors.Is(err, ErrWriterOperationInvariant) {
 				t.Fatalf("transient tuple error=%v", err)
 			}
-			if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-				t.Fatalf("tuple retry=%v", err)
+			result, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+			if err != nil || result.Disposition != RecheckBatchCommitted || result.Status != "completed" {
+				t.Fatalf("tuple retry result=%+v err=%v", result, err)
 			}
 			if calls != 2 || store.writerRecoveryState != writerRecoveryHealthy {
 				t.Fatalf("tuple calls=%d writer_state=%d", calls, store.writerRecoveryState)
@@ -449,9 +451,6 @@ func TestProblem3Review2FailureBookkeepingTupleTransientRetriesWithoutSecondAtte
 	if pending := store.pendingRecheckFailureSnapshot(); pending == nil || store.pendingWriterCommit == nil || store.pendingWriterCommit.finalizer.reconcileDone {
 		t.Fatalf("transient bookkeeping state pendingAttempt=%+v pendingWriter=%+v", pending, store.pendingWriterCommit)
 	}
-	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-		t.Fatalf("bookkeeping tuple retry=%v", err)
-	}
 	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !IsRecheckDurableFailure(err) {
 		t.Fatalf("durable failed-head result=%v", err)
 	}
@@ -463,7 +462,7 @@ func TestProblem3Review2FailureBookkeepingTupleTransientRetriesWithoutSecondAtte
 	if err := store.db.QueryRow(`SELECT COUNT(*),MAX(outcome) FROM silence_recheck_job_attempts WHERE job_id=1`).Scan(&attempts, &outcome); err != nil {
 		t.Fatal(err)
 	}
-	if status != "failed" || attempts != 1 || attemptCount != 1 || outcome != "failed" || tupleCalls != 3 || store.pendingRecheckFailureSnapshot() != nil {
+	if status != "failed" || attempts != 1 || attemptCount != 1 || outcome != "failed" || tupleCalls != 2 || store.pendingRecheckFailureSnapshot() != nil {
 		t.Fatalf("bookkeeping retry state=%s attempts=%d count=%d outcome=%s tupleCalls=%d pending=%+v", status, attempts, attemptCount, outcome, tupleCalls, store.pendingRecheckFailureSnapshot())
 	}
 	if afterDomain := captureProblem3Review2DomainState(t, store.db); afterDomain != beforeDomain {
@@ -512,9 +511,6 @@ func TestProblem3Review2CommittedRetryBookkeepingRestoresSchedule(t *testing.T) 
 	}
 	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitOutcomeUnknown) {
 		t.Fatalf("initial retry bookkeeping=%v", err)
-	}
-	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-		t.Fatalf("retry bookkeeping reconciliation=%v", err)
 	}
 	_, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
 	var scheduled *recheckRetryScheduledError
@@ -926,8 +922,9 @@ func TestProblem3Review2CompleteFIFOAcrossRestartRetryAndAbandon(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertHead(5, "retry_wait")
-	if _, err = store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.As(err, new(*recheckQueueBlockedError)) {
-		t.Fatalf("not-due retry did not block: %v", err)
+	blockedResult, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+	if err != nil || blockedResult.Disposition != RecheckBatchRetryDeferred {
+		t.Fatalf("not-due retry did not return retry_deferred: result=%+v err=%v", blockedResult, err)
 	}
 	if err = store.Close(); err != nil {
 		t.Fatal(err)

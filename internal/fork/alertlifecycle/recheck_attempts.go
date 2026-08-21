@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
+
+	runtimeLog "github.com/prymitive/karma/internal/log"
 )
 
 const (
@@ -23,6 +26,8 @@ const (
 	recheckStageCommit           = "commit"
 	recheckStagePersistFailure   = "persist_failure"
 )
+
+var errRecheckFailureFinalizing = errors.New("recheck failure finalization in progress")
 
 var (
 	ErrRecheckJobNotFound        = errors.New("recheck job not found")
@@ -218,13 +223,31 @@ type recheckAttemptInfo struct {
 }
 
 type recheckPendingFailure struct {
-	Attempt recheckAttemptInfo
+	Attempt     recheckAttemptInfo
+	Operation   string
+	Result      RecheckBatchResult
+	ResultReady bool
+	Selection   recheckFailureSelection
+	Completion  *recheckFailureCompletion
+}
+
+type recheckOperatorFinalization struct {
+	JobID      int64
+	RequestID  string
+	Completion *recheckFailureCompletion
+}
+
+type recheckFailureSelection struct {
+	Status     string
+	QueueDepth *int
+	BatchSize  int
 }
 
 type recheckFailureResult struct {
 	Status         string
 	RetryScheduled bool
 	NextAttemptAt  *time.Time
+	Snapshot       *RecheckBatchResult
 }
 
 type recheckQueueBlockedError struct {
@@ -336,24 +359,24 @@ INSERT INTO silence_recheck_job_attempts(
 
 func (s *Store) validateRecheckAttemptTupleLocked(ctx context.Context, attempt recheckAttemptInfo, expectedOutcome string, allowCommitted bool) error {
 	if s.writerConn == nil {
-		return fmt.Errorf("%w: writer connection is unavailable while validating attempt %q: %w", ErrWriterCommitOutcomeUnknown, attempt.Token, ErrWriterUnavailable)
+		return fmt.Errorf("%w: writer connection is unavailable while validating attempt tuple: %w", ErrWriterCommitOutcomeUnknown, ErrWriterUnavailable)
 	}
 	jobID, attemptNumber, outcome, found, err := s.lookupRecheckAttemptTupleLocked(ctx, attempt.Token)
 	if err != nil {
 		return err
 	}
 	if !found {
-		return fmt.Errorf("%w: attempt token %q is not durable", ErrWriterOperationInvariant, attempt.Token)
+		return fmt.Errorf("%w: attempt tuple is not durable for job %d/number %d", ErrWriterOperationInvariant, attempt.JobID, attempt.Number)
 	}
 	if jobID != attempt.JobID || attemptNumber != attempt.Number {
-		return fmt.Errorf("%w: attempt token %q identifies job %d/number %d, want job %d/number %d", ErrWriterOperationInvariant, attempt.Token, jobID, attemptNumber, attempt.JobID, attempt.Number)
+		return fmt.Errorf("%w: attempt tuple identifies job %d/number %d, want job %d/number %d", ErrWriterOperationInvariant, jobID, attemptNumber, attempt.JobID, attempt.Number)
 	}
 	validOutcome := outcome == expectedOutcome
 	if allowCommitted && outcome == "committed" {
 		validOutcome = true
 	}
 	if !validOutcome {
-		return fmt.Errorf("%w: attempt token %q has outcome %q, want %q", ErrWriterOperationInvariant, attempt.Token, outcome, expectedOutcome)
+		return fmt.Errorf("%w: attempt tuple has outcome %q, want %q", ErrWriterOperationInvariant, outcome, expectedOutcome)
 	}
 	return nil
 }
@@ -364,14 +387,14 @@ func (s *Store) validateRecheckAttemptAbsenceLocked(ctx context.Context, attempt
 		return err
 	}
 	if found {
-		return fmt.Errorf("%w: writer token is absent but attempt token %q is durable for job %d/number %d/outcome %q", ErrWriterOperationInvariant, attempt.Token, jobID, attemptNumber, outcome)
+		return fmt.Errorf("%w: writer token is absent but attempt tuple is durable for job %d/number %d/outcome %q", ErrWriterOperationInvariant, jobID, attemptNumber, outcome)
 	}
 	return nil
 }
 
 func (s *Store) lookupRecheckAttemptTupleLocked(ctx context.Context, attemptToken string) (int64, int, string, bool, error) {
 	if s.writerConn == nil {
-		return 0, 0, "", false, fmt.Errorf("%w: writer connection is unavailable while validating attempt %q: %w", ErrWriterCommitOutcomeUnknown, attemptToken, ErrWriterUnavailable)
+		return 0, 0, "", false, fmt.Errorf("%w: writer connection is unavailable while validating attempt tuple: %w", ErrWriterCommitOutcomeUnknown, ErrWriterUnavailable)
 	}
 	var jobID int64
 	var attemptNumber int
@@ -388,7 +411,7 @@ func (s *Store) lookupRecheckAttemptTupleLocked(ctx context.Context, attemptToke
 		return 0, 0, "", false, nil
 	}
 	if err != nil {
-		return 0, 0, "", false, fmt.Errorf("%w: attempt token %q lookup is unresolved: %w", ErrWriterCommitOutcomeUnknown, attemptToken, err)
+		return 0, 0, "", false, fmt.Errorf("%w: attempt tuple lookup is unresolved: %w", ErrWriterCommitOutcomeUnknown, err)
 	}
 	return jobID, attemptNumber, outcome, true, nil
 }
@@ -407,10 +430,41 @@ func nullableString(value string) any {
 	return value
 }
 
-func (s *Store) setPendingRecheckFailure(attempt recheckAttemptInfo) {
+func (s *Store) setPendingRecheckFailure(pending recheckPendingFailure) {
+	if pending.Completion == nil {
+		pending.Completion = newRecheckFailureCompletion()
+	}
 	s.recheckStateMu.Lock()
-	s.pendingRecheckFailure = &recheckPendingFailure{Attempt: attempt}
+	s.pendingRecheckFailure = &pending
 	s.recheckStateMu.Unlock()
+}
+
+func (s *Store) updatePendingRecheckResult(attemptToken, operation string, result RecheckBatchResult) {
+	s.recheckStateMu.Lock()
+	if s.pendingRecheckFailure != nil && s.pendingRecheckFailure.Attempt.Token == attemptToken && s.pendingRecheckFailure.Operation == operation {
+		s.pendingRecheckFailure.Result = result
+		s.pendingRecheckFailure.ResultReady = true
+	}
+	s.recheckStateMu.Unlock()
+}
+
+func (s *Store) pendingRecheckCompletion(attemptToken string) *recheckFailureCompletion {
+	s.recheckStateMu.Lock()
+	defer s.recheckStateMu.Unlock()
+	if s.pendingRecheckFailure == nil || s.pendingRecheckFailure.Attempt.Token != attemptToken {
+		return nil
+	}
+	return s.pendingRecheckFailure.Completion
+}
+
+func (s *Store) pendingTerminalRecheckFinalization(jobID int64) *recheckFailureCompletion {
+	s.recheckStateMu.Lock()
+	defer s.recheckStateMu.Unlock()
+	pending := s.pendingRecheckFailure
+	if pending == nil || pending.Attempt.JobID != jobID || pending.Operation != writerOperationRecheckFailure || !pending.ResultReady || pending.Result.Status != "failed" || pending.Completion == nil || !pending.Completion.isCommitted() || pending.Completion.isFinalized() {
+		return nil
+	}
+	return pending.Completion
 }
 
 func (s *Store) pendingRecheckFailureSnapshot() *recheckPendingFailure {
@@ -431,6 +485,30 @@ func (s *Store) clearPendingRecheckFailure(attemptToken string) {
 	s.recheckStateMu.Unlock()
 }
 
+func (s *Store) setPendingRecheckOperatorFinalization(pending recheckOperatorFinalization) {
+	s.recheckStateMu.Lock()
+	s.pendingRecheckOperator = &pending
+	s.recheckStateMu.Unlock()
+}
+
+func (s *Store) pendingRecheckOperatorCompletion() *recheckFailureCompletion {
+	s.recheckStateMu.Lock()
+	defer s.recheckStateMu.Unlock()
+	pending := s.pendingRecheckOperator
+	if pending == nil || pending.Completion == nil || !pending.Completion.isCommitted() || pending.Completion.isFinalized() {
+		return nil
+	}
+	return pending.Completion
+}
+
+func (s *Store) clearPendingRecheckOperatorFinalization(jobID int64, requestID string) {
+	s.recheckStateMu.Lock()
+	if s.pendingRecheckOperator != nil && s.pendingRecheckOperator.JobID == jobID && s.pendingRecheckOperator.RequestID == requestID {
+		s.pendingRecheckOperator = nil
+	}
+	s.recheckStateMu.Unlock()
+}
+
 func (s *Store) disallowCommittedPendingRecheckAttempt(attemptToken string) {
 	s.recheckStateMu.Lock()
 	if s.pendingRecheckFailure != nil && s.pendingRecheckFailure.Attempt.Token == attemptToken {
@@ -442,6 +520,10 @@ func (s *Store) disallowCommittedPendingRecheckAttempt(attemptToken string) {
 func (s *Store) persistRecheckAttemptFailure(ctx context.Context, attempt recheckAttemptInfo) (recheckFailureResult, error) {
 	var result recheckFailureResult
 	var expectedOutcome string
+	completion := s.pendingRecheckCompletion(attempt.Token)
+	if completion == nil {
+		completion = newRecheckFailureCompletion()
+	}
 	finalizer := &writerAfterCommitFinalizer{
 		ctx:           ctx,
 		operationKind: writerOperationRecheckFailure,
@@ -457,7 +539,14 @@ func (s *Store) persistRecheckAttemptFailure(ctx context.Context, attempt rechec
 				s.disallowCommittedPendingRecheckAttempt(attempt.Token)
 				return nil
 			}
-			return s.validateRecheckAttemptTupleLocked(ctx, attempt, expectedOutcome, attempt.AllowCommitted)
+			if err := s.validateRecheckAttemptTupleLocked(ctx, attempt, expectedOutcome, attempt.AllowCommitted); err != nil {
+				return err
+			}
+			completion.completeCommitted()
+			return nil
+		},
+		run: func(reconciled bool) {
+			s.finalizeCommittedRecheckFailure(ctx, attempt.Token, reconciled)
 		},
 	}
 	_, err := withWriterTxValueAfterCommit(ctx, s, writerOperationRecheckFailure, func(tx *sql.Tx) (struct{}, error) {
@@ -475,7 +564,7 @@ func (s *Store) persistRecheckAttemptFailure(ctx context.Context, attempt rechec
 		if parentAttemptCount != ledgerCount {
 			return struct{}{}, fmt.Errorf("%w: job %d attempt_count=%d ledger_count=%d", ErrWriterOperationInvariant, attempt.JobID, parentAttemptCount, ledgerCount)
 		}
-		now := time.Now().UTC()
+		now := s.currentRecheckTime()
 		transitionState := recheckJobState{Status: "running", RetryCount: attempt.RetryCountBefore, ConsecutiveRetryCount: attempt.ConsecutiveRetryCountBefore}
 		transitionEvent := recheckJobTerminalFailure
 		if attempt.FailureClass == recheckFailureRetryable {
@@ -496,28 +585,40 @@ func (s *Store) persistRecheckAttemptFailure(ctx context.Context, attempt rechec
 		lookupErr := tx.QueryRow(`SELECT job_id,attempt_number,outcome,scheduled_retry_at FROM silence_recheck_job_attempts WHERE attempt_token=?`, attempt.Token).Scan(&existingJobID, &existingNumber, &existingOutcome, &existingScheduled)
 		if lookupErr == nil {
 			if existingJobID != attempt.JobID || existingNumber != attempt.Number {
-				return struct{}{}, fmt.Errorf("%w: attempt token %q identifies job %d/number %d, want job %d/number %d", ErrWriterOperationInvariant, attempt.Token, existingJobID, existingNumber, attempt.JobID, attempt.Number)
+				return struct{}{}, fmt.Errorf("%w: attempt tuple identifies job %d/number %d, want job %d/number %d", ErrWriterOperationInvariant, existingJobID, existingNumber, attempt.JobID, attempt.Number)
 			}
 			if existingOutcome == "committed" && attempt.AllowCommitted {
 				result.Status = existingOutcome
+				snapshot, snapshotErr := readRecheckJobResultTx(ctx, tx, attempt.JobID, false)
+				if snapshotErr != nil {
+					return struct{}{}, wrapRecheckStage(recheckStagePersistFailure, snapshotErr)
+				}
+				result.Snapshot = &snapshot
+				s.updatePendingRecheckResult(attempt.Token, writerOperationRecheckFailure, recheckBatchResultFromFailure(attempt, result))
 				return struct{}{}, nil
 			}
 			if existingOutcome != expectedOutcome {
-				return struct{}{}, fmt.Errorf("%w: attempt token %q has outcome %q, want %q", ErrWriterOperationInvariant, attempt.Token, existingOutcome, expectedOutcome)
+				return struct{}{}, fmt.Errorf("%w: attempt tuple has outcome %q, want %q", ErrWriterOperationInvariant, existingOutcome, expectedOutcome)
 			}
 			result.Status = "failed"
 			result.RetryScheduled = existingOutcome == "retry_scheduled"
 			if result.RetryScheduled {
 				result.Status = "retry_wait"
 				if !existingScheduled.Valid {
-					return struct{}{}, fmt.Errorf("%w: retry attempt token %q has no schedule", ErrWriterOperationInvariant, attempt.Token)
+					return struct{}{}, fmt.Errorf("%w: retry attempt tuple has no schedule", ErrWriterOperationInvariant)
 				}
 				parsed, parseErr := time.Parse(time.RFC3339Nano, existingScheduled.String)
 				if parseErr != nil {
-					return struct{}{}, fmt.Errorf("%w: retry attempt token %q has invalid schedule: %w", ErrWriterOperationInvariant, attempt.Token, parseErr)
+					return struct{}{}, fmt.Errorf("%w: retry attempt tuple has invalid schedule: %w", ErrWriterOperationInvariant, parseErr)
 				}
 				result.NextAttemptAt = &parsed
 			}
+			snapshot, snapshotErr := readRecheckJobResultTx(ctx, tx, attempt.JobID, false)
+			if snapshotErr != nil {
+				return struct{}{}, wrapRecheckStage(recheckStagePersistFailure, snapshotErr)
+			}
+			result.Snapshot = &snapshot
+			s.updatePendingRecheckResult(attempt.Token, writerOperationRecheckFailure, recheckBatchResultFromFailure(attempt, result))
 			return struct{}{}, nil
 		}
 		if !errors.Is(lookupErr, sql.ErrNoRows) {
@@ -576,6 +677,12 @@ WHERE job_id=? AND status IN ('queued','running','retry_wait')
 		if err = insertRecheckAttemptTx(tx, attempt, outcome, now, next); err != nil {
 			return struct{}{}, wrapRecheckStage(recheckStagePersistFailure, err)
 		}
+		snapshot, snapshotErr := readRecheckJobResultTx(ctx, tx, attempt.JobID, false)
+		if snapshotErr != nil {
+			return struct{}{}, wrapRecheckStage(recheckStagePersistFailure, snapshotErr)
+		}
+		result.Snapshot = &snapshot
+		s.updatePendingRecheckResult(attempt.Token, writerOperationRecheckFailure, recheckBatchResultFromFailure(attempt, result))
 		return struct{}{}, nil
 	}, finalizer)
 	if err != nil {
@@ -585,6 +692,39 @@ WHERE job_id=? AND status IN ('queued','running','retry_wait')
 		}
 	}
 	return result, nil
+}
+
+func recheckBatchResultFromFailure(attempt recheckAttemptInfo, failure recheckFailureResult) RecheckBatchResult {
+	result := RecheckBatchResult{JobID: attempt.JobID, Status: failure.Status, NextAttemptAt: failure.NextAttemptAt}
+	if failure.Snapshot != nil {
+		result = *failure.Snapshot
+	}
+	result.FailureClass = string(attempt.FailureClass)
+	result.FailureStage = attempt.FailureStage
+	switch result.Status {
+	case "retry_wait":
+		result.Disposition = RecheckBatchRetryScheduled
+	case "failed":
+		result.Disposition = RecheckBatchJobFailed
+	default:
+		result.Disposition = RecheckBatchCommitted
+	}
+	return result
+}
+
+func (s *Store) finalizeCommittedRecheckFailure(ctx context.Context, attemptToken string, _ bool) {
+	pending := s.pendingRecheckFailureSnapshot()
+	if pending == nil || pending.Attempt.Token != attemptToken || pending.Operation != writerOperationRecheckFailure || pending.Completion == nil {
+		return
+	}
+	defer pending.Completion.completeFinalized()
+	defer s.clearPendingRecheckFailure(attemptToken)
+	s.signalRecheckFailureFinalizer()
+	logRecheckJobSelected(ctx, pending.Result.JobID, pending.Selection.Status, pending.Selection.QueueDepth, pending.Result.AttemptCount, pending.Result.RetryCount, pending.Selection.BatchSize)
+	if pending.Result.Status != "failed" {
+		return
+	}
+	runtimeLog.ErrorContext(ctx, "silence_recheck", "job_failed", "Silence recheck job reached terminal failure", slog.Int64("job_id", pending.Result.JobID), slog.String("status", pending.Result.Status), slog.Int("attempt_count", pending.Result.AttemptCount), slog.Int("retry_count", pending.Result.RetryCount), slog.Int("consecutive_retry_count", pending.Result.ConsecutiveRetryCount), slog.String("failure_class", pending.Result.FailureClass), slog.String("failure_stage", pending.Result.FailureStage), slog.String("error", SanitizeRecheckError(pending.Attempt.FailureCause)))
 }
 
 func retryableRecheckFailurePersistence(err error) bool {
@@ -623,6 +763,28 @@ func sanitizeRecheckFailureMessage(err error) string {
 		message = message[:1024]
 	}
 	return message
+}
+
+// SanitizeRecheckError exposes only a stable operational category to runtime
+// logs. Attempt tokens, SQL text, and raw storage errors remain internal.
+func SanitizeRecheckError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, ErrWriterOperationInvariant), errors.Is(err, ErrWriterOperationToken):
+		return "writer_invariant"
+	case errors.Is(err, ErrWriterUnavailable), IsWriterAcquisitionError(err):
+		return "writer_unavailable"
+	case errors.Is(err, ErrRecheckFailurePersistence):
+		return "failure_persistence"
+	default:
+		return "storage_error"
+	}
 }
 
 type RecheckOperatorActionResult struct {
@@ -675,16 +837,56 @@ func (s *Store) applyRecheckOperatorAction(ctx context.Context, jobID int64, act
 	}
 	apply := func() (RecheckOperatorActionResult, error) {
 		mutated := false
+		eventReady := false
+		var commitWake func()
+		var eventJobID int64
+		var eventAction, eventRequestID, eventStatus, eventOperator string
+		completion := newRecheckFailureCompletion()
 		finalizer := &writerAfterCommitFinalizer{
 			ctx:           ctx,
 			operationKind: writerOperationRecheckOperator,
+			reconcile: func(writerCommitted bool) error {
+				if !mutated {
+					return nil
+				}
+				if writerCommitted {
+					completion.completeCommitted()
+				} else {
+					s.clearPendingRecheckOperatorFinalization(eventJobID, eventRequestID)
+				}
+				return nil
+			},
 			handoff: func(writerHandoffDisposition) {
 				if mutated {
-					s.handoffRecheckCommitLocked()
+					commitWake = s.recheckCommitWake
 				}
+			},
+			run: func(bool) {
+				if !mutated {
+					return
+				}
+				if commitWake != nil {
+					defer commitWake()
+				}
+				defer completion.completeFinalized()
+				defer s.clearPendingRecheckOperatorFinalization(eventJobID, eventRequestID)
+				s.signalRecheckOperatorFinalizer()
+				if !eventReady {
+					return
+				}
+				attrs := []slog.Attr{slog.Int64("job_id", eventJobID), slog.String("action", eventAction), slog.String("request_id", eventRequestID), slog.String("resulting_status", eventStatus)}
+				if eventOperator != "" {
+					attrs = append(attrs, slog.String("operator", eventOperator))
+				}
+				runtimeLog.Event(ctx, slog.LevelInfo, "silence_recheck", "operator_action_applied", "Silence recheck operator action applied", attrs...)
+				eventReady = false
 			},
 		}
 		return withWriterTxValueAfterCommit(ctx, s, writerOperationRecheckOperator, func(tx *sql.Tx) (RecheckOperatorActionResult, error) {
+			if s.pendingTerminalRecheckFinalization(jobID) != nil {
+				s.signalRecheckOperatorBarrier("inside_transaction")
+				return RecheckOperatorActionResult{}, errRecheckFailureFinalizing
+			}
 			var recordedAction, recordedFingerprint, appliedResult, resultingStatus string
 			lookupErr := tx.QueryRow(`SELECT action,request_fingerprint,COALESCE(applied_result,''),COALESCE(resulting_status,'') FROM silence_recheck_job_operator_actions WHERE job_id=? AND request_id=?`, jobID, requestID).Scan(&recordedAction, &recordedFingerprint, &appliedResult, &resultingStatus)
 			if lookupErr == nil {
@@ -744,21 +946,37 @@ VALUES(?,?,?,?,?,?,?,?,?,?)
 				return RecheckOperatorActionResult{}, err
 			}
 			mutated = true
+			eventReady = true
+			eventJobID, eventAction, eventRequestID, eventStatus = jobID, action, requestID, transition.Status
+			if actor != nil {
+				eventOperator = *actor
+			}
+			s.setPendingRecheckOperatorFinalization(recheckOperatorFinalization{JobID: jobID, RequestID: requestID, Completion: completion})
 			return RecheckOperatorActionResult{JobID: jobID, Action: action, RequestID: requestID, Applied: true, CurrentStatus: transition.Status}, nil
 		}, finalizer)
 	}
-	result, err := apply()
-	if !errors.Is(err, ErrWriterCommitReconciled) {
-		return result, err
+	for {
+		if completion := s.pendingTerminalRecheckFinalization(jobID); completion != nil {
+			if err := completion.waitFinalized(ctx); err != nil {
+				return RecheckOperatorActionResult{}, err
+			}
+		}
+		s.signalRecheckOperatorBarrier("after_precheck")
+		result, applyErr := apply()
+		if errors.Is(applyErr, errRecheckFailureFinalizing) {
+			continue
+		}
+		if !errors.Is(applyErr, ErrWriterCommitReconciled) {
+			return result, applyErr
+		}
+		reconciled, found, lookupErr := s.loadRecheckOperatorAction(ctx, jobID, action, requestID, fingerprint)
+		if lookupErr != nil {
+			return RecheckOperatorActionResult{}, lookupErr
+		}
+		if found {
+			return reconciled, nil
+		}
 	}
-	reconciled, found, lookupErr := s.loadRecheckOperatorAction(ctx, jobID, action, requestID, fingerprint)
-	if lookupErr != nil {
-		return RecheckOperatorActionResult{}, lookupErr
-	}
-	if found {
-		return reconciled, nil
-	}
-	return apply()
 }
 
 func (s *Store) loadRecheckOperatorAction(ctx context.Context, jobID int64, action, requestID, fingerprint string) (RecheckOperatorActionResult, bool, error) {

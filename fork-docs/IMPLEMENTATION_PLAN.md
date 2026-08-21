@@ -33,11 +33,15 @@ Implemented in fork scope:
   membership, pinned observation input, and terminal outcomes are implemented and
   verified under Problem 2; Problem 3 adds durable attempts, bounded
   retry, token reconciliation, one scheduler owner, and audited operator recovery;
-  the Problem 3 implementation is complete,
+  the Problem 3 implementation phase is complete; its post-acceptance
+  selected-error/shutdown precedence defect is tracked as Problem 8,
 - effective suppression evidence on retained past-alert cards using the ordinary
   silence-rule presentation and actions,
 - compact create/edit/recreate silence editor with automatic preview,
-- structured runtime logging with redaction and edge-sensitive levels.
+- structured runtime logging with redaction and edge-sensitive levels; Problem 4 recheck
+  result projection, event ownership, strict APIs, and operator presentation are
+  implemented and independently accepted, while generic writer
+  diagnostic registration/redaction is tracked separately as Problem 9.
 
 ## 3. Deferred items
 

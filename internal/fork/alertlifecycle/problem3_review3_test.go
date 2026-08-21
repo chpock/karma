@@ -93,8 +93,9 @@ func TestProblem3Review3InvalidGenericLookupConnectionIsReplaced(t *testing.T) {
 			}
 
 			store.writerCommitLookup = nil
-			if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-				t.Fatalf("replacement reconciliation=%v", err)
+			result, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+			if err != nil || result.Disposition != RecheckBatchCommitted {
+				t.Fatalf("replacement reconciliation result=%+v err=%v", result, err)
 			}
 			if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); err != nil {
 				t.Fatalf("replacement completion=%v", err)
@@ -147,8 +148,9 @@ func TestProblem3Review3InvalidAttemptTupleConnectionIsReplaced(t *testing.T) {
 				t.Fatalf("attempt lookup physical identity was reused: %T", newIdentity)
 			}
 			store.recheckAttemptLookup = nil
-			if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-				t.Fatalf("attempt replacement reconciliation=%v", err)
+			result, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+			if err != nil || result.Disposition != RecheckBatchCommitted {
+				t.Fatalf("attempt replacement reconciliation result=%+v err=%v", result, err)
 			}
 		})
 	}
@@ -172,8 +174,9 @@ func TestProblem3Review3ReplacementFailurePreservesPendingReconciliation(t *test
 	}
 	store.writerConnectionAcquirer = store.db.Conn
 	store.writerCommitLookup = nil
-	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-		t.Fatalf("replacement retry=%v", err)
+	result, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+	if err != nil || result.Disposition != RecheckBatchCommitted {
+		t.Fatalf("replacement retry result=%+v err=%v", result, err)
 	}
 }
 

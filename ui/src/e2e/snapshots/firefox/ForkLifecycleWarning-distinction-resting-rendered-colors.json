@@ -1,0 +1,143 @@
+{
+  "state": "distinction-resting",
+  "cards": [
+    {
+      "kind": "regroup_out_of_date",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_in_progress",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_failed",
+      "background": "rgb(159, 29, 43)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 7.8217674024740145,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "silence_ha_inconsistent",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "recheck_retrying",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "recheck_blocked",
+      "background": "rgb(159, 29, 43)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 7.8217674024740145,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_out_of_date",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_in_progress",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_failed",
+      "background": "rgb(159, 29, 43)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 7.8217674024740145,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "silence_ha_inconsistent",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "recheck_retrying",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "recheck_blocked",
+      "background": "rgb(159, 29, 43)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 7.8217674024740145,
+      "borderContrast": 7.242559234853841
+    }
+  ],
+  "controls": [
+    {
+      "label": "Retry",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(55, 90, 127)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 7.163881058134201,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "label": "Abandon",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(176, 42, 55)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 6.496772712016201,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "label": "Retry",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(55, 90, 127)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 7.163881058134201,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "label": "Abandon",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(176, 42, 55)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 6.496772712016201,
+      "borderContrast": 7.242559234853841
+    }
+  ]
+}

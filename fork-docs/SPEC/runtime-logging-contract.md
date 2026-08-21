@@ -1,6 +1,10 @@
 # Runtime Logging Contract
 
-Status: implemented.
+Status: Problem 4 event ownership, fields, levels, redaction, APIs, and UI presentation are
+implemented and independently accepted. Operator replay-ledger semantics are defined by
+ADR-005 and ADR-007. Generic writer
+diagnostic registration/redaction is tracked separately as Problem 9 in
+`silence-recheck-problems.md`.
 
 ## 1. Purpose
 
@@ -169,9 +173,10 @@ Poll transition, target, silence, episode, revision, and recheck-queue events ar
 captured as immutable payloads by a transaction-local collector. The collector assigns
 an internal monotonically increasing sequence after canonical input traversal; the
 committed poll finalizer emits that payload set without reloading rows by timestamp or
-current mutable state. A metadata-collection failure is warning-level, uses a safe
-default such as `queue_depth=-1` where applicable, and never changes the transaction's
-domain outcome.
+current mutable state. A metadata-collection failure is warning-level, uses a safe error
+category, and never changes the transaction's domain outcome. Unavailable queue depth is
+represented by `queue_depth_available=false` with `queue_depth` omitted; `-1` and zero are
+never fabricated as unavailable counts.
 
 ### 6.3 Manual resolve
 
@@ -199,8 +204,8 @@ domain outcome.
 | `ha_disagreement_detected` | `warning` on transition | Target and member count; no rule payload. |
 | `ha_disagreement_unchanged` | `debug` | Target and member count. |
 | `ha_converged` | `info` | Target and previous disagreement duration when known. |
-| `recheck_job_queued` | `info` | Job ID, source-context fingerprint, complete job fingerprint, candidate count, queue depth, trigger/reason code. |
-| `observability_collection_failed` | `warning` | For transaction-local poll metadata only: `stage=queue_depth|event_payload`, exact `event_family`, and error; emit best-effort and never change poll outcome. |
+| `recheck_job_queued` | `info` | Job ID, source-context fingerprint, complete job fingerprint, candidate count, `queue_depth_available`, optional queue depth, trigger/reason code. |
+| `observability_collection_failed` | `warning` | Best-effort metadata collection failure with `stage`, exact `event_family`, and safe error category; emit without changing the surrounding domain outcome. |
 
 An invalid individual silence entry is absent from the successful source snapshot.
 The warning is logged once per poll occurrence. It must not create a revision,
@@ -212,26 +217,66 @@ warning.
 
 | Event | Level | Required fields and behavior |
 |---|---|---|
-| `job_selected` | `debug` | Job ID, status, queue depth, batch size. |
+| `worker_acquisition_failed` | `warning` on the first unchanged failure, then `debug` | Job ID when known, `queue_depth_available`, optional queue depth, stage, stable reason code, and sanitized error. This is pre-selection infrastructure telemetry and never mutates a job. |
+| `job_selected` | `debug` | Job ID, selection-time status, `queue_depth_available`, optional queue depth, batch size. |
 | `job_started` | `info` | Job ID, candidate total, pinned-rule count, source count. |
 | `job_resumed` | `info` | Job ID and prior processed count after restart. |
 | `batch_completed` | `info` if any promotion occurred; otherwise `debug` | Job ID, processed, promoted, stale, missing labels, ineligible, incomplete sources, duration. |
 | `candidate_skipped` | `debug` | Job ID, alert ID, one constrained terminal outcome; no labels. |
 | `candidate_promoted` | `debug` | Job ID, alert ID, target if target-only, transition ID. |
 | `job_completed` | `info` | Job ID, total counters, total duration. |
-| `job_failed` | `error` on transition | Job ID, stage, preserved root error. |
-| `retry_scheduled` | `info` | Job ID, durable `next_attempt_at`, typed failure class/stage. Emit only after the retry bookkeeping transaction commits. |
+| `job_failed` | `error` on transition | Job ID, durable status and attempt/retry counters, stage/class, and a preserved safe root-error category. Raw errors and attempt tokens are forbidden. |
+| `retry_scheduled` | `warning` | Job ID, durable `next_attempt_at`, committed attempt/retry/consecutive-retry counts, typed failure class/stage. Emit only after the retry bookkeeping transaction commits. Scheduler event emission is best effort: a logging failure emits a safe observability diagnostic and never drops the persisted timer. |
 | `failure_persistence_failed` | `error` | Job ID and `stage=persist_failure`; emit when retry/terminal bookkeeping is not confirmed. Keep the process-local pending record and do not start another candidate batch. |
 | `operator_action_applied` | `info` | Job ID, action, opaque request ID, resulting status. Never include the persisted operator reason. |
-| `operator_action_rejected` | `warning` for 4xx, `error` otherwise | Job ID, action, stable reason code, and sanitized error; never include the operator reason. |
-| `job_commit_outcome_unknown` | `error` | `writer_operation=recheck_batch`, job ID, status, queue depth, retry count, `stage=commit_reconcile`, duration. Do not persist a false failed-job state. |
-| `job_commit_reconciled` | `info` | Original `writer_operation` and duration when a prior durable commit and its full attempt tuple are found; no callback is re-run, and the original post-commit handoff runs exactly once. |
-| `job_infrastructure_blocked` | `error` except the registered cancellation/deadline and Store lifecycle classes at `debug` | `writer_operation=recheck_batch|recheck_failure`, `stage=batch|failure_persistence`, job ID, exact stage-specific reason code, error; no job failure mutation for infrastructure errors. Batch reasons are `commit_not_committed`, `commit_outcome_unknown`, `writer_unavailable`, `writer_invariant`, `rollback_failed`, `store_closing`, `store_closed`, `worker_cancelled`, and `worker_deadline`. Failure-persistence reasons are `failure_persistence_commit_unknown`, `failure_persistence_not_committed`, `failure_persistence_sql_error`, `failure_persistence_rollback_failed`, `failure_persistence_writer_invariant`, `failure_persistence_writer_unavailable`, `failure_persistence_store_closing`, `failure_persistence_store_closed`, `failure_persistence_cancelled`, and `failure_persistence_deadline`. |
+| `operator_action_rejected` | level from the exact taxonomy in section 8.1 | Optional positive job ID, action, stable reason code, and safe error category; never include the operator reason or raw error. |
+| `job_commit_outcome_unknown` | `error` | `writer_operation=recheck_batch`, job ID, status, `queue_depth_available`, optional queue depth, retry count, `stage=commit_reconcile`, duration. Do not persist a false failed-job state. |
+| `job_commit_reconciled` | `info` | `writer_operation=recheck_batch` and duration when a prior durable batch commit and its full attempt tuple are found; no callback is re-run, no post-commit result read is required, and the retained original batch payload and handoff run exactly once. Immediate and reconciled committed `recheck_failure` share one after-unlock event finalizer for retained `job_selected`, terminal `job_failed`, pending cleanup, and completion signaling. Retry/Abandon wait outside the writer right and recheck the failure barrier inside their transaction. A separate operator-action finalization barrier is published before writer release; workers check it before acquisition and inside their transaction, so no selection can precede `operator_action_applied` and its deferred wake. |
+| `job_infrastructure_blocked` | `error` except the registered cancellation/deadline and Store lifecycle classes at `debug` | `writer_operation=recheck_batch|recheck_failure`, `stage=batch|failure_persistence`, job ID, exact stage-specific reason code, sanitized error; no job failure mutation for infrastructure errors. Batch reasons are `writer_unavailable`, `writer_invariant`, `rollback_failed`, `store_closing`, `store_closed`, `worker_cancelled`, `worker_deadline`, `infrastructure_unclassified`, and `queue_read_terminal`. Failure-persistence reasons are `failure_persistence_sql_error`, `failure_persistence_rollback_failed`, `failure_persistence_writer_invariant`, `failure_persistence_writer_unavailable`, `failure_persistence_store_closing`, `failure_persistence_store_closed`, `failure_persistence_cancelled`, and `failure_persistence_deadline`; Commit uncertainty remains on the reconciliation path. |
 | `job_infrastructure_contract_violation` | `error` | Job ID when selected, supplied stage/reason, and invariant error. Invalid stage/reason pairs are never normalized and do not mutate job state. |
-| `scheduler_stopped` | `error` | Stable reason (`writer_invariant`, `writer_acquisition_terminal`, `writer_token_generation`, `failure_persistence_terminal`, `select_job`, `read_job_state`, `create_attempt`, `invalid_next_attempt_at`, `queue_state_invariant`, `queue_read_terminal`, or `infrastructure_unclassified`) and sanitized infrastructure error when a terminal pre-attempt, queue-read, or bookkeeping/invariant failure requires operator intervention; no job failure mutation. Internal reconciliation deadlines use reconciliation backoff and never use this event as shutdown. This event terminates the scheduler owner until application restart; later wakes cannot re-enter the terminal path. Durable failed heads are not scheduler stops and remain wakeable for Retry/Abandon. |
-| `failed_job_blocks_queue` | `warning` once, then `debug` while unchanged | Failed job ID and queue depth. Do not overwrite the persisted root error. |
-| `queue_blocked` | `debug` | Failed FIFO head ID/status; a not-yet-due retry head also blocks later jobs. |
-| `queue_empty` | `debug` | Emitted at most once per worker invocation, not per candidate. |
+| `failed_job_blocks_queue` | `warning` once, then `debug` while unchanged | Failed job ID, `queue_depth_available`, optional queue depth. Do not overwrite the persisted root error. |
+| `retry_deferred` | `debug` | Job ID, `queue_depth_available`, optional queue depth, and persisted `next_attempt_at`; do not emit an error for each scheduler wake. |
+
+`infrastructure_failed` is the typed non-durable result for a selected terminal
+infrastructure failure. `job_infrastructure_blocked` is the sole terminal infrastructure event after a job
+has been selected or during failure bookkeeping. A pre-selection writer-acquisition
+terminal outcome is represented by `worker_acquisition_failed` and does not emit a
+second wrapper event. `job_infrastructure_blocked` carries
+`writer_operation=recheck_batch|recheck_failure`, `stage=batch|failure_persistence`,
+the selected job ID when known, an exact reason code, and a sanitized error. It
+terminates the scheduler owner for terminal infrastructure failures; durable failed
+heads are not terminal infrastructure failures and remain wakeable for Retry/Abandon.
+No `scheduler_stopped`, `queue_blocked`, or `queue_empty` wrapper event is emitted.
+
+Regroup failure reconciliation closes its completion barrier in a defer. Once the
+failure commit is confirmed and its finalizer finishes, the original result returns
+without starting a duplicate persistence transaction, including when event emission
+itself fails.
+
+### 8.1 Operator HTTP rejection taxonomy
+
+All rows use component `silence_recheck` and event `operator_action_rejected`.
+They include `action`, a positive `job_id` when known, and the authenticated
+operator when available; they never include request bodies, operator reasons, or
+raw errors.
+
+| Condition | Level | `reason_code` | Safe `error` |
+|---|---|---|---|
+| Invalid ID/body/request | `debug` | `invalid_request` | `client_input` |
+| Missing/invalid marker or cross-site fetch | `debug` | `cross_origin_request` | `request_origin` |
+| Non-JSON media type | `debug` | `unsupported_media_type` | `client_input` |
+| Lifecycle Store disabled | `error` | `storage_unavailable` | `storage_unavailable` |
+| Job absent | `warning` | `job_not_found` | `not_found` |
+| Job state conflict | `warning` | `job_state_conflict` | `state_conflict` |
+| Request identity conflict | `warning` | `request_conflict` | `state_conflict` |
+| Unexpected Store failure | `error` | `operator_action_failed` | `storage_error` |
+
+`alert_lifecycle/stats_failed` uses `error`, `stats_query_failed`, and
+`storage_error`. `alert_lifecycle/warning_state_failed` uses `error`,
+`warning_projection_failed`, and `storage_error`. Successful recheck error
+snapshots expose class, stage, and timestamp but use the fixed message
+`recheck attempt failed`; successful regroup stats and warning metadata use
+`regroup operation failed`.
 
 ## 9. Housekeeping and Regroup Events
 
@@ -244,8 +289,10 @@ warning.
 - `housekeeping_failed` (`error`): stage and error.
 - Housekeeping never wakes the recheck scheduler. Startup, committed job creation,
   committed operator action, persisted due time, and delayed cross-operation reconciliation
-  of a selected recheck attempt are the complete wake-owner set. Ordinary or immediately
-  reconciled empty/no-work commits never wake it.
+  of a selected `recheck_batch` attempt are the complete wake-owner set. Reconciled
+  `recheck_failure` is resumed by the already-active reconciliation timer and its
+  retained result, not a finalizer wake. Ordinary or immediately reconciled
+  empty/no-work commits never wake it.
 
 ### 9.2 Regroup
 
@@ -256,18 +303,17 @@ warning.
 - `regroup_completed` (`info`): totals and duration.
 - `regroup_cancelled` (`debug` only for the explicit expected-shutdown cause, otherwise
   `warning`): exact direct cancellation reason and `expected_shutdown`.
-- `regroup_failed` (`error`): target fingerprint, persisted progress, error.
+- `regroup_failed` (`error`): target fingerprint, persisted progress, and safe error category.
 - `regroup_infrastructure_blocked` (`error`, or `debug` for Store closing/closed and
   cancellation/deadline only when the expected-shutdown cause is present; otherwise
   `warning`): target fingerprint, stage, exact registered reason code, persisted progress
-  when available, duration, error.
+  when available, duration, and safe error category.
 - `regroup_infrastructure_contract_violation` (`error`): supplied stage/reason and
   invariant error. Invalid pairs are not normalized.
 
 Lifecycle-writer events:
 
 - `writer_commit_reconciled` (`info`): `writer_operation`; no commit token.
-- `observability_collection_failed` (`error`): `writer_operation`, stage, error. Allowed stages are `panic_rollback_recovery|rollback_recovery|after_commit_handoff|after_commit_run`.
 
 Lifecycle-writer errors never log operation tokens. The `operation` field remains reserved
 for silence-editor create/edit/recreate/resolve semantics.

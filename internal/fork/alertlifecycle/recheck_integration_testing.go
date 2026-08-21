@@ -3,16 +3,23 @@ package alertlifecycle
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // RecheckIntegrationTestHooks exposes transaction-boundary controls only for repository
 // integration tests that must run the cmd-owned scheduler against a real Store.
 type RecheckIntegrationTestHooks struct {
-	Commit              func(func() error) error
-	WriterCommitLookup  func(context.Context, string, string) (bool, error)
-	AttemptLookup       func(context.Context, string) (int64, int, string, error)
-	TransactionFinished func(string)
-	RecheckFault        func(string) error
+	Commit                   func(func() error) error
+	WriterCommitLookup       func(context.Context, string, string) (bool, error)
+	AttemptLookup            func(context.Context, string) (int64, int, string, error)
+	TransactionFinished      func(string)
+	RecheckFault             func(string) error
+	BeforeCommitLedgerInsert func(context.Context, string)
+	Now                      func() time.Time
+	WorkerBarrier            func(string)
+	OperatorFinalizer        func()
+	FailureFinalizer         func()
+	OperationToken           func() (string, error)
 }
 
 // SetRecheckIntegrationTestHooks installs or clears the narrow recheck integration-test
@@ -28,9 +35,15 @@ func (s *Store) SetRecheckIntegrationTestHooks(hooks *RecheckIntegrationTestHook
 		s.writerCommitLookup = nil
 		s.recheckAttemptLookup = nil
 		s.writerTransactionFinished = nil
+		s.beforeCommitLedgerInsert = nil
+		s.writerOperationToken = nil
 		if s.lifecycleTestHooks != nil {
 			s.lifecycleTestHooks.mu.Lock()
 			s.lifecycleTestHooks.recheckFault = nil
+			s.lifecycleTestHooks.recheckNow = nil
+			s.lifecycleTestHooks.recheckWorkerBarrier = nil
+			s.lifecycleTestHooks.recheckOperatorFinalizer = nil
+			s.lifecycleTestHooks.recheckFailureFinalizer = nil
 			s.lifecycleTestHooks.mu.Unlock()
 		}
 		return
@@ -43,10 +56,16 @@ func (s *Store) SetRecheckIntegrationTestHooks(hooks *RecheckIntegrationTestHook
 	s.writerCommitLookup = hooks.WriterCommitLookup
 	s.recheckAttemptLookup = hooks.AttemptLookup
 	s.writerTransactionFinished = hooks.TransactionFinished
+	s.beforeCommitLedgerInsert = hooks.BeforeCommitLedgerInsert
+	s.writerOperationToken = hooks.OperationToken
 	if s.lifecycleTestHooks == nil {
 		s.lifecycleTestHooks = &storeLifecycleTestHooks{}
 	}
 	s.lifecycleTestHooks.mu.Lock()
 	s.lifecycleTestHooks.recheckFault = hooks.RecheckFault
+	s.lifecycleTestHooks.recheckNow = hooks.Now
+	s.lifecycleTestHooks.recheckWorkerBarrier = hooks.WorkerBarrier
+	s.lifecycleTestHooks.recheckOperatorFinalizer = hooks.OperatorFinalizer
+	s.lifecycleTestHooks.recheckFailureFinalizer = hooks.FailureFinalizer
 	s.lifecycleTestHooks.mu.Unlock()
 }

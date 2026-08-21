@@ -45,8 +45,8 @@ func TestPinnedRecheckRuleCannotCrossSourceReassignment(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted != 0 {
-		t.Fatalf("old target rule crossed reassignment: promoted=%d err=%v", promoted, runErr)
+	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted.OutcomeCounts.Promoted != 0 {
+		t.Fatalf("old target rule crossed reassignment: promoted=%d err=%v", promoted.OutcomeCounts.Promoted, runErr)
 	}
 	current, err := store.GetCurrentAlert("cluster-b-alert")
 	if err != nil || current == nil || current.IsSuppressed {
@@ -83,8 +83,8 @@ func TestRecheckCandidateBecomingEligibleCreatesImmutableSuccessor(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if promoted, runErr := store.RunSilenceRecheckBatch(1); runErr != nil || promoted != 1 {
-		t.Fatalf("first batch promoted=%d err=%v", promoted, runErr)
+	if promoted, runErr := store.RunSilenceRecheckBatch(1); runErr != nil || promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("first batch promoted=%d err=%v", promoted.OutcomeCounts.Promoted, runErr)
 	}
 	if _, err = store.ApplyPollCycle(PollCycleInput{
 		LiveAlerts: []LiveAlertSnapshot{{
@@ -180,8 +180,8 @@ func TestC4RecheckResumesPinnedContextAndCandidatesAfterRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if promoted, runErr := store.RunSilenceRecheckBatch(1); runErr != nil || promoted != 1 {
-		t.Fatalf("first batch promoted=%d err=%v", promoted, runErr)
+	if promoted, runErr := store.RunSilenceRecheckBatch(1); runErr != nil || promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("first batch promoted=%d err=%v", promoted.OutcomeCounts.Promoted, runErr)
 	}
 	var jobID int64
 	var status, source, cluster string
@@ -223,8 +223,8 @@ func TestC4RecheckResumesPinnedContextAndCandidatesAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if promoted, runErr := store.RunSilenceRecheckBatch(1); runErr != nil || promoted != 1 {
-		t.Fatalf("resumed batch promoted=%d err=%v", promoted, runErr)
+	if promoted, runErr := store.RunSilenceRecheckBatch(1); runErr != nil || promoted.OutcomeCounts.Promoted != 2 {
+		t.Fatalf("resumed batch promoted=%d err=%v", promoted.OutcomeCounts.Promoted, runErr)
 	}
 	var targetSuppressed int
 	if err = store.db.QueryRow(`SELECT is_suppressed FROM alert_target_states WHERE alert_id='b-second' AND target='cluster-a'`).Scan(&targetSuppressed); err != nil {

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,8 +17,8 @@ import (
 )
 
 type review3SchedulerObservation struct {
-	promoted int
-	err      error
+	result alertlifecycle.RecheckBatchResult
+	err    error
 }
 
 func seedProblem3Review3SchedulerStore(t *testing.T) (*alertlifecycle.Store, *sql.DB, time.Time) {
@@ -79,10 +83,10 @@ func observeProblem3Review3Scheduler(scheduler *recheckScheduler) (<-chan review
 	headReads := make(chan struct{}, 4)
 	runner := scheduler.runner
 	head := scheduler.head
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
-		promoted, err := runner(ctx, batchSize)
-		observations <- review3SchedulerObservation{promoted: promoted, err: err}
-		return promoted, err
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
+		result, err := runner(ctx, batchSize)
+		observations <- review3SchedulerObservation{result: result, err: err}
+		return result, err
 	}
 	scheduler.head = func(ctx context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		result, err := head(ctx)
@@ -134,6 +138,10 @@ func TestProblem3Review3SchedulerUsesRealStoreReconciliation(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(previousLogger)
 			store, db, now := seedProblem3Review3SchedulerStore(t)
 			clock := &reviewSchedulerClock{now: now}
 			scheduler := newRecheckScheduler(store, clock)
@@ -153,7 +161,7 @@ func TestProblem3Review3SchedulerUsesRealStoreReconciliation(t *testing.T) {
 				}
 			}
 			store.SetRecheckIntegrationTestHooks(test.hooks())
-			observations, headReads := observeProblem3Review3Scheduler(scheduler)
+			observations, _ := observeProblem3Review3Scheduler(scheduler)
 			scheduler.Start()
 			first := <-observations
 			if !errors.Is(first.err, alertlifecycle.ErrWriterCommitOutcomeUnknown) {
@@ -177,18 +185,11 @@ func TestProblem3Review3SchedulerUsesRealStoreReconciliation(t *testing.T) {
 			blockFinalProcess = true
 			processMu.Unlock()
 			store.SetRecheckIntegrationTestHooks(nil)
+			logs.Reset()
 			clock.timer.ch <- now.Add(time.Second)
 			second := <-observations
-			if !errors.Is(second.err, alertlifecycle.ErrWriterCommitReconciled) {
+			if !alertlifecycle.IsRecheckDurableFailure(second.err) || second.result.Disposition != alertlifecycle.RecheckBatchJobFailed || second.result.Status != "failed" {
 				t.Fatalf("reconciled result=%+v", second)
-			}
-			third := <-observations
-			thirdIsDurableFailure := alertlifecycle.IsRecheckDurableFailure(third.err)
-			if third.err != nil && !thirdIsDurableFailure {
-				t.Fatalf("post-reconciliation result=%+v", third)
-			}
-			if !thirdIsDurableFailure {
-				<-headReads
 			}
 			<-processFinished
 			scheduler.stateMu.Lock()
@@ -215,6 +216,19 @@ func TestProblem3Review3SchedulerUsesRealStoreReconciliation(t *testing.T) {
 			}
 			if parentCount != 1 || ledgerCount != 1 {
 				t.Fatalf("reconciliation attempts parent=%d ledger=%d", parentCount, ledgerCount)
+			}
+			var records []map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				var record map[string]any
+				if json.Unmarshal([]byte(line), &record) == nil && (record["event"] == "job_selected" || record["event"] == "job_failed") {
+					records = append(records, record)
+				}
+			}
+			if len(records) != 2 || records[0]["event"] != "job_selected" || records[1]["event"] != "job_failed" {
+				t.Fatalf("delayed Store/scheduler event sequence=%v logs=%s", records, logs.String())
+			}
+			if records[0]["status"] != "queued" || records[0]["attempt_count"] != float64(1) || records[0]["retry_count"] != float64(0) || records[0]["batch_size"] != float64(recheckSchedulerBatchSize) || records[0]["queue_depth_available"] != true || records[1]["status"] != "failed" || records[1]["attempt_count"] != float64(1) || records[1]["failure_class"] != "terminal" {
+				t.Fatalf("delayed Store/scheduler event payload=%v", records)
 			}
 		})
 	}
@@ -256,12 +270,8 @@ func TestProblem3Review3JoinedBookkeepingUnknownUsesRealStoreReconciliation(t *t
 	store.SetRecheckIntegrationTestHooks(nil)
 	clock.timer.ch <- now.Add(time.Second)
 	second := <-observations
-	if !errors.Is(second.err, alertlifecycle.ErrWriterCommitReconciled) {
-		t.Fatalf("joined reconciliation=%+v", second)
-	}
-	third := <-observations
-	if !alertlifecycle.IsRecheckDurableFailure(third.err) {
-		t.Fatalf("joined completion=%+v", third)
+	if second.result.Disposition != alertlifecycle.RecheckBatchJobFailed || !alertlifecycle.IsRecheckDurableFailure(second.err) {
+		t.Fatalf("joined completion=%+v", second)
 	}
 	scheduler.Stop()
 	var attempts, attemptCount int

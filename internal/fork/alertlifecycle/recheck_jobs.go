@@ -713,11 +713,21 @@ func appendRecheckJobCreatedEventTx(tx *sql.Tx, collector *runtimeEventCollector
 	if collector == nil {
 		return
 	}
-	queueDepth := -1
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','retry_wait','failed')`).Scan(&queueDepth); err != nil {
-		collector.append(runtimeEvent{level: slog.LevelWarn, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect recheck queue depth for logging", attrs: []slog.Attr{slog.String("stage", "queue_depth"), slog.Any("error", err)}})
+	var queueDepthValue int
+	var queueDepth *int
+	queueDepthErr := tx.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','retry_wait','failed')`).Scan(&queueDepthValue)
+	if queueDepthErr == nil {
+		queueDepth = &queueDepthValue
 	}
-	collector.append(runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "recheck_job_queued", message: "Silence recheck job queued", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("source_context_fingerprint", sourceContextFingerprint), slog.String("job_fingerprint", jobFingerprint), slog.Int("candidate_count", candidateCount), slog.Int("queue_depth", queueDepth), slog.String("trigger_type", triggerType), slog.String("reason_code", triggerType)}})
+	if observabilityErr := collector.observabilityError("queue_depth", "recheck_job_queued", queueDepthErr); observabilityErr != nil {
+		collector.appendObservabilityFailureValue("queue_depth", "recheck_job_queued", observabilityErr)
+		queueDepth = nil
+	}
+	attrs := []slog.Attr{slog.Int64("job_id", jobID), slog.String("source_context_fingerprint", sourceContextFingerprint), slog.String("job_fingerprint", jobFingerprint), slog.Int("candidate_count", candidateCount), slog.Bool("queue_depth_available", queueDepth != nil), slog.String("trigger_type", triggerType), slog.String("reason_code", triggerType)}
+	if queueDepth != nil {
+		attrs = append(attrs, slog.Int("queue_depth", *queueDepth))
+	}
+	collector.append(runtimeEvent{level: slog.LevelInfo, component: "silence_reconciliation", event: "recheck_job_queued", message: "Silence recheck job queued", attrs: attrs})
 }
 
 func recheckFingerprint(raw []byte) string {
@@ -967,7 +977,7 @@ func processRecheckCandidateTx(tx *sql.Tx, candidate recheckCandidate, rules []r
 		}
 		decision.outcome = "promoted"
 		decision.promoted = true
-		decision.events = append(decision.events, runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", candidate.AlertID)}})
+		decision.events = append(decision.events, runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", candidate.AlertID), slog.Int64("transition_id", transitionID)}})
 		return decision, nil
 	}
 
@@ -1008,7 +1018,7 @@ func processRecheckCandidateTx(tx *sql.Tx, candidate recheckCandidate, rules []r
 	if promoteErr != nil {
 		return decision, promoteErr
 	}
-	decision.events = append(decision.events, runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck target candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", candidate.AlertID), slog.String("target", candidate.TargetKey)}})
+	decision.events = append(decision.events, runtimeEvent{level: slog.LevelDebug, component: "silence_recheck", event: "candidate_promoted", message: "Silence recheck target candidate promoted", attrs: []slog.Attr{slog.Int64("job_id", jobID), slog.String("alert_id", candidate.AlertID), slog.String("target", candidate.TargetKey), slog.Int64("transition_id", eventID)}})
 	decision.outcome = "promoted"
 	decision.promoted = true
 	target.IsSuppressed = true

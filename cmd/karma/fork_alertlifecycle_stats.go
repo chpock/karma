@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/prymitive/karma/internal/config"
@@ -17,36 +18,110 @@ type alertLifecycleStatsResponse struct {
 	RetentionTTLHours float64 `json:"retentionTTLHours"`
 	MaxAlerts         int     `json:"maxAlerts"`
 
-	CurrentRows                 int            `json:"currentRows"`
-	StateCounts                 map[string]int `json:"stateCounts"`
-	SuppressedBreakdown         map[string]int `json:"suppressedBreakdown,omitempty"`
-	HistoryRows                 int            `json:"historyRows"`
-	GroupingFingerprint         string         `json:"groupingFingerprint"`
-	RegroupTargetFingerprint    string         `json:"regroupTargetFingerprint"`
-	RegroupStatus               string         `json:"regroupStatus"`
-	RegroupError                string         `json:"regroupError"`
-	RegroupProcessed            int            `json:"regroupProcessed"`
-	RegroupTotal                int            `json:"regroupTotal"`
-	DBExpectedState             bool           `json:"dbExpectedState"`
-	DBExpectedStateReason       string         `json:"dbExpectedStateReason"`
-	LastRegroupStartedAt        *string        `json:"lastRegroupStartedAt"`
-	LastRegroupFinishedAt       *string        `json:"lastRegroupFinishedAt"`
-	FileSizeBytes               int64          `json:"fileSizeBytes"`
-	PageCount                   int            `json:"pageCount"`
-	PageSizeBytes               int            `json:"pageSizeBytes"`
-	FreelistCount               int            `json:"freelistCount"`
-	LastHousekeepingAt          *string        `json:"lastHousekeepingAt"`
-	LastIncrementalVacuumAt     *string        `json:"lastIncrementalVacuumAt"`
-	SilenceHistoryTTLHours      float64        `json:"silenceHistoryTTLHours"`
-	SilenceInconsistentClusters []string       `json:"silenceInconsistentClusters"`
-	RecheckQueueDepth           int            `json:"recheckQueueDepth"`
-	RecheckCurrentJobID         int64          `json:"recheckCurrentJobId"`
-	RecheckCurrentStatus        string         `json:"recheckCurrentStatus"`
-	RecheckCurrentProcessed     int            `json:"recheckCurrentProcessed"`
-	RecheckCurrentPromoted      int            `json:"recheckCurrentPromoted"`
-	RecheckCurrentSkipped       int            `json:"recheckCurrentSkipped"`
-	RecheckCurrentError         string         `json:"recheckCurrentError"`
-	RecheckOldestCreatedAt      *string        `json:"recheckOldestCreatedAt"`
+	CurrentRows                 int                                `json:"currentRows"`
+	StateCounts                 map[string]int                     `json:"stateCounts"`
+	SuppressedBreakdown         map[string]int                     `json:"suppressedBreakdown,omitempty"`
+	HistoryRows                 int                                `json:"historyRows"`
+	GroupingFingerprint         string                             `json:"groupingFingerprint"`
+	RegroupTargetFingerprint    string                             `json:"regroupTargetFingerprint"`
+	RegroupStatus               string                             `json:"regroupStatus"`
+	RegroupError                string                             `json:"regroupError"`
+	RegroupProcessed            int                                `json:"regroupProcessed"`
+	RegroupTotal                int                                `json:"regroupTotal"`
+	DBExpectedState             bool                               `json:"dbExpectedState"`
+	DBExpectedStateReason       string                             `json:"dbExpectedStateReason"`
+	LastRegroupStartedAt        *string                            `json:"lastRegroupStartedAt"`
+	LastRegroupFinishedAt       *string                            `json:"lastRegroupFinishedAt"`
+	FileSizeBytes               int64                              `json:"fileSizeBytes"`
+	PageCount                   int                                `json:"pageCount"`
+	PageSizeBytes               int                                `json:"pageSizeBytes"`
+	FreelistCount               int                                `json:"freelistCount"`
+	LastHousekeepingAt          *string                            `json:"lastHousekeepingAt"`
+	LastIncrementalVacuumAt     *string                            `json:"lastIncrementalVacuumAt"`
+	SilenceHistoryTTLHours      float64                            `json:"silenceHistoryTTLHours"`
+	SilenceInconsistentClusters []string                           `json:"silenceInconsistentClusters"`
+	Recheck                     alertLifecycleRecheckStatsResponse `json:"recheck"`
+}
+
+type alertLifecycleRecheckStatsResponse struct {
+	QueueDepth int                                   `json:"queueDepth"`
+	HeadJob    *alertLifecycleRecheckHeadJobResponse `json:"headJob"`
+}
+
+type alertLifecycleRecheckOutcomeCountsResponse struct {
+	Promoted          int `json:"promoted"`
+	Stale             int `json:"stale"`
+	Ineligible        int `json:"ineligible"`
+	MissingLabels     int `json:"missingLabels"`
+	IncompleteSources int `json:"incompleteSources"`
+}
+
+type alertLifecycleRecheckErrorResponse struct {
+	Class   string `json:"class"`
+	Stage   string `json:"stage"`
+	At      string `json:"at"`
+	Message string `json:"message"`
+}
+
+type alertLifecycleRecheckHeadJobResponse struct {
+	JobID                 int64                                      `json:"jobId"`
+	TriggerType           string                                     `json:"triggerType"`
+	Status                string                                     `json:"status"`
+	CreatedAt             string                                     `json:"createdAt"`
+	StartedAt             *string                                    `json:"startedAt"`
+	FinishedAt            *string                                    `json:"finishedAt"`
+	TotalCandidates       int                                        `json:"totalCandidates"`
+	ProcessedCandidates   int                                        `json:"processedCandidates"`
+	OutcomeCounts         alertLifecycleRecheckOutcomeCountsResponse `json:"outcomeCounts"`
+	AttemptCount          int                                        `json:"attemptCount"`
+	RetryCount            int                                        `json:"retryCount"`
+	ConsecutiveRetryCount int                                        `json:"consecutiveRetryCount"`
+	NextAttemptAt         *string                                    `json:"nextAttemptAt"`
+	FirstError            *alertLifecycleRecheckErrorResponse        `json:"firstError"`
+	LastError             *alertLifecycleRecheckErrorResponse        `json:"lastError"`
+	RecoveryCount         int                                        `json:"recoveryCount"`
+}
+
+func toAlertLifecycleRecheckHeadJobResponse(job *alertlifecycle.RecheckHeadJob) *alertLifecycleRecheckHeadJobResponse {
+	if job == nil {
+		return nil
+	}
+	return &alertLifecycleRecheckHeadJobResponse{
+		JobID: job.JobID, TriggerType: job.TriggerType, Status: job.Status,
+		CreatedAt: job.CreatedAt.UTC().Format(time.RFC3339Nano),
+		StartedAt: formatOptionalLifecycleTime(job.StartedAt), FinishedAt: formatOptionalLifecycleTime(job.FinishedAt),
+		TotalCandidates: job.TotalCandidates, ProcessedCandidates: job.ProcessedCandidates,
+		OutcomeCounts: alertLifecycleRecheckOutcomeCountsResponse{
+			Promoted: job.OutcomeCounts.Promoted, Stale: job.OutcomeCounts.Stale,
+			Ineligible: job.OutcomeCounts.Ineligible, MissingLabels: job.OutcomeCounts.MissingLabels,
+			IncompleteSources: job.OutcomeCounts.IncompleteSources,
+		}, AttemptCount: job.AttemptCount, RetryCount: job.RetryCount,
+		ConsecutiveRetryCount: job.ConsecutiveRetryCount, NextAttemptAt: formatOptionalLifecycleTime(job.NextAttemptAt),
+		FirstError: alertLifecycleRecheckErrorResponseFor(job.FirstError), LastError: alertLifecycleRecheckErrorResponseFor(job.LastError),
+		RecoveryCount: job.RecoveryCount,
+	}
+}
+
+func alertLifecycleRecheckErrorResponseFor(value *alertlifecycle.RecheckErrorSnapshot) *alertLifecycleRecheckErrorResponse {
+	if value == nil {
+		return nil
+	}
+	return &alertLifecycleRecheckErrorResponse{Class: value.Class, Stage: value.Stage, At: value.At.UTC().Format(time.RFC3339Nano), Message: "recheck attempt failed"}
+}
+
+func safeRegroupError(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return "regroup operation failed"
+}
+
+func formatOptionalLifecycleTime(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := value.UTC().Format(time.RFC3339Nano)
+	return &formatted
 }
 
 func alertLifecycleStats(w http.ResponseWriter, r *http.Request) {
@@ -64,15 +139,16 @@ func alertLifecycleStats(w http.ResponseWriter, r *http.Request) {
 			MaxAlerts:              config.Config.AlertLifecycle.Retention.MaxAlerts,
 			StateCounts:            map[string]int{},
 			SuppressedBreakdown:    map[string]int{"current": 0, "past": 0},
+			Recheck:                alertLifecycleRecheckStatsResponse{QueueDepth: 0, HeadJob: nil},
 			DBExpectedState:        true,
 		})
 		_, _ = w.Write(out)
 		return
 	}
 
-	stats, err := lifecycleStore.GetStats()
+	stats, err := lifecycleStore.GetStatsContext(r.Context())
 	if err != nil {
-		runtimeLog.Event(r.Context(), slog.LevelError, "alert_lifecycle", "stats_failed", "Failed to read alert lifecycle stats", slog.Any("error", err))
+		runtimeLog.Event(r.Context(), slog.LevelError, "alert_lifecycle", "stats_failed", "Failed to read alert lifecycle stats", slog.String("reason_code", "stats_query_failed"), slog.String("error", "storage_error"))
 		w.WriteHeader(http.StatusInternalServerError)
 		out, _ := marshalJSON(map[string]string{"error": "failed to read alert lifecycle stats"})
 		_, _ = w.Write(out)
@@ -101,7 +177,7 @@ func alertLifecycleStats(w http.ResponseWriter, r *http.Request) {
 		GroupingFingerprint:         stats.GroupingFingerprint,
 		RegroupTargetFingerprint:    stats.RegroupTargetFingerprint,
 		RegroupStatus:               stats.RegroupStatus,
-		RegroupError:                stats.RegroupError,
+		RegroupError:                safeRegroupError(stats.RegroupError),
 		RegroupProcessed:            stats.RegroupProcessed,
 		RegroupTotal:                stats.RegroupTotal,
 		DBExpectedState:             true,
@@ -110,13 +186,7 @@ func alertLifecycleStats(w http.ResponseWriter, r *http.Request) {
 		PageSizeBytes:               stats.PageSizeBytes,
 		FreelistCount:               stats.FreelistCount,
 		SilenceInconsistentClusters: append([]string{}, stats.SilenceInconsistentClusters...),
-		RecheckQueueDepth:           stats.RecheckQueueDepth,
-		RecheckCurrentJobID:         stats.RecheckCurrentJobID,
-		RecheckCurrentStatus:        stats.RecheckCurrentStatus,
-		RecheckCurrentProcessed:     stats.RecheckCurrentProcessed,
-		RecheckCurrentPromoted:      stats.RecheckCurrentPromoted,
-		RecheckCurrentSkipped:       stats.RecheckCurrentSkipped,
-		RecheckCurrentError:         stats.RecheckCurrentError,
+		Recheck:                     alertLifecycleRecheckStatsResponse{QueueDepth: stats.Recheck.QueueDepth, HeadJob: toAlertLifecycleRecheckHeadJobResponse(stats.Recheck.HeadJob)},
 	}
 	for state, count := range stats.StateCounts {
 		response.StateCounts[state] = count
@@ -130,39 +200,15 @@ func alertLifecycleStats(w http.ResponseWriter, r *http.Request) {
 		value := stats.RegroupFinishedAt.UTC().Format(time.RFC3339Nano)
 		response.LastRegroupFinishedAt = &value
 	}
-	if stats.RecheckOldestCreatedAt != nil {
-		value := stats.RecheckOldestCreatedAt.UTC().Format(time.RFC3339Nano)
-		response.RecheckOldestCreatedAt = &value
-	}
-
 	status := stats.RegroupStatus
 	if status == "" {
 		status = "ready"
 		response.RegroupStatus = status
 	}
-	if status != "ready" {
-		response.DBExpectedState = false
-		response.DBExpectedStateReason = "Background regroup is in progress or failed"
-	}
-	if stats.GroupingFingerprint != expectedFingerprint {
-		response.DBExpectedState = false
-		if response.DBExpectedStateReason == "" {
-			response.DBExpectedStateReason = "Stored grouping fingerprint does not match current config"
-		}
-	}
-	if status == "error" {
-		response.DBExpectedState = false
-		if stats.RegroupError != "" {
-			response.DBExpectedStateReason = stats.RegroupError
-		}
-	}
-	if len(stats.SilenceInconsistentClusters) > 0 {
-		response.DBExpectedState = false
-		response.DBExpectedStateReason = "Alertmanager silence state is inconsistent across HA members"
-	}
-	if stats.RecheckCurrentStatus == "failed" {
-		response.DBExpectedState = false
-		response.DBExpectedStateReason = stats.RecheckCurrentError
+	issues := buildAlertLifecycleWarningIssues(stats, expectedFingerprint)
+	response.DBExpectedState = len(issues) == 0
+	if len(issues) > 0 {
+		response.DBExpectedStateReason = issues[0].Summary
 	}
 	if response.RegroupTargetFingerprint == "" {
 		response.RegroupTargetFingerprint = expectedFingerprint

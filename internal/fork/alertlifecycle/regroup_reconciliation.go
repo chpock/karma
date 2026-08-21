@@ -378,7 +378,14 @@ func (s *Store) runRegroupToConfigWithReconciliation(ctx context.Context, cfg Gr
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
-				return result, ctx.Err()
+				cancelErr := ctx.Err()
+				if errors.Is(context.Cause(ctx), ErrRegroupExpectedShutdown) {
+					return result, newRegroupInfrastructureError(ctx, RegroupStageBatch, RegroupReasonCancelled, result, errors.Join(cancelErr, context.Cause(ctx)))
+				}
+				if reason := regroupInfrastructureReason(ctx, cancelErr); reason != "" {
+					return result, newRegroupInfrastructureError(ctx, RegroupStageBatch, reason, result, cancelErr)
+				}
+				return result, cancelErr
 			default:
 			}
 		}
@@ -542,10 +549,10 @@ func (s *Store) persistRegroupFailure(ctx context.Context, targetFingerprint str
 				completion.completeFinalized()
 			},
 			run: func(bool) {
+				defer completion.completeFinalized()
 				if completion.isCommitted() {
-					runtimeLog.ErrorContext(ctx, "lifecycle_regroup", "regroup_failed", "Alert lifecycle regroup failed", slog.String("target_fingerprint", snapshot.targetFingerprint), slog.Int("processed", snapshot.processed), slog.Int("total", snapshot.total), slog.String("error", snapshot.rootError), slog.Time("finished_at", snapshot.finishedAt), slog.Duration("duration", time.Since(startedAt)))
+					runtimeLog.ErrorContext(ctx, "lifecycle_regroup", "regroup_failed", "Alert lifecycle regroup failed", slog.String("target_fingerprint", snapshot.targetFingerprint), slog.Int("processed", snapshot.processed), slog.Int("total", snapshot.total), slog.String("error", SanitizeRecheckError(errors.New(snapshot.rootError))), slog.Time("finished_at", snapshot.finishedAt), slog.Duration("duration", time.Since(startedAt)))
 				}
-				completion.completeFinalized()
 			},
 		}
 	}
@@ -561,7 +568,7 @@ func (s *Store) persistRegroupFailure(ctx context.Context, targetFingerprint str
 			if err != nil {
 				return struct{}{}, err
 			}
-			finishedAt := time.Now().UTC()
+			finishedAt := s.currentRegroupTime()
 			if err := setMetadataTx(tx, metaRegroupStatus, regroupStatusError); err != nil {
 				return struct{}{}, err
 			}
@@ -585,13 +592,15 @@ func (s *Store) persistRegroupFailure(ctx context.Context, targetFingerprint str
 		}
 		reason := regroupInfrastructureReason(ctx, persistErr)
 		if reason == RegroupReasonCommitOutcomeUnknown {
-			runtimeLog.ErrorContext(ctx, "lifecycle_regroup", "regroup_infrastructure_blocked", "Regroup failure persistence commit outcome is unknown", slog.String("target_fingerprint", targetFingerprint), slog.String("stage", string(RegroupStageFailurePersistence)), slog.String("reason_code", string(RegroupReasonFailurePersistenceCommitUnknown)), slog.Int("processed", result.Processed), slog.Int("total", result.Total), slog.Any("error", persistErr))
 			committed, waitErr := waitRegroupFailureCommitted(ctx, completion)
 			if waitErr != nil {
 				return errors.Join(domainErr, newRegroupInfrastructureError(ctx, RegroupStageFailurePersistence, regroupFailurePersistenceReason(ctx, waitErr), result, waitErr))
 			}
 			if committed {
-				continue
+				if waitErr = completion.waitFinalized(ctx); waitErr != nil {
+					return errors.Join(domainErr, newRegroupInfrastructureError(ctx, RegroupStageFailurePersistence, regroupFailurePersistenceReason(ctx, waitErr), result, waitErr))
+				}
+				return errors.Join(domainErr, ErrRegroupFailurePersisted)
 			}
 			finalizer = newFinalizer()
 			continue

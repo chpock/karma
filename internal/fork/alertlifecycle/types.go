@@ -247,14 +247,7 @@ type Stats struct {
 	LastHousekeepingAt          *time.Time
 	LastIncrementalVacuumAt     *time.Time
 	SilenceInconsistentClusters []string
-	RecheckQueueDepth           int
-	RecheckCurrentJobID         int64
-	RecheckCurrentStatus        string
-	RecheckCurrentProcessed     int
-	RecheckCurrentPromoted      int
-	RecheckCurrentSkipped       int
-	RecheckCurrentError         string
-	RecheckOldestCreatedAt      *time.Time
+	Recheck                     RecheckStats
 }
 
 type RegroupResult struct {

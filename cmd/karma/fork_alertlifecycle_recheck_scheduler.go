@@ -59,28 +59,31 @@ func (t *realRecheckSchedulerTimer) Stop() bool { return t.timer.Stop() }
 func (t *realRecheckSchedulerTimer) Reset(delay time.Duration) bool { return t.timer.Reset(delay) }
 
 type recheckScheduler struct {
-	store                 *alertlifecycle.Store
-	clock                 recheckSchedulerClock
-	wake                  chan struct{}
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	done                  chan struct{}
-	runner                func(context.Context, int) (int, error)
-	head                  func(context.Context) (alertlifecycle.RecheckQueueHead, error)
-	startOnce             sync.Once
-	stopOnce              sync.Once
-	stopWaitOnce          sync.Once
-	doneOnce              sync.Once
-	stateMu               sync.Mutex
-	processing            bool
-	wakePending           bool
-	reconciledWakePending bool
-	terminal              bool
-	timerActive           bool
-	timerKind             recheckSchedulerTimerKind
-	timerOwner            recheckSchedulerBackoffOwner
-	timerAt               time.Time
-	backoffStep           map[recheckSchedulerBackoffOwner]int
+	store                    *alertlifecycle.Store
+	clock                    recheckSchedulerClock
+	wake                     chan struct{}
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	done                     chan struct{}
+	runner                   func(context.Context, int) (alertlifecycle.RecheckBatchResult, error)
+	head                     func(context.Context) (alertlifecycle.RecheckQueueHead, error)
+	startOnce                sync.Once
+	stopOnce                 sync.Once
+	stopWaitOnce             sync.Once
+	doneOnce                 sync.Once
+	stateMu                  sync.Mutex
+	processing               bool
+	wakePending              bool
+	reconciledWakePending    bool
+	terminal                 bool
+	timerActive              bool
+	timerKind                recheckSchedulerTimerKind
+	timerOwner               recheckSchedulerBackoffOwner
+	timerAt                  time.Time
+	backoffStep              map[recheckSchedulerBackoffOwner]int
+	acquisitionFailureActive bool
+	blockedHeadID            int64
+	blockedHeadStatus        string
 	// Test-only causal barriers. They are nil on every production scheduler.
 	afterProcess     func()
 	wakeDeferred     func()
@@ -100,9 +103,9 @@ func newRecheckScheduler(store *alertlifecycle.Store, clock recheckSchedulerCloc
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	scheduler := &recheckScheduler{store: store, clock: clock, wake: make(chan struct{}, 1), ctx: ctx, cancel: cancel, done: make(chan struct{}), backoffStep: make(map[recheckSchedulerBackoffOwner]int)}
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
 		if store == nil {
-			return 0, alertlifecycle.ErrStoreNotInitialized
+			return alertlifecycle.RecheckBatchResult{Disposition: alertlifecycle.RecheckBatchAcquisitionFailed}, alertlifecycle.ErrStoreNotInitialized
 		}
 		return store.RunSilenceRecheckBatchContext(ctx, batchSize)
 	}
@@ -311,13 +314,53 @@ func (s *recheckScheduler) process(timer recheckSchedulerTimer, timerC <-chan ti
 		if s.ctx.Err() != nil {
 			return recheckSchedulerProcessResult{terminal: true}
 		}
-		_, err := s.runner(s.ctx, recheckSchedulerBatchSize)
+		batchResult, err := s.runner(s.ctx, recheckSchedulerBatchSize)
+		s.resetAfterReconciledResult(batchResult.ReconciledOperation)
+		if err == nil {
+			switch batchResult.Disposition {
+			case alertlifecycle.RecheckBatchQueueBlocked:
+				s.resetAfterSelectionSuccess()
+				s.logRecheckQueueBlocked(batchResult)
+				return recheckSchedulerProcessResult{}
+			case alertlifecycle.RecheckBatchRetryDeferred:
+				s.resetAfterSelectionSuccess()
+				s.logRecheckRetryDeferred(batchResult, batchResult.NextAttemptAt)
+				if batchResult.NextAttemptAt != nil {
+					return recheckSchedulerProcessResult{timerC: s.resetPersistedTimer(timer, *batchResult.NextAttemptAt)}
+				}
+				return recheckSchedulerProcessResult{}
+			case alertlifecycle.RecheckBatchQueueEmpty,
+				alertlifecycle.RecheckBatchCommitted,
+				alertlifecycle.RecheckBatchRetryScheduled,
+				alertlifecycle.RecheckBatchAcquisitionFailed,
+				alertlifecycle.RecheckBatchInfrastructureFailed,
+				alertlifecycle.RecheckBatchCommitOutcomeUnknown,
+				alertlifecycle.RecheckBatchJobFailed,
+				alertlifecycle.RecheckBatchFailurePersistenceFailed:
+				// These dispositions are paired with their operational error below.
+			default:
+				// Other dispositions are paired with their operational error below.
+			}
+		}
+		if batchResult.Disposition == alertlifecycle.RecheckBatchRetryScheduled && batchResult.NextAttemptAt != nil {
+			s.resetAfterBookkeepingSuccess()
+			s.clearBlockedHeadEdge()
+			s.logBestEffort(func() { s.logRecheckRetryScheduled(batchResult, *batchResult.NextAttemptAt) })
+			return recheckSchedulerProcessResult{timerC: s.resetPersistedTimer(timer, *batchResult.NextAttemptAt)}
+		}
 		if err != nil {
-			if s.ctx.Err() != nil || context.Cause(s.ctx) != nil {
+			if batchResult.Disposition == alertlifecycle.RecheckBatchInfrastructureFailed {
+				s.clearBlockedHeadEdge()
+				s.logRecheckInfrastructure(batchResult, batchResult.FailureClass, batchResult.FailureStage, err)
 				return recheckSchedulerProcessResult{terminal: true}
 			}
-			if alertlifecycle.IsRecheckDurableFailure(err) {
+			if errors.Is(err, alertlifecycle.ErrRecheckFailurePersistence) && !errors.Is(err, alertlifecycle.ErrWriterCommitOutcomeUnknown) && !errors.Is(err, alertlifecycle.ErrWriterCommitReconciled) && !alertlifecycle.IsRetryableRecheckFailurePersistence(err) {
+				s.logRecheckInfrastructure(batchResult, failurePersistenceReason(err), "failure_persistence", err)
+				return recheckSchedulerProcessResult{terminal: true}
+			}
+			if batchResult.Disposition == alertlifecycle.RecheckBatchJobFailed || alertlifecycle.IsRecheckDurableFailure(err) {
 				s.resetAfterBookkeepingSuccess()
+				s.clearBlockedHeadEdge()
 				return recheckSchedulerProcessResult{}
 			}
 			if errors.Is(err, alertlifecycle.ErrWriterCommitReconciled) {
@@ -344,6 +387,11 @@ func (s *recheckScheduler) process(timer recheckSchedulerTimer, timerC <-chan ti
 			if errors.As(err, &queueBlocked) {
 				s.resetAfterSelectionSuccess()
 				status, next := queueBlocked.QueueBlocked()
+				if status == "retry_wait" {
+					s.logRecheckRetryDeferred(batchResult, next)
+				} else {
+					s.logRecheckQueueBlocked(batchResult)
+				}
 				if status == "retry_wait" && next != nil {
 					return recheckSchedulerProcessResult{timerC: s.resetPersistedTimer(timer, *next)}
 				}
@@ -359,10 +407,13 @@ func (s *recheckScheduler) process(timer recheckSchedulerTimer, timerC <-chan ti
 				}
 				return recheckSchedulerProcessResult{timerC: s.scheduleBackoff(timer, recheckBackoffReconciliation)}
 			}
+			if s.ctx.Err() != nil || context.Cause(s.ctx) != nil {
+				return recheckSchedulerProcessResult{terminal: true}
+			}
 			if errors.Is(err, alertlifecycle.ErrRecheckFailurePersistence) {
 				if errors.Is(err, alertlifecycle.ErrWriterAcquisition) {
 					if !alertlifecycle.IsRetryableRecheckWriterAcquisition(err) {
-						runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on terminal failure-bookkeeping writer acquisition error", slog.String("reason_code", "failure_persistence_acquisition_terminal"), slog.Any("error", err))
+						s.logRecheckInfrastructure(batchResult, "failure_persistence_writer_unavailable", "failure_persistence", err)
 						return recheckSchedulerProcessResult{terminal: true}
 					}
 					s.resetAfterPreAttemptSuccess()
@@ -372,7 +423,7 @@ func (s *recheckScheduler) process(timer recheckSchedulerTimer, timerC <-chan ti
 					return recheckSchedulerProcessResult{timerC: s.scheduleBackoff(timer, recheckBackoffAcquisition)}
 				}
 				if !alertlifecycle.IsRetryableRecheckFailurePersistence(err) {
-					runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on terminal failure-bookkeeping infrastructure error", slog.String("reason_code", "failure_persistence_terminal"), slog.Any("error", err))
+					s.logRecheckInfrastructure(batchResult, failurePersistenceReason(err), "failure_persistence", err)
 					return recheckSchedulerProcessResult{terminal: true}
 				}
 				s.resetAfterPreAttemptSuccess()
@@ -381,30 +432,32 @@ func (s *recheckScheduler) process(timer recheckSchedulerTimer, timerC <-chan ti
 				}
 				return recheckSchedulerProcessResult{timerC: s.scheduleBackoff(timer, recheckBackoffBookkeeping)}
 			}
+			preselectionAcquisition := batchResult.Disposition == alertlifecycle.RecheckBatchAcquisitionFailed && batchResult.JobID == 0 && alertlifecycle.IsWriterAcquisitionError(err)
+			if preselectionAcquisition {
+				s.logRecheckAcquisitionFailure(batchResult, err)
+			}
 			if alertlifecycle.IsRetryableRecheckWriterAcquisition(err) {
 				return recheckSchedulerProcessResult{timerC: s.scheduleBackoff(timer, recheckBackoffAcquisition)}
 			}
 			if alertlifecycle.IsWriterAcquisitionError(err) {
-				runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on an unclassified writer acquisition failure", slog.String("reason_code", "writer_acquisition_terminal"), slog.Any("error", err))
+				if !preselectionAcquisition {
+					s.logRecheckInfrastructure(batchResult, "writer_unavailable", "batch", err)
+				}
 				return recheckSchedulerProcessResult{terminal: true}
 			}
 			if errors.Is(err, alertlifecycle.ErrWriterOperationInvariant) {
-				runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on an invariant failure", slog.String("reason_code", "writer_invariant"), slog.Any("error", err))
+				s.logRecheckInfrastructure(batchResult, "writer_invariant", "batch", err)
 				return recheckSchedulerProcessResult{terminal: true}
 			}
 			if alertlifecycle.IsRetryableRecheckPreAttempt(err) {
-				s.resetBackoff(recheckBackoffAcquisition)
+				s.resetAfterAcquisitionSuccess()
 				return recheckSchedulerProcessResult{timerC: s.scheduleBackoff(timer, recheckBackoffPreAttempt)}
 			}
 			if alertlifecycle.IsRecheckPreAttemptError(err) || errors.Is(err, alertlifecycle.ErrWriterOperationToken) {
-				reason := alertlifecycle.RecheckPreAttemptReason(err)
-				if reason == "" {
-					reason = "writer_token_generation"
-				}
-				runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on a terminal pre-attempt infrastructure failure", slog.String("reason_code", reason), slog.Any("error", err))
+				s.logRecheckInfrastructure(batchResult, "writer_invariant", "batch", err)
 				return recheckSchedulerProcessResult{terminal: true}
 			}
-			runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on an unclassified infrastructure failure", slog.String("reason_code", "infrastructure_unclassified"), slog.Any("error", err))
+			s.logRecheckInfrastructure(batchResult, "infrastructure_unclassified", "batch", err)
 			return recheckSchedulerProcessResult{terminal: true}
 		}
 		s.resetAfterRunnerSuccess()
@@ -414,27 +467,36 @@ func (s *recheckScheduler) process(timer recheckSchedulerTimer, timerC <-chan ti
 				return recheckSchedulerProcessResult{terminal: true}
 			}
 			if errors.Is(headErr, alertlifecycle.ErrWriterOperationInvariant) {
-				runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on invalid persisted queue state", slog.String("reason_code", "queue_state_invariant"), slog.Any("error", headErr))
+				s.logRecheckInfrastructure(batchResult, "writer_invariant", "batch", headErr)
 				return recheckSchedulerProcessResult{terminal: true}
 			}
 			if alertlifecycle.IsRetryableRecheckStorageError(headErr) {
 				return recheckSchedulerProcessResult{timerC: s.scheduleBackoff(timer, recheckBackoffQueueRead)}
 			}
-			runtimeLog.ErrorContext(s.ctx, "silence_recheck", "scheduler_stopped", "Recheck scheduler stopped on a terminal queue read failure", slog.String("reason_code", "queue_read_terminal"), slog.Any("error", headErr))
+			s.logRecheckInfrastructure(batchResult, "queue_read_terminal", "batch", headErr)
 			return recheckSchedulerProcessResult{terminal: true}
 		}
 		s.resetBackoff(recheckBackoffQueueRead)
 		if head.JobID == 0 {
+			s.stateMu.Lock()
+			s.blockedHeadID = 0
+			s.blockedHeadStatus = ""
+			s.stateMu.Unlock()
 			return recheckSchedulerProcessResult{}
 		}
 		if head.Status == "failed" {
-			runtimeLog.DebugContext(s.ctx, "silence_recheck", "queue_blocked", "Recheck scheduler stopped at failed FIFO head", slog.Int64("job_id", head.JobID))
+			queueDepth := head.QueueDepth
+			s.logRecheckQueueBlocked(alertlifecycle.RecheckBatchResult{JobID: head.JobID, Status: head.Status, QueueDepth: &queueDepth})
 			return recheckSchedulerProcessResult{}
 		}
 		if head.Status == "retry_wait" && head.NextAttemptAt != nil && head.NextAttemptAt.After(s.clock.Now()) {
 			return recheckSchedulerProcessResult{timerC: s.resetTimer(timer, *head.NextAttemptAt)}
 		}
 	}
+}
+
+func failurePersistenceReason(err error) string {
+	return alertlifecycle.RecheckFailurePersistenceReason(err)
 }
 
 func (s *recheckScheduler) resetTimer(timer recheckSchedulerTimer, at time.Time) <-chan time.Time {
@@ -489,12 +551,32 @@ func (s *recheckScheduler) resetBackoff(owner recheckSchedulerBackoffOwner) {
 func (s *recheckScheduler) resetAfterPreAttemptSuccess() {
 	s.resetBackoff(recheckBackoffAcquisition)
 	s.resetBackoff(recheckBackoffPreAttempt)
+	s.stateMu.Lock()
+	s.acquisitionFailureActive = false
+	s.stateMu.Unlock()
+}
+
+func (s *recheckScheduler) resetAfterAcquisitionSuccess() {
+	s.resetBackoff(recheckBackoffAcquisition)
+	s.stateMu.Lock()
+	s.acquisitionFailureActive = false
+	s.stateMu.Unlock()
 }
 
 func (s *recheckScheduler) resetAfterSelectionSuccess() {
 	s.resetAfterPreAttemptSuccess()
 	s.resetBackoff(recheckBackoffBookkeeping)
 	s.resetBackoff(recheckBackoffReconciliation)
+	s.stateMu.Lock()
+	s.acquisitionFailureActive = false
+	s.stateMu.Unlock()
+}
+
+func (s *recheckScheduler) clearBlockedHeadEdge() {
+	s.stateMu.Lock()
+	s.blockedHeadID = 0
+	s.blockedHeadStatus = ""
+	s.stateMu.Unlock()
 }
 
 func (s *recheckScheduler) resetAfterReconciliationSuccess() {
@@ -508,6 +590,15 @@ func (s *recheckScheduler) resetAfterFailureReconciliationSuccess() {
 	s.resetBackoff(recheckBackoffReconciliation)
 }
 
+func (s *recheckScheduler) resetAfterReconciledResult(operation string) {
+	switch operation {
+	case alertlifecycle.RecheckBatchWriterOperation:
+		s.resetAfterReconciliationSuccess()
+	case alertlifecycle.RecheckFailureWriterOperation:
+		s.resetAfterFailureReconciliationSuccess()
+	}
+}
+
 func (s *recheckScheduler) resetAfterBookkeepingSuccess() {
 	s.resetAfterSelectionSuccess()
 	s.resetBackoff(recheckBackoffBookkeeping)
@@ -515,6 +606,87 @@ func (s *recheckScheduler) resetAfterBookkeepingSuccess() {
 
 func (s *recheckScheduler) resetAfterRunnerSuccess() {
 	s.resetAfterBookkeepingSuccess()
+	s.stateMu.Lock()
+	s.acquisitionFailureActive = false
+	s.stateMu.Unlock()
+	s.clearBlockedHeadEdge()
+}
+
+func (s *recheckScheduler) logRecheckAcquisitionFailure(result alertlifecycle.RecheckBatchResult, err error) {
+	s.stateMu.Lock()
+	edge := !s.acquisitionFailureActive
+	s.acquisitionFailureActive = true
+	s.stateMu.Unlock()
+	level := slog.LevelDebug
+	if edge {
+		level = slog.LevelWarn
+	}
+	stage := result.FailureStage
+	if stage == "" {
+		stage = "acquire_writer"
+	}
+	reasonCode := result.FailureClass
+	if reasonCode == "" {
+		reasonCode = "writer_acquisition"
+	}
+	attrs := append(recheckQueueDepthAttrs(result.QueueDepth), slog.Int64("job_id", result.JobID), slog.String("stage", stage), slog.String("reason_code", reasonCode), slog.String("error", alertlifecycle.SanitizeRecheckError(err)))
+	runtimeLog.Event(s.ctx, level, "silence_recheck", "worker_acquisition_failed", "Recheck worker could not acquire or prepare its transaction", attrs...)
+}
+
+func (s *recheckScheduler) logRecheckRetryDeferred(result alertlifecycle.RecheckBatchResult, next *time.Time) {
+	attrs := append(recheckQueueDepthAttrs(result.QueueDepth), slog.Int64("job_id", result.JobID), slog.String("status", "retry_wait"))
+	if next != nil {
+		attrs = append(attrs, slog.String("next_attempt_at", next.UTC().Format(time.RFC3339Nano)))
+	}
+	runtimeLog.Event(s.ctx, slog.LevelDebug, "silence_recheck", "retry_deferred", "Recheck retry head is not due", attrs...)
+}
+
+func (s *recheckScheduler) logBestEffort(emit func()) {
+	defer func() {
+		if recover() != nil {
+			runtimeLog.WarnContext(s.ctx, "silence_recheck", "observability_collection_failed", "Recheck scheduler event emission failed", slog.String("stage", "scheduler_event"), slog.String("error", "observability_error"))
+		}
+	}()
+	emit()
+}
+
+func (s *recheckScheduler) logRecheckRetryScheduled(result alertlifecycle.RecheckBatchResult, next time.Time) {
+	runtimeLog.Event(s.ctx, slog.LevelWarn, "silence_recheck", "retry_scheduled", "Recheck retry was durably scheduled", slog.Int64("job_id", result.JobID), slog.String("status", result.Status), slog.Int("attempt_count", result.AttemptCount), slog.Int("retry_count", result.RetryCount), slog.Int("consecutive_retry_count", result.ConsecutiveRetryCount), slog.String("failure_class", result.FailureClass), slog.String("failure_stage", result.FailureStage), slog.String("next_attempt_at", next.UTC().Format(time.RFC3339Nano)))
+}
+
+func (s *recheckScheduler) logRecheckQueueBlocked(result alertlifecycle.RecheckBatchResult) {
+	s.stateMu.Lock()
+	edge := result.JobID != s.blockedHeadID || result.Status != s.blockedHeadStatus
+	s.blockedHeadID = result.JobID
+	s.blockedHeadStatus = result.Status
+	s.stateMu.Unlock()
+	level := slog.LevelDebug
+	if edge {
+		level = slog.LevelWarn
+	}
+	attrs := append(recheckQueueDepthAttrs(result.QueueDepth), slog.Int64("job_id", result.JobID), slog.String("status", result.Status))
+	runtimeLog.Event(s.ctx, level, "silence_recheck", "failed_job_blocks_queue", "Recheck queue head blocks later jobs", attrs...)
+}
+
+func recheckQueueDepthAttrs(queueDepth *int) []slog.Attr {
+	attrs := []slog.Attr{slog.Bool("queue_depth_available", queueDepth != nil)}
+	if queueDepth != nil {
+		attrs = append(attrs, slog.Int("queue_depth", *queueDepth))
+	}
+	return attrs
+}
+
+func (s *recheckScheduler) logRecheckInfrastructure(result alertlifecycle.RecheckBatchResult, reason, stage string, err error) {
+	if !alertlifecycle.ValidRecheckInfrastructurePair(stage, reason) {
+		runtimeLog.ErrorContext(s.ctx, "silence_recheck", "job_infrastructure_contract_violation", "Invalid silence recheck infrastructure mapping", slog.Int64("job_id", result.JobID), slog.String("stage", stage), slog.String("reason_code", reason))
+		return
+	}
+	level := alertlifecycle.RecheckInfrastructureLogLevel(stage, reason)
+	operation := "recheck_batch"
+	if result.Disposition == alertlifecycle.RecheckBatchFailurePersistenceFailed || errors.Is(err, alertlifecycle.ErrRecheckFailurePersistence) {
+		operation = "recheck_failure"
+	}
+	runtimeLog.Event(s.ctx, level, "silence_recheck", "job_infrastructure_blocked", "Recheck infrastructure blocked progress", slog.String("writer_operation", operation), slog.String("stage", stage), slog.Int64("job_id", result.JobID), slog.String("reason_code", reason), slog.String("error", alertlifecycle.SanitizeRecheckError(err)))
 }
 
 func signalAlertLifecycleRecheck() {

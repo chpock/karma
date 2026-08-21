@@ -1350,8 +1350,8 @@ func TestRunSilenceRecheckBatchPromotesInactiveAndAddsCause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSilenceRecheckBatch() returned error: %v", err)
 	}
-	if promoted != 1 {
-		t.Fatalf("expected promoted=1, got=%d", promoted)
+	if promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("expected promoted=1, got=%d", promoted.OutcomeCounts.Promoted)
 	}
 
 	got, err := store.GetCurrentAlert("inactive-a")
@@ -1704,8 +1704,8 @@ func TestRunSilenceRecheckBatchRequiresAllRelevantSourcesToMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSilenceRecheckBatch() returned error: %v", err)
 	}
-	if promoted != 0 {
-		t.Fatalf("expected promoted=0 when only one relevant source matches, got=%d", promoted)
+	if promoted.OutcomeCounts.Promoted != 0 {
+		t.Fatalf("expected promoted=0 when only one relevant source matches, got=%d", promoted.OutcomeCounts.Promoted)
 	}
 
 	got, err := store.GetCurrentAlert("inactive-multi")
@@ -1845,14 +1845,14 @@ func TestRunSilenceRecheckBatchPromotesOnlyMatchedTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunSilenceRecheckBatch() returned error: %v", err)
 	}
-	if promoted != 0 {
-		t.Fatalf("empty predecessor must not promote a late target, got=%d", promoted)
+	if promoted.OutcomeCounts.Promoted != 0 {
+		t.Fatalf("empty predecessor must not promote a late target, got=%d", promoted.OutcomeCounts.Promoted)
 	}
 	if promoted, err = store.RunSilenceRecheckBatch(1000); err != nil {
 		t.Fatalf("complete first target recheck job: %v", err)
 	}
-	if promoted != 1 {
-		t.Fatalf("expected promoted=1 for target-only successor, got=%d", promoted)
+	if promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("expected promoted=1 for target-only successor, got=%d", promoted.OutcomeCounts.Promoted)
 	}
 
 	global, err := store.GetCurrentAlert("inactive-target-split")
@@ -1928,13 +1928,13 @@ WHERE alert_id='inactive-target-split' AND target='cluster-a' AND source='silenc
 	if err != nil {
 		t.Fatalf("RunSilenceRecheckBatch() second target returned error: %v", err)
 	}
-	if promoted != 1 {
+	if promoted.OutcomeCounts.Promoted != 1 {
 		var jobStates string
 		_ = store.db.QueryRow(`SELECT group_concat(status || ':' || processed_candidates || ':' || promoted_candidates, ',') FROM silence_recheck_jobs ORDER BY job_id`).Scan(&jobStates)
 		var ruleCounts string
 		_ = store.db.QueryRow(`SELECT group_concat(job_id || ':' || (SELECT COUNT(*) FROM silence_recheck_job_rules r WHERE r.job_id=j.job_id), ',') FROM silence_recheck_jobs j ORDER BY job_id`).Scan(&ruleCounts)
 		bRows, _ := store.ListTargetAlertsForPreview("cluster-b")
-		t.Fatalf("expected global promotion after second target cause, got=%d jobs=%s rules=%s targetB=%+v", promoted, jobStates, ruleCounts, bRows)
+		t.Fatalf("expected global promotion after second target cause, got=%d jobs=%s rules=%s targetB=%+v", promoted.OutcomeCounts.Promoted, jobStates, ruleCounts, bRows)
 	}
 	global, err = store.GetCurrentAlert("inactive-target-split")
 	if err != nil || global == nil || global.State != StateSuppressed || !global.IsSuppressed {
@@ -2203,8 +2203,8 @@ func TestRecheckSkipsStaleRulesFromFailedSourceUntilRecovery(t *testing.T) {
 	}); applyErr != nil || result.RecheckJobsQueued != 1 {
 		t.Fatalf("failed-source context was not queued: result=%+v err=%v", result, applyErr)
 	}
-	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted != 0 {
-		t.Fatalf("stale failed-source rule promoted candidate: promoted=%d err=%v", promoted, runErr)
+	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted.OutcomeCounts.Promoted != 0 {
+		t.Fatalf("stale failed-source rule promoted candidate: promoted=%d err=%v", promoted.OutcomeCounts.Promoted, runErr)
 	}
 	current, err := store.GetCurrentAlert("failed-source-candidate")
 	if err != nil || current == nil || current.IsSuppressed || current.State != StateInactive {
@@ -2227,8 +2227,8 @@ func TestRecheckSkipsStaleRulesFromFailedSourceUntilRecovery(t *testing.T) {
 	}); applyErr != nil || result.RecheckJobsQueued != 1 {
 		t.Fatalf("source recovery did not queue successor: result=%+v err=%v", result, applyErr)
 	}
-	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted != 1 {
-		t.Fatalf("recovered complete source set did not promote: promoted=%d err=%v", promoted, runErr)
+	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("recovered complete source set did not promote: promoted=%d err=%v", promoted.OutcomeCounts.Promoted, runErr)
 	}
 }
 
@@ -2384,21 +2384,22 @@ func TestFailedRecheckJobBlocksLaterJobsAndIsObservable(t *testing.T) {
 	defer store.Close()
 	nowRaw := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err = store.db.Exec(`
-INSERT INTO silence_recheck_jobs(status, created_at, started_at, finished_at, source_context_json, source_context_fingerprint, job_fingerprint, trigger_type, first_error_message, last_error_message)
-VALUES('failed', ?, ?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'failed-fp', 'sha256:failed-fp', 'source_context_changed', 'forced failure', 'forced failure'),
-      ('queued', ?, NULL, NULL, '{"formatVersion":1,"sources":[],"clusters":[]}', 'later-fp', 'sha256:later-fp', 'source_context_changed', NULL, NULL)
-	`, nowRaw, nowRaw, nowRaw, nowRaw); err != nil {
+INSERT INTO silence_recheck_jobs(status, created_at, started_at, finished_at, source_context_json, source_context_fingerprint, job_fingerprint, trigger_type, first_error_message, first_error_class, first_error_stage, first_error_at, last_error_message, last_error_class, last_error_stage, last_error_at)
+VALUES('failed', ?, ?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'failed-fp', 'sha256:failed-fp', 'source_context_changed', 'forced failure', 'terminal', 'persist_candidate', ?, 'forced failure', 'terminal', 'persist_candidate', ?),
+       ('queued', ?, NULL, NULL, '{"formatVersion":1,"sources":[],"clusters":[]}', 'later-fp', 'sha256:later-fp', 'source_context_changed', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)
+	`, nowRaw, nowRaw, nowRaw, nowRaw, nowRaw, nowRaw); err != nil {
 		t.Fatalf("seed recheck jobs: %v", err)
 	}
 	stats, err := store.GetStats()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.RecheckQueueDepth != 2 || stats.RecheckCurrentStatus != "failed" || stats.RecheckCurrentError != "forced failure" {
+	if stats.Recheck.QueueDepth != 2 || stats.Recheck.HeadJob == nil || stats.Recheck.HeadJob.Status != "failed" || stats.Recheck.HeadJob.LastError == nil || stats.Recheck.HeadJob.LastError.Message != "forced failure" {
 		t.Fatalf("unexpected recheck observability: %+v", stats)
 	}
-	if _, err = store.RunSilenceRecheckBatch(100); err == nil || !strings.Contains(err.Error(), "blocks later jobs") {
-		t.Fatalf("expected failed FIFO job to block later jobs, got=%v", err)
+	blockedResult, runErr := store.RunSilenceRecheckBatch(100)
+	if runErr != nil || blockedResult.Disposition != RecheckBatchQueueBlocked {
+		t.Fatalf("expected failed FIFO job to return queue_blocked, result=%+v err=%v", blockedResult, runErr)
 	}
 	var laterStatus string
 	if err = store.db.QueryRow(`SELECT status FROM silence_recheck_jobs WHERE source_context_fingerprint='later-fp'`).Scan(&laterStatus); err != nil {
@@ -2408,7 +2409,7 @@ VALUES('failed', ?, ?, ?, '{"formatVersion":1,"sources":[],"clusters":[]}', 'fai
 		t.Fatalf("later job must remain queued, got=%q", laterStatus)
 	}
 	stats, err = store.GetStats()
-	if err != nil || stats.RecheckCurrentError != "forced failure" {
+	if err != nil || stats.Recheck.HeadJob == nil || stats.Recheck.HeadJob.LastError == nil || stats.Recheck.HeadJob.LastError.Message != "forced failure" {
 		t.Fatalf("failed job root cause must remain immutable: stats=%+v err=%v", stats, err)
 	}
 }

@@ -527,6 +527,28 @@ describe("UpdateLocationSearch", () => {
 });
 
 describe("AlertStore.fetch", () => {
+  it("keeps authentication readiness unresolved until an authoritative alerts response", () => {
+    const store = new AlertStore([]);
+
+    expect(store.info.authenticationReady).toBe(false);
+
+    const failedResponse = EmptyAPIResponse();
+    failedResponse.error = "alerts unavailable";
+    store.parseAPIResponse(failedResponse);
+    expect(store.info.authenticationReady).toBe(false);
+
+    const response = EmptyAPIResponse();
+    response.filters = [];
+    response.authentication = { enabled: true, username: "operator" };
+    store.parseAPIResponse(response);
+
+    expect(store.info.authenticationReady).toBe(true);
+    expect(store.info.authentication).toEqual({
+      enabled: true,
+      username: "operator",
+    });
+  });
+
   it("parseAPIResponse() rejects a response with mismatched filters", () => {
     const consoleSpy = jest.spyOn(console, "info").mockImplementation(() => {});
 
@@ -535,6 +557,7 @@ describe("AlertStore.fetch", () => {
     store.parseAPIResponse(response);
 
     expect(store.status.value).toEqual(AlertStoreStatuses.Idle);
+    expect(store.info.authenticationReady).toBe(false);
     // there should be no filters set on AlertStore instance since we started
     // with 0 and rejected response with 1 filter
     expect(store.filters.values).toHaveLength(0);
@@ -551,6 +574,7 @@ describe("AlertStore.fetch", () => {
     expect(store.status.value).toEqual(AlertStoreStatuses.Idle);
     expect(store.info.version).toBe("fakeVersion");
     expect(store.filters.values[0].applied).toBe(true);
+    expect(store.info.authenticationReady).toBe(true);
   });
 
   it("fetch() works with valid response", async () => {
@@ -584,6 +608,7 @@ describe("AlertStore.fetch", () => {
     expect(fetchMock.callHistory.calls()).toHaveLength(1);
     expect(store.status.value).toEqual(AlertStoreStatuses.Failure);
     expect(store.info.version).toBe("unknown");
+    expect(store.info.authenticationReady).toBe(false);
   });
 
   it("fetch() handles response that throws an error correctly", async () => {

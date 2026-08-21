@@ -55,10 +55,13 @@ It must return a clear error instructing the operator to stop Karma and recreate
 disposable database. It must not silently run `CREATE TABLE IF NOT EXISTS` against an
 incompatible v1 layout, auto-delete the database, migrate it, or partially repair it.
 
-Step 0 was applied before implementing Problem 1: currently false conformance claims
-were marked `Known violation; tracked by silence-recheck-problems.md`. Problem 2 and D14
-are implemented and independently accepted. Problem 3 is implemented. D10 remains open for
-Problem 4 observability work.
+Step 0 was applied before implementing Problem 1: currently false conformance claims were marked
+`Known violation; tracked by silence-recheck-problems.md`. Problem 2 and D14 are implemented
+and independently accepted. Problem 4 is also implemented and independently accepted. The
+Problem 3 implementation phase is
+complete, with the independent shutdown-precedence defect tracked as Problem 8. The operator
+replay-ledger contract is normative in ADR-005, ADR-007, `storage-schema.md`, and
+`implementation-contracts.md`.
 
 Record the approved architecture in fork ADRs before the corresponding broad code
 change:
@@ -67,18 +70,21 @@ change:
 - `fork-docs/ADR/ADR-006-immutable-recheck-job-input.md`, including the combined
   final Problems 2-3 DDL, before Problem 2; and
 - `fork-docs/ADR/ADR-007-recheck-attempt-retry-recovery.md` before Problem 3.
+- `fork-docs/ADR/ADR-008-recheck-observability-and-operator-presentation.md` before
+  Problem 4's observability and UI changes.
 
 ## Resolution Order
 
 ### 1. Establish the Root Cause of the Original SQLite Busy Error
 
-**Status: Problems 1-3 implemented; Problems 4-7 remain pending**
+**Status: Problems 1-4 implemented; Problems 5-9 remain pending**
 
 The writer-ownership implementation, fail-fast PID test infrastructure, typed
 acquisition and cancellation handling, domain-state regressions, writer/shutdown
 evidence, and final verification are complete for Problem 1. Problems 2 and 3 are
 implemented.
-Problems 4-7 remain pending.
+Problem 4 is implemented and independently accepted.
+Problems 5-9 remain pending.
 
 The remediation includes the durable `lifecycle_writer_commits` ledger, typed
 `committed`/`not_committed`/`unknown` outcomes, bounded internal recovery contexts,
@@ -844,7 +850,10 @@ Store a canonical request fingerprint so reuse of one request ID with a differen
 action or reason can be rejected rather than mistaken for an idempotent replay. The
 versioned canonical input is exactly `{action, normalizedReason, normalizedActor}`.
 Authenticate and normalize the actor before looking up an existing request. Replaying
-the request under a different actor returns HTTP 409.
+the request under a different actor returns HTTP 409. An exact replay returns the original
+operator result and creates no second domain action, event, or scheduler wake. Its committed
+Store writer invocation still appends exactly one operational `lifecycle_writer_commits`
+row; semantic replay equality excludes only that expected reconciliation-ledger delta.
 
 Do not store labels, matchers, comments, headers, or other sensitive domain payloads
 in attempt rows or logs. Preserve sanitized operational error text only.
@@ -964,13 +973,21 @@ Signal the scheduler on:
 - startup, so queued/running/retry-wait work resumes after restart;
 - committed job creation;
 - committed operator retry or abandonment;
-- delayed cross-operation reconciliation that confirms a committed selected recheck
-  attempt; and
+- delayed cross-operation reconciliation that confirms a committed selected
+  `recheck_batch` attempt; and
 - completion of a wait timer.
 
 An ordinary or immediately reconciled recheck batch is already owned by the active
 scheduler and must not wake it. Empty/no-work commits never wake it. A wake received while
 either timer kind is active is coalesced and cannot run the worker before the timer event.
+Immediate and reconciled committed `recheck_failure` use one operation-specific event
+finalizer. It emits the retained selection and terminal-failure event when applicable; a
+terminal outcome then releases its terminal-failure finalization barrier. Reconciled failure uses the already-active
+reconciliation timer and retained retry/failed result without a finalizer wake. A waiting
+Retry or Abandon mutation proceeds only after the failure barrier is released. A successful
+operator mutation publishes a separate operator-action finalization barrier before writer
+unlock; recheck execution waits for that barrier so `operator_action_applied` is attempted
+before operator-released work can be selected or its scheduler wake becomes runnable.
 
 The scheduler may process consecutive batches while runnable work exists, but every
 batch must release Store writer ownership before the next batch so poll, resolve,
@@ -1129,10 +1146,11 @@ suites.
 
 After these criteria pass, update the phase-2 schema/plan, lifecycle state machine,
 writer projection audit, architecture conformance/verification, API route contract,
-and implementation plan with the implemented state/scheduler/operator contract. Keep
-Problem 4 logging and UI claims marked pending until their tests pass.
+and implementation plan with the implemented state/scheduler/operator contract.
 
 ### 4. Correct Recheck Observability and Operator Presentation
+
+**Status: Implemented and independently accepted**
 
 **Dependency**
 
@@ -1168,6 +1186,7 @@ Replace the current `(promoted int, error)` contract with a result that distingu
 - `retry_deferred`;
 - `queue_blocked`;
 - `acquisition_failed`;
+- `infrastructure_failed`;
 - `commit_outcome_unknown`;
 - `job_failed`; and
 - `failure_persistence_failed`.
@@ -1195,6 +1214,17 @@ Use this event ownership and level contract:
 Do not emit `job_selected`, `job_failed`, or outer `worker_failed` for a persisted
 blocker. Remove duplicate wrapper error logging when the Store/scheduler result already
 owns the state transition event.
+
+`queue_blocked` and `retry_deferred` are successful typed results with no invocation
+error. A selected terminal infrastructure outcome uses the non-durable
+`infrastructure_failed` disposition and is emitted exactly once by cmd as
+`job_infrastructure_blocked`; pre-selection acquisition uses only
+`worker_acquisition_failed`. The registered batch reason codes are
+`writer_unavailable`, `writer_invariant`, `rollback_failed`, `store_closing`,
+`store_closed`, `worker_cancelled`, `worker_deadline`, `infrastructure_unclassified`,
+and `queue_read_terminal`. Failure-persistence reason codes use the corresponding
+`failure_persistence_*` namespace. Commit uncertainty and confirmed non-commit remain
+Problem 3 reconciliation/failure paths and are not terminal infrastructure reasons.
 
 Edge-sensitive logging state must reset when the head job or head status changes. It
 must not be the source of domain truth and does not need to survive restart; the
@@ -1417,7 +1447,8 @@ implemented presentation contract.
 
 This is a final integration and traceability gate. It introduces no new job states,
 retry policy, creator behavior, counters, logs, API semantics, or UI decisions.
-Focused regressions belong to Problems 1-4 and must already pass before this gate.
+Focused regressions belong to Problems 1-4, 8, and 9 and must already pass before this
+gate.
 
 #### Step 1: Verify phase-boundary records and ADRs
 
@@ -1525,6 +1556,14 @@ go test ./... -count=1 -timeout 180s
 git diff --check
 ```
 
+The Problem 4 visual project is intentionally scoped to the installed Chromium,
+Firefox, and Android Playwright projects; WebKit and iPhone exclude this feature in
+`ui/playwright.config.ts` because their host dependencies are unavailable. The scoped
+suite must independently render every changed warning state in both themes and assert
+computed issue-card/button colors, real border style/width, text and non-text contrast,
+and horizontal-overflow safety. Do not record measured results until those exact rendered
+states and visible boundaries pass.
+
 Add a local light/dark visual fixture named `Fork lifecycle warning` to
 `ui/src/e2e/visual.spec.ts`. It must render every resting, retrying, blocked, loading,
 disabled, hover, focus, confirmation, success, and error state changed by Problem 4.
@@ -1626,6 +1665,81 @@ runtime behavior is internally consistent.
 Problem 7 does not block Problem 2 acceptance and must be implemented as a separate
 change after the ordered lifecycle work unless the execution plan is explicitly changed.
 
+### 8. Preserve Selected-Error Precedence During Shutdown
+
+**Status: Confirmed independent defect; deferred until after Problem 4 and before the final end-to-end gate**
+
+This problem is independent from Problem 4 presentation. It covers ordinary retryable or
+terminal job failures that belong to durable failure bookkeeping. Typed writer
+lifecycle, rollback, and invariant infrastructure remain non-durable Problem 4 result
+classification and are explicitly excluded here.
+
+The recheck worker currently checks `ctx.Err()` after an ordinary selected-operation
+error and can relabel that earlier error as normal shutdown cancellation if shutdown wins
+the small classification race. The batch transaction has already rolled back, but the
+real retryable or terminal failure is not persisted and the attempt is repeated after
+restart without its required durable history.
+
+The controlling Problem 3 rule needs an explicit causal precedence:
+
+- if the worker operation itself returns cancellation/deadline before another failure,
+  roll back with no retry count and no failed state;
+- if an ordinary retryable/terminal selected-operation failure is established first,
+  later shutdown must not erase it. Persist its ordinary attempt result through the
+  existing bounded failure-bookkeeping ownership before releasing the scheduler;
+- a genuinely unknown Commit outcome takes precedence over both and remains owned by
+  durable reconciliation; and
+- context state alone must never replace a typed operation cause.
+
+Required work:
+
+1. Record the precedence in ADR-007 and the Problem 3 state-machine contract before code.
+2. Add deterministic barriers for cancellation-first, retryable-error-first then
+   cancellation, terminal-error-first then cancellation, and unknown-Commit then
+   cancellation.
+3. For each branch compare the full job, attempt, writer-ledger, candidate, and counter
+   snapshot plus exact scheduler wake/timer behavior across restart.
+4. Use a bounded internal bookkeeping/reconciliation context only where Problem 3 already
+   owns durable completion. Do not turn normal cancellation into a retry or terminal
+   failure.
+5. Do not change Problem 4 issue rendering, event taxonomy, API shape, typed
+   writer-infrastructure classification, candidate input, retry budget, or durable
+   statuses in this work.
+
+Problem 8 does not block independent acceptance of the otherwise-correct Problem 4
+presentation, but it must close before Problem 5 signs off end-to-end recheck behavior.
+
+### 9. Complete Generic Writer Diagnostic Redaction and Event Registration
+
+**Status: Confirmed independent logging defect; deferred until after Problem 4 and before the final end-to-end gate**
+
+This problem is independent from Problem 4 recheck/regroup presentation. The generic
+writer rollback-recovery path still attaches a raw recovery error to a runtime event:
+
+- `internal/fork/alertlifecycle/store.go:1032`.
+
+The generic writer also emits `observability_collection_failed` for panic cleanup and
+post-commit handoff/finalizer failures, while the current logging registry defines that
+event as transaction-local poll metadata only. The runtime name/level/field contract is
+therefore contradictory even where the value is already sanitized.
+
+Required work:
+
+1. Define a generic lifecycle-writer safe-error classifier rather than relying on a
+   recheck-named helper.
+2. Remove the raw rollback-recovery error and use only its safe category.
+3. Register exact component, event, level, writer-operation, stage, and safe-error fields
+   for rollback recovery, panic cleanup, post-commit handoff, and finalizer panic. Either
+   broaden `observability_collection_failed` explicitly or assign a more accurate stable
+   writer event; do not leave code and registry inconsistent.
+4. Add sentinel tests for every registered branch and prove logging failure cannot change
+   transaction, reconciliation, handoff, or Store lifecycle outcomes.
+5. Do not change writer ownership, Commit reconciliation, retry policy, Problem 4 API/UI,
+   or durable schema in this work.
+
+Problem 9 does not block Problem 4 acceptance, but it must close before the final runtime
+logging and end-to-end gate.
+
 ## Execution Order and Scope Guard
 
 Execute the work in this exact order:
@@ -1635,9 +1749,11 @@ Execute the work in this exact order:
 2. Problem 2 immutable job creation and provenance;
 3. Problem 3 attempts, retry, failure, and operator recovery;
 4. Problem 4 observability and operator presentation;
-5. Problem 5 end-to-end verification and documentation;
-6. deferred Problem 6 PID lease/harness hardening; and
-7. deferred Problem 7 completed-job retention documentation reconciliation.
+5. Problem 8 selected-error/shutdown precedence;
+6. Problem 9 generic writer diagnostic redaction/registration;
+7. Problem 5 end-to-end verification and documentation;
+8. deferred Problem 6 PID lease/harness hardening; and
+9. deferred Problem 7 completed-job retention documentation reconciliation.
 
 Finish the production code, focused regressions, and required documentation for one
 problem before implementing the next. Problems 2 and 3 must share one approved

@@ -19,8 +19,8 @@ func TestProblem3Review9SchedulerTypedUnavailableTerminalCausesStopWithoutTimer(
 			clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 8, 0, 0, 0, time.UTC)}
 			scheduler := newRecheckScheduler(nil, clock)
 			timer := clock.NewTimer(time.Second)
-			scheduler.runner = func(context.Context, int) (int, error) {
-				return 0, alertlifecycle.NewRecheckFailurePersistenceError(cause, false)
+			scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+				return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckFailurePersistenceError(cause, false)
 			}
 
 			result := scheduler.process(timer, nil)

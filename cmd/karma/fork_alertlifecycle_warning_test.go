@@ -49,11 +49,8 @@ func TestAlertLifecycleWarningShowsPersistentWarningWhenDBNotExpected(t *testing
 	if resp.DBExpectedState {
 		t.Fatalf("expected DBExpectedState=false, got true: %+v", resp)
 	}
-	if resp.RegroupStatus != "ready" {
-		t.Fatalf("expected regroupStatus=ready, got=%q", resp.RegroupStatus)
-	}
-	if resp.Reason == "" {
-		t.Fatal("expected warning reason to be non-empty")
+	if !warningHasIssue(resp, "regroup_out_of_date") {
+		t.Fatalf("expected regroup_out_of_date issue, got=%+v", resp)
 	}
 }
 
@@ -119,11 +116,8 @@ func TestAlertLifecycleWarningClearsAfterRegroupReachesExpectedState(t *testing.
 	if !resp.DBExpectedState {
 		t.Fatalf("expected DBExpectedState=true after regroup, got false: %+v", resp)
 	}
-	if resp.Reason != "" {
-		t.Fatalf("expected empty warning reason after regroup, got=%q", resp.Reason)
-	}
-	if resp.RegroupStatus != "ready" {
-		t.Fatalf("expected regroupStatus=ready, got=%q", resp.RegroupStatus)
+	if len(resp.Issues) != 0 {
+		t.Fatalf("expected no warning issues after regroup, got=%+v", resp.Issues)
 	}
 }
 
@@ -154,7 +148,7 @@ func TestAlertLifecycleWarningReportsSilenceHAInconsistency(t *testing.T) {
 	rr := httptest.NewRecorder()
 	alertLifecycleWarning(rr, req)
 	resp := decodeWarningResponse(t, rr)
-	if resp.DBExpectedState || len(resp.SilenceInconsistentClusters) != 1 || resp.SilenceInconsistentClusters[0] != "cluster-ha" {
+	if resp.DBExpectedState || !warningHasIssue(resp, "silence_ha_inconsistent") {
 		t.Fatalf("expected persistent HA inconsistency warning, got=%+v", resp)
 	}
 }
@@ -167,4 +161,13 @@ func decodeWarningResponse(t *testing.T, rr *httptest.ResponseRecorder) alertLif
 		t.Fatalf("failed to decode warning response: %v, raw=%s", err, rr.Body.String())
 	}
 	return resp
+}
+
+func warningHasIssue(response alertLifecycleWarningResponse, kind string) bool {
+	for _, issue := range response.Issues {
+		if issue.Kind == kind {
+			return true
+		}
+	}
+	return false
 }

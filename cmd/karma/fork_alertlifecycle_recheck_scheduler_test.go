@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -31,13 +32,13 @@ func TestProblem3Review4WakeCannotBypassProcessLocalBackoff(t *testing.T) {
 	scheduler.signalDeferred = func() { signalDeferred <- struct{}{} }
 	scheduler.wakeDeferred = func() { wakeDeferred <- struct{}{} }
 	call := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		call++
 		calls <- call
 		if call == 1 {
-			return 0, errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5))
+			return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5))
 		}
-		return 0, nil
+		return alertlifecycle.RecheckBatchResult{}, nil
 	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, nil
@@ -80,13 +81,13 @@ func TestProblem3Review4WakeCannotBypassPersistedRetryDueTimer(t *testing.T) {
 	scheduler.wakeDeferred = func() { wakeDeferred <- struct{}{} }
 	call := 0
 	next := clock.now.Add(30 * time.Second)
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		call++
 		calls <- call
 		if call == 1 {
-			return 0, &alertlifecycleTestRetryScheduledError{next: next}
+			return alertlifecycle.RecheckBatchResult{}, &alertlifecycleTestRetryScheduledError{next: next}
 		}
-		return 0, nil
+		return alertlifecycle.RecheckBatchResult{}, nil
 	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, nil
@@ -131,7 +132,7 @@ func TestProblem3Review4EmptyStoreRunDoesNotSelfWake(t *testing.T) {
 	calls := make(chan int, 4)
 	productionRunner := scheduler.runner
 	call := 0
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
 		call++
 		calls <- call
 		return productionRunner(ctx, batchSize)
@@ -155,10 +156,10 @@ func TestProblem3Review4ReconciledHandoffWakesIdleSchedulerExactlyOnce(t *testin
 	scheduler := newRecheckScheduler(nil, clock)
 	calls := make(chan int, 4)
 	call := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		call++
 		calls <- call
-		return 0, nil
+		return alertlifecycle.RecheckBatchResult{}, nil
 	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, nil
@@ -184,8 +185,8 @@ func TestProblem3Review4CommitUnknownResetsPreAttemptOnlyAndAdvancesReconciliati
 	scheduler := newRecheckScheduler(nil, clock)
 	scheduler.backoffStep[recheckBackoffPreAttempt] = 2
 	scheduler.backoffStep[recheckBackoffReconciliation] = 2
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, alertlifecycle.NewRecheckWriterCommitUnknownError(alertlifecycle.RecheckBatchWriterOperation, context.DeadlineExceeded)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckWriterCommitUnknownError(alertlifecycle.RecheckBatchWriterOperation, context.DeadlineExceeded)
 	}
 	timer := clock.NewTimer(time.Second)
 	scheduler.process(timer, nil)
@@ -210,8 +211,8 @@ func TestProblem3Review4ResolvedReconciliationThenBookkeepingFailureUsesBookkeep
 	scheduler := newRecheckScheduler(nil, clock)
 	scheduler.backoffStep[recheckBackoffReconciliation] = 2
 	scheduler.backoffStep[recheckBackoffBookkeeping] = 2
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, alertlifecycle.NewRecheckFailurePersistenceError(problem3Review4ResolvedBookkeepingError{}, true)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckFailurePersistenceError(problem3Review4ResolvedBookkeepingError{}, true)
 	}
 	timer := clock.NewTimer(time.Second)
 	scheduler.process(timer, nil)
@@ -227,7 +228,9 @@ func TestProblem3Review4QueueReadBackoffSurvivesRunnerDisposition(t *testing.T) 
 	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)}
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, nil }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, nil
+	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, schedulerSQLiteError(5)
 	}
@@ -236,8 +239,8 @@ func TestProblem3Review4QueueReadBackoffSurvivesRunnerDisposition(t *testing.T) 
 	if got := scheduler.backoffStep[recheckBackoffQueueRead]; got != 2 {
 		t.Fatalf("queue-read step=%d want=2", got)
 	}
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, &alertlifecycleTestRetryScheduledError{next: clock.now.Add(time.Minute)}
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, &alertlifecycleTestRetryScheduledError{next: clock.now.Add(time.Minute)}
 	}
 	scheduler.process(timer, nil)
 	if got := scheduler.backoffStep[recheckBackoffQueueRead]; got != 2 {
@@ -333,7 +336,9 @@ func TestRecheckSchedulerProductionRunnerBackoffAndReset(t *testing.T) {
 	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 1, 0, 0, 0, time.UTC)}
 	scheduler := newRecheckScheduler(nil, clock)
 	acquisitionError := errors.Join(alertlifecycle.ErrWriterAcquisition, errors.New("temporary writer acquisition"))
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, acquisitionError }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, acquisitionError
+	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, nil
 	}
@@ -342,8 +347,8 @@ func TestRecheckSchedulerProductionRunnerBackoffAndReset(t *testing.T) {
 	if len(clock.timer.resets) != 0 {
 		t.Fatal("unclassified acquisition error unexpectedly scheduled a retry")
 	}
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5))
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5))
 	}
 	scheduler.process(timer, nil)
 	if len(clock.timer.resets) != 1 || clock.timer.resets[0] != time.Second {
@@ -353,7 +358,9 @@ func TestRecheckSchedulerProductionRunnerBackoffAndReset(t *testing.T) {
 	if len(clock.timer.resets) != 2 || clock.timer.resets[1] != 5*time.Second {
 		t.Fatalf("second acquisition backoff=%v", clock.timer.resets)
 	}
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, nil }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, nil
+	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{JobID: 7, Status: "failed"}, nil
 	}
@@ -368,12 +375,14 @@ func TestRecheckSchedulerBackoffOwnersAreIndependent(t *testing.T) {
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
 	acquisitionError := errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5))
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, acquisitionError }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, acquisitionError
+	}
 	scheduler.process(timer, nil)
 	scheduler.process(timer, nil)
 
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, alertlifecycle.NewRecheckFailurePersistenceError(errors.New("bookkeeping unavailable"), true)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckFailurePersistenceError(errors.New("bookkeeping unavailable"), true)
 	}
 	scheduler.process(timer, nil)
 
@@ -383,12 +392,34 @@ func TestRecheckSchedulerBackoffOwnersAreIndependent(t *testing.T) {
 	}
 }
 
+func TestRecheckSchedulerCommitUnknownResetsAcquisitionEdgeBeforeNextFailure(t *testing.T) {
+	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 2, 0, 0, 0, time.UTC)}
+	scheduler := newRecheckScheduler(nil, clock)
+	timer := clock.NewTimer(time.Second)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5))
+	}
+	scheduler.process(timer, nil)
+	scheduler.process(timer, nil)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckWriterCommitUnknownError(alertlifecycle.RecheckBatchWriterOperation, context.DeadlineExceeded)
+	}
+	scheduler.process(timer, nil)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterAcquisition, schedulerSQLiteError(5))
+	}
+	scheduler.process(timer, nil)
+	if got, want := clock.timer.resets, []time.Duration{time.Second, 5 * time.Second, time.Second, time.Second}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reset sequence=%v want=%v", got, want)
+	}
+}
+
 func TestRecheckSchedulerInternalDeadlineUsesReconciliationBackoff(t *testing.T) {
 	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 3, 0, 0, 0, time.UTC)}
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, errors.Join(alertlifecycle.ErrWriterCommitOutcomeUnknown, context.DeadlineExceeded)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterCommitOutcomeUnknown, context.DeadlineExceeded)
 	}
 	scheduler.process(timer, nil)
 	if scheduler.ctx.Err() != nil || len(clock.timer.resets) != 1 || clock.timer.resets[0] != time.Second {
@@ -400,8 +431,8 @@ func TestRecheckSchedulerRecoveredBadConnectionUsesAcquisitionBackoff(t *testing
 	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 3, 0, 0, 0, time.UTC)}
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, errors.Join(alertlifecycle.ErrWriterAcquisition, driver.ErrBadConn)
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterAcquisition, driver.ErrBadConn)
 	}
 	scheduler.process(timer, nil)
 	if len(clock.timer.resets) != 1 || clock.timer.resets[0] != time.Second {
@@ -413,8 +444,8 @@ func TestRecheckSchedulerTerminalPreAttemptDoesNotArmTimer(t *testing.T) {
 	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 3, 0, 0, 0, time.UTC)}
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, errors.Join(alertlifecycle.ErrWriterOperationToken, errors.New("entropy unavailable"))
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterOperationToken, errors.New("entropy unavailable"))
 	}
 	scheduler.process(timer, nil)
 	if len(clock.timer.resets) != 0 {
@@ -434,11 +465,11 @@ func TestRecheckSchedulerLoopUsesIndependentBackoffs(t *testing.T) {
 	}
 	calls := make(chan int, len(results))
 	call := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		index := call
 		call++
 		calls <- call
-		return 0, results[index]
+		return alertlifecycle.RecheckBatchResult{}, results[index]
 	}
 	headRead := make(chan struct{}, 1)
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
@@ -466,7 +497,9 @@ func TestRecheckSchedulerQueueReadBackoffIsIndependentAndCapped(t *testing.T) {
 	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 4, 0, 0, 0, time.UTC)}
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, nil }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, nil
+	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, schedulerSQLiteError(5)
 	}
@@ -489,7 +522,9 @@ func TestRecheckSchedulerEachProcessOwnerHasOwnCappedSequence(t *testing.T) {
 			clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 4, 0, 0, 0, time.UTC)}
 			scheduler := newRecheckScheduler(nil, clock)
 			timer := clock.NewTimer(time.Second)
-			scheduler.runner = func(context.Context, int) (int, error) { return 0, processErr }
+			scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+				return alertlifecycle.RecheckBatchResult{}, processErr
+			}
 			for _, want := range []time.Duration{time.Second, 5 * time.Second, 30 * time.Second, 30 * time.Second} {
 				scheduler.process(timer, nil)
 				if got := clock.timer.resets[len(clock.timer.resets)-1]; got != want {
@@ -506,13 +541,13 @@ func TestRecheckSchedulerLoopCoalescesWakeWhileBatchActive(t *testing.T) {
 	entered := make(chan int, 2)
 	releaseFirst := make(chan struct{})
 	calls := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		calls++
 		entered <- calls
 		if calls == 1 {
 			<-releaseFirst
 		}
-		return 0, nil
+		return alertlifecycle.RecheckBatchResult{}, nil
 	}
 	headReads := make(chan struct{}, 2)
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
@@ -544,13 +579,13 @@ func TestRecheckSchedulerLoopDeliversPersistedDueTimer(t *testing.T) {
 	next := clock.now.Add(30 * time.Second)
 	calls := make(chan int, 2)
 	call := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		call++
 		calls <- call
 		if call == 1 {
-			return 0, &alertlifecycleTestRetryScheduledError{next: next}
+			return alertlifecycle.RecheckBatchResult{}, &alertlifecycleTestRetryScheduledError{next: next}
 		}
-		return 0, nil
+		return alertlifecycle.RecheckBatchResult{}, nil
 	}
 	headRead := make(chan struct{}, 1)
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
@@ -574,10 +609,10 @@ func TestRecheckSchedulerLoopDeliversPersistedDueTimer(t *testing.T) {
 func TestRecheckSchedulerConcurrentStartStopHasOneOwner(t *testing.T) {
 	scheduler := newRecheckScheduler(nil, nil)
 	entered := make(chan struct{}, 1)
-	scheduler.runner = func(ctx context.Context, _ int) (int, error) {
+	scheduler.runner = func(ctx context.Context, _ int) (alertlifecycle.RecheckBatchResult, error) {
 		entered <- struct{}{}
 		<-ctx.Done()
-		return 0, ctx.Err()
+		return alertlifecycle.RecheckBatchResult{}, ctx.Err()
 	}
 	var starts sync.WaitGroup
 	for range 8 {
@@ -629,23 +664,28 @@ func TestRecheckSchedulerCommittedAbandonRunsQueuedSuccessor(t *testing.T) {
 	scheduler := newRecheckScheduler(store, clock)
 	store.SetRecheckCommitWake(scheduler.Signal)
 	productionRunner := scheduler.runner
-	runs := make(chan error, 4)
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
+	type schedulerRun struct {
+		result alertlifecycle.RecheckBatchResult
+		err    error
+	}
+	runs := make(chan schedulerRun, 4)
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
 		promoted, runErr := productionRunner(ctx, batchSize)
-		runs <- runErr
+		runs <- schedulerRun{result: promoted, err: runErr}
 		return promoted, runErr
 	}
 	scheduler.Start()
-	var blocked interface{ QueueBlocked() (string, *time.Time) }
-	if runErr := <-runs; !errors.As(runErr, &blocked) {
-		t.Fatalf("first scheduler run=%v", runErr)
+	firstRun := <-runs
+	if firstRun.err != nil || firstRun.result.Disposition != alertlifecycle.RecheckBatchQueueBlocked {
+		t.Fatalf("first scheduler run=%+v", firstRun)
 	}
 	actor := "review2-operator"
 	if _, err = store.AbandonRecheckJobContext(context.Background(), 1, "review2-release", "release head", &actor, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if runErr := <-runs; runErr != nil {
-		t.Fatalf("successor scheduler run=%v", runErr)
+	secondRun := <-runs
+	if secondRun.err != nil {
+		t.Fatalf("successor scheduler run=%+v", secondRun)
 	}
 	scheduler.Stop()
 	var firstStatus, secondStatus string
@@ -679,7 +719,7 @@ func TestRecheckSchedulerStartupResumesPersistedQueuedJob(t *testing.T) {
 	scheduler := newRecheckScheduler(store, &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 5, 0, 0, 0, time.UTC)})
 	productionRunner := scheduler.runner
 	runDone := make(chan error, 2)
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
 		promoted, runErr := productionRunner(ctx, batchSize)
 		runDone <- runErr
 		return promoted, runErr
@@ -706,12 +746,12 @@ func TestCloseAlertLifecycleStoreJoinsSchedulerBeforeStoreClose(t *testing.T) {
 	scheduler := newRecheckScheduler(store, nil)
 	entered := make(chan struct{}, 1)
 	storeAvailable := make(chan error, 1)
-	scheduler.runner = func(ctx context.Context, _ int) (int, error) {
+	scheduler.runner = func(ctx context.Context, _ int) (alertlifecycle.RecheckBatchResult, error) {
 		entered <- struct{}{}
 		<-ctx.Done()
-		_, statsErr := store.GetStats()
+		_, statsErr := store.GetStatsContext(context.WithoutCancel(ctx))
 		storeAvailable <- statsErr
-		return 0, ctx.Err()
+		return alertlifecycle.RecheckBatchResult{}, ctx.Err()
 	}
 	previousStore, previousScheduler := lifecycleStore, lifecycleRecheckScheduler
 	lifecycleStore, lifecycleRecheckScheduler = store, scheduler
@@ -734,8 +774,8 @@ func TestCloseAlertLifecycleStoreJoinsSchedulerBeforeStoreClose(t *testing.T) {
 func TestRecheckSchedulerReplacesHeadTimerWithoutSleep(t *testing.T) {
 	clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 1, 0, 0, 0, time.UTC)}
 	scheduler := newRecheckScheduler(nil, clock)
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, &alertlifecycleTestRetryScheduledError{next: clock.now.Add(5 * time.Second)}
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, &alertlifecycleTestRetryScheduledError{next: clock.now.Add(5 * time.Second)}
 	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, nil
@@ -745,7 +785,9 @@ func TestRecheckSchedulerReplacesHeadTimerWithoutSleep(t *testing.T) {
 	if first.timerC == nil || first.terminal || len(clock.timer.resets) != 1 || clock.timer.resets[0] != 5*time.Second {
 		t.Fatalf("first head timer=%v resets=%v", first, clock.timer.resets)
 	}
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, nil }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, nil
+	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		next := clock.now.Add(time.Second)
 		return alertlifecycle.RecheckQueueHead{JobID: 7, Status: "retry_wait", NextAttemptAt: &next}, nil
@@ -760,11 +802,11 @@ func TestRecheckSchedulerStartupAndCancellationOwnOneRunner(t *testing.T) {
 	scheduler := newRecheckScheduler(nil, nil)
 	started := make(chan struct{})
 	finished := make(chan struct{})
-	scheduler.runner = func(ctx context.Context, _ int) (int, error) {
+	scheduler.runner = func(ctx context.Context, _ int) (alertlifecycle.RecheckBatchResult, error) {
 		close(started)
 		<-ctx.Done()
 		close(finished)
-		return 0, ctx.Err()
+		return alertlifecycle.RecheckBatchResult{}, ctx.Err()
 	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, nil

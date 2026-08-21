@@ -1,0 +1,2670 @@
+{
+  "theme": "dark",
+  "states": [
+    {
+      "state": "resting",
+      "target": null,
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "confirmation-disabled",
+      "target": "confirm",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(95, 29, 37)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            95,
+            29,
+            37
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 12.433102089486294,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "unavailable"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "confirmation-enabled",
+      "target": "confirm",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "focus-input",
+      "target": "input",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "hover-input",
+      "target": "input",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "active-input",
+      "target": "input",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": true,
+          "pseudoFocusVisible": true,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "focus-confirm",
+      "target": "confirm",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "hover-confirm",
+      "target": "confirm",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "active-confirm",
+      "target": "confirm",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": true,
+          "pseudoFocusVisible": true,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "focus-cancel-confirmation",
+      "target": "cancel",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "hover-cancel",
+      "target": "cancel",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "active-cancel",
+      "target": "cancel",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(33, 37, 41)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            33,
+            37,
+            41
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": true,
+          "pseudoFocusVisible": true,
+          "textContrast": 15.426285095510265,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "focus-cancel-dismiss",
+      "target": "cancel",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "input:",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "text",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(68, 68, 68)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            68,
+            68,
+            68
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 9.739769120526205,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "input"
+        },
+        {
+          "label": "Confirm abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(95, 29, 37)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            95,
+            29,
+            37
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 12.433102089486294,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "unavailable"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(73, 80, 87)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            73,
+            80,
+            87
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 8.17635452073249,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "neutral"
+        }
+      ]
+    },
+    {
+      "state": "focus-retry",
+      "target": "retry",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "focus-abandon",
+      "target": "abandon",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgb(255, 255, 255)",
+          "outlineWidth": "3px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": true,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": true,
+          "focusRingContrast": 7.8217674024740145,
+          "target": true,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "hover-retry",
+      "target": "retry",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "hover-abandon",
+      "target": "abandon",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "active-retry",
+      "target": "retry",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": true,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "active-abandon",
+      "target": "abandon",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": true,
+          "pseudoActive": true,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "loading-retry",
+      "target": "retry",
+      "controls": [
+        {
+          "label": "Retrying...",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(39, 63, 84)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            39,
+            63,
+            84
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 10.907457019905992,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "unavailable"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(95, 29, 37)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            95,
+            29,
+            37
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 12.433102089486294,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "unavailable"
+        }
+      ]
+    },
+    {
+      "state": "loading-abandon",
+      "target": "abandon",
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(39, 63, 84)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            39,
+            63,
+            84
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 10.907457019905992,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "unavailable"
+        },
+        {
+          "label": "input:operator-approved reason",
+          "className": "form-control form-control-sm mb-2",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(48, 54, 59)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            48,
+            54,
+            59
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 12.23422785193847,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "unavailable"
+        },
+        {
+          "label": "Abandoning...",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm me-2",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(95, 29, 37)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            95,
+            29,
+            37
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 12.433102089486294,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": true,
+          "semantic": "unavailable"
+        },
+        {
+          "label": "Cancel",
+          "className": "btn btn-secondary btn-sm",
+          "disabled": true,
+          "pseudoDisabled": true,
+          "cursor": "not-allowed",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(48, 54, 59)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            48,
+            54,
+            59
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "dashed",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 12.23422785193847,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "unavailable"
+        }
+      ]
+    },
+    {
+      "state": "action-error",
+      "target": null,
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "refresh-error",
+      "target": null,
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "overflow",
+      "target": null,
+      "controls": [
+        {
+          "label": "Retry",
+          "className": "btn btn-primary btn-sm me-2",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(55, 90, 127)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            55,
+            90,
+            127
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 7.163881058134201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "primary"
+        },
+        {
+          "label": "Abandon",
+          "className": "fork-lifecycle-warning-abandon btn btn-danger btn-sm",
+          "disabled": false,
+          "pseudoDisabled": false,
+          "cursor": "pointer",
+          "color": "rgb(255, 255, 255)",
+          "background": "rgb(176, 42, 55)",
+          "adjacentBackground": [
+            159,
+            29,
+            43
+          ],
+          "compositedBackground": [
+            176,
+            42,
+            55
+          ],
+          "borderColor": "rgb(255, 255, 255)",
+          "borderStyle": "solid",
+          "borderWidth": "1px",
+          "outlineColor": "rgba(0, 0, 0, 0)",
+          "outlineWidth": "0px",
+          "opacity": "1",
+          "pseudoHover": false,
+          "pseudoActive": false,
+          "pseudoFocusVisible": false,
+          "textContrast": 6.496772712016201,
+          "borderContrast": 7.8217674024740145,
+          "focusRingRequired": false,
+          "focusRingContrast": 0,
+          "target": false,
+          "semantic": "destructive"
+        }
+      ]
+    },
+    {
+      "state": "success",
+      "target": null,
+      "controls": []
+    }
+  ]
+}

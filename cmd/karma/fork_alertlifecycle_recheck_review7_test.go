@@ -29,8 +29,8 @@ func TestProblem3Review7SchedulerAcquisitionPrecedenceMatrix(t *testing.T) {
 			clock := &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 6, 0, 0, 0, time.UTC)}
 			scheduler := newRecheckScheduler(nil, clock)
 			timer := clock.NewTimer(time.Second)
-			scheduler.runner = func(context.Context, int) (int, error) {
-				return 0, alertlifecycle.NewRecheckFailurePersistenceError(test.cause, test.wantTimer)
+			scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+				return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckFailurePersistenceError(test.cause, test.wantTimer)
 			}
 
 			result := scheduler.process(timer, nil)

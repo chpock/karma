@@ -80,6 +80,7 @@
     "start": "vite",
     "build": "tsc --project tsconfig.build.json && vite build",
     "test": "jest",
+    "test:visual": "playwright test src/e2e/visual.spec.ts",
     "analyze": "npx source-map-explorer 'dist/assets/*.js'",
     "knip": "knip"
   },

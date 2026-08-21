@@ -102,7 +102,7 @@ func logAlertLifecycleRegroupResult(ctx context.Context, cfg alertlifecycle.Grou
 		var infrastructureErr *alertlifecycle.RegroupInfrastructureError
 		if errors.As(err, &infrastructureErr) {
 			if !infrastructureErr.Valid() {
-				runtimeLog.ErrorContext(ctx, "lifecycle_regroup", "regroup_infrastructure_contract_violation", "Invalid regroup infrastructure contract", slog.String("stage", string(infrastructureErr.Stage)), slog.String("reason_code", string(infrastructureErr.ReasonCode)), slog.Any("error", errors.Join(alertlifecycle.ErrRegroupInfrastructureContract, err)))
+				runtimeLog.ErrorContext(ctx, "lifecycle_regroup", "regroup_infrastructure_contract_violation", "Invalid regroup infrastructure contract", slog.String("stage", string(infrastructureErr.Stage)), slog.String("reason_code", string(infrastructureErr.ReasonCode)), slog.String("error", alertlifecycle.SanitizeRecheckError(errors.Join(alertlifecycle.ErrRegroupInfrastructureContract, err))))
 				return
 			}
 			if isDirectRegroupCancellation(infrastructureErr.Stage, infrastructureErr.ReasonCode) {
@@ -111,7 +111,7 @@ func logAlertLifecycleRegroupResult(ctx context.Context, cfg alertlifecycle.Grou
 				return
 			}
 			level := regroupInfrastructureLogLevel(infrastructureErr.Stage, infrastructureErr.ReasonCode, infrastructureErr.ExpectedShutdown)
-			runtimeLog.Event(ctx, level, "lifecycle_regroup", "regroup_infrastructure_blocked", "Alert lifecycle regroup infrastructure blocked progress", slog.String("target_fingerprint", alertlifecycle.BuildGroupingFingerprint(cfg)), slog.String("stage", string(infrastructureErr.Stage)), slog.String("reason_code", string(infrastructureErr.ReasonCode)), slog.Int("processed", infrastructureErr.Processed), slog.Int("total", infrastructureErr.Total), slog.Any("error", infrastructureErr), slog.Duration("duration", time.Since(startedAt)))
+			runtimeLog.Event(ctx, level, "lifecycle_regroup", "regroup_infrastructure_blocked", "Alert lifecycle regroup infrastructure blocked progress", slog.String("target_fingerprint", alertlifecycle.BuildGroupingFingerprint(cfg)), slog.String("stage", string(infrastructureErr.Stage)), slog.String("reason_code", string(infrastructureErr.ReasonCode)), slog.Int("processed", infrastructureErr.Processed), slog.Int("total", infrastructureErr.Total), slog.String("error", alertlifecycle.SanitizeRecheckError(infrastructureErr)), slog.Duration("duration", time.Since(startedAt)))
 			return
 		}
 		if errors.Is(err, alertlifecycle.ErrRegroupFailurePersisted) {
@@ -121,7 +121,7 @@ func logAlertLifecycleRegroupResult(ctx context.Context, cfg alertlifecycle.Grou
 			runtimeLog.Event(ctx, slog.LevelWarn, "lifecycle_regroup", "regroup_cancelled", "Alert lifecycle regroup cancelled", slog.Bool("expected_shutdown", false), slog.Duration("duration", time.Since(startedAt)))
 			return
 		}
-		runtimeLog.Event(ctx, slog.LevelError, "lifecycle_regroup", "regroup_infrastructure_blocked", "Alert lifecycle regroup returned an unclassified error", slog.String("target_fingerprint", alertlifecycle.BuildGroupingFingerprint(cfg)), slog.String("stage", "unknown"), slog.String("reason_code", string(alertlifecycle.RegroupReasonUnclassifiedError)), slog.Int("processed", result.Processed), slog.Int("total", result.Total), slog.Any("error", err), slog.Duration("duration", time.Since(startedAt)))
+		runtimeLog.Event(ctx, slog.LevelError, "lifecycle_regroup", "regroup_infrastructure_blocked", "Alert lifecycle regroup returned an unclassified error", slog.String("target_fingerprint", alertlifecycle.BuildGroupingFingerprint(cfg)), slog.String("stage", "unknown"), slog.String("reason_code", string(alertlifecycle.RegroupReasonUnclassifiedError)), slog.Int("processed", result.Processed), slog.Int("total", result.Total), slog.String("error", alertlifecycle.SanitizeRecheckError(err)), slog.Duration("duration", time.Since(startedAt)))
 		return
 	}
 	if result.Processed == 0 && result.Updated == 0 {

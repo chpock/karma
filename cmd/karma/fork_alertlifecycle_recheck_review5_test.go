@@ -36,11 +36,11 @@ func TestProblem3Review5ImmediateReconciledEmptyRunDoesNotWake(t *testing.T) {
 	processFinished := make(chan struct{}, 2)
 	productionRunner := scheduler.runner
 	call := 0
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
 		call++
-		promoted, runErr := productionRunner(ctx, batchSize)
+		result, runErr := productionRunner(ctx, batchSize)
 		runnerReturned <- call
-		return promoted, runErr
+		return result, runErr
 	}
 	productionHead := scheduler.head
 	scheduler.head = func(ctx context.Context) (alertlifecycle.RecheckQueueHead, error) {
@@ -79,8 +79,8 @@ func TestProblem3Review5ImmediateReconciledEmptyRunDoesNotWake(t *testing.T) {
 func TestProblem3Review5DurableFailedHeadKeepsSchedulerAlive(t *testing.T) {
 	clock := &reviewSchedulerClock{now: time.Now().UTC()}
 	scheduler := newRecheckScheduler(nil, clock)
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, alertlifecycle.NewRecheckDurableFailureError(17, errors.New("terminal candidate failure"))
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckDurableFailureError(17, errors.New("terminal candidate failure"))
 	}
 	scheduler.Start()
 	select {
@@ -100,8 +100,8 @@ func TestProblem3Review5TerminalBookkeepingErrorsDoNotBackoff(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			clock := &reviewSchedulerClock{now: time.Now().UTC()}
 			scheduler := newRecheckScheduler(nil, clock)
-			scheduler.runner = func(context.Context, int) (int, error) {
-				return 0, errors.Join(alertlifecycle.ErrRecheckFailurePersistence, failure)
+			scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+				return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrRecheckFailurePersistence, failure)
 			}
 			scheduler.process(clock.NewTimer(time.Second), nil)
 			if len(clock.timer.resets) != 0 {
@@ -123,16 +123,16 @@ func TestProblem3Review5UnrelatedReconciledWriterDoesNotResetPreAttempt(t *testi
 	scheduler.backoffStep[recheckBackoffPreAttempt] = 3
 	scheduler.reconciledWakePending = true
 	runs := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		runs++
 		if runs == 1 {
-			return 0, alertlifecycle.NewRecheckWriterCommitReconciledError("poll")
+			return alertlifecycle.RecheckBatchResult{}, alertlifecycle.NewRecheckWriterCommitReconciledError("poll")
 		}
-		return 0, schedulerPreAttemptError{}
+		return alertlifecycle.RecheckBatchResult{}, schedulerPreAttemptError{}
 	}
 	scheduler.process(clock.NewTimer(time.Second), nil)
 	if got := scheduler.backoffStep[recheckBackoffPreAttempt]; got != 4 {
-		t.Fatalf("unrelated reconciliation reset pre-attempt step=%d want=4", got)
+		t.Fatalf("unrelated reconciliation changed pre-attempt step=%d want=4", got)
 	}
 	if !scheduler.reconciledWakePending {
 		t.Fatal("unrelated reconciliation discarded a pending recheck wake")
@@ -174,16 +174,16 @@ func TestProblem3Review5UnrelatedPollReconciliationPreservesPreAttemptOwner(t *t
 	scheduler.backoffStep[recheckBackoffPreAttempt] = 3
 	productionRunner := scheduler.runner
 	runs := 0
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
 		runs++
 		if runs == 1 {
 			return productionRunner(ctx, batchSize)
 		}
-		return 0, schedulerPreAttemptError{}
+		return alertlifecycle.RecheckBatchResult{}, schedulerPreAttemptError{}
 	}
 	scheduler.process(clock.NewTimer(time.Second), nil)
 	if got := scheduler.backoffStep[recheckBackoffPreAttempt]; got != 4 {
-		t.Fatalf("unrelated poll reconciliation reset pre-attempt step=%d want=4", got)
+		t.Fatalf("unrelated poll reconciliation changed pre-attempt step=%d want=4", got)
 	}
 }
 
@@ -310,10 +310,10 @@ func TestProblem3Review5SixthRetryableFailureLeavesLiveFailedHead(t *testing.T) 
 	store.SetRecheckReconciledWake(scheduler.SignalReconciled)
 	runs := make(chan review3SchedulerObservation, 8)
 	productionRunner := scheduler.runner
-	scheduler.runner = func(ctx context.Context, batchSize int) (int, error) {
-		promoted, runErr := productionRunner(ctx, batchSize)
-		runs <- review3SchedulerObservation{promoted: promoted, err: runErr}
-		return promoted, runErr
+	scheduler.runner = func(ctx context.Context, batchSize int) (alertlifecycle.RecheckBatchResult, error) {
+		result, runErr := productionRunner(ctx, batchSize)
+		runs <- review3SchedulerObservation{result: result, err: runErr}
+		return result, runErr
 	}
 	processFinished := make(chan struct{}, 8)
 	scheduler.afterProcess = func() { processFinished <- struct{}{} }
@@ -362,14 +362,16 @@ func TestProblem3Review5QueueBlockedAndSuccessfulHeadResetQueueRead(t *testing.T
 	clock := &reviewSchedulerClock{now: time.Now().UTC()}
 	scheduler := newRecheckScheduler(nil, clock)
 	scheduler.backoffStep[recheckBackoffQueueRead] = 2
-	scheduler.runner = func(context.Context, int) (int, error) {
-		return 0, &alertlifecycleTestQueueBlockedError{status: "failed"}
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, &alertlifecycleTestQueueBlockedError{status: "failed"}
 	}
 	scheduler.process(clock.NewTimer(time.Second), nil)
 	if got := scheduler.backoffStep[recheckBackoffQueueRead]; got != 2 {
 		t.Fatalf("queue-blocked reset queue-read step=%d want=2", got)
 	}
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, nil }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, nil
+	}
 	scheduler.head = func(context.Context) (alertlifecycle.RecheckQueueHead, error) {
 		return alertlifecycle.RecheckQueueHead{}, nil
 	}

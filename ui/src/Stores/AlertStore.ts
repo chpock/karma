@@ -155,6 +155,7 @@ interface AlertStoreInfoT {
     enabled: boolean;
     username: string;
   };
+  authenticationReady: boolean;
   totalAlerts: number;
   timestamp: string;
   version: string;
@@ -412,6 +413,7 @@ class AlertStore {
           enabled: false as boolean,
           username: "",
         },
+        authenticationReady: false as boolean,
         totalAlerts: 0,
         version: "unknown",
         timestamp: "",
@@ -730,6 +732,7 @@ class AlertStore {
     this.info.version = result.version;
     this.info.timestamp = result.timestamp;
     this.info.authentication = result.authentication;
+    this.info.authenticationReady = true;
 
     // settings exported via API
     this.settings.values = result.settings;

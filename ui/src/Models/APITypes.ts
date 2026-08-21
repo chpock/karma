@@ -441,6 +441,46 @@ export interface APIAlertLifecycleStatsResponseT {
   freelistCount?: number;
   lastHousekeepingAt?: string | null;
   lastIncrementalVacuumAt?: string | null;
+  recheck: AlertLifecycleRecheckStatsT;
+}
+
+interface AlertLifecycleRecheckStatsT {
+  queueDepth: number;
+  headJob: AlertLifecycleRecheckHeadJobT | null;
+}
+
+interface AlertLifecycleRecheckOutcomeCountsT {
+  promoted: number;
+  stale: number;
+  ineligible: number;
+  missingLabels: number;
+  incompleteSources: number;
+}
+
+interface AlertLifecycleRecheckErrorT {
+  class: string;
+  stage: string;
+  at: string;
+  message: string;
+}
+
+interface AlertLifecycleRecheckHeadJobT {
+  jobId: number;
+  triggerType: string;
+  status: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  totalCandidates: number;
+  processedCandidates: number;
+  outcomeCounts: AlertLifecycleRecheckOutcomeCountsT;
+  attemptCount: number;
+  retryCount: number;
+  consecutiveRetryCount: number;
+  nextAttemptAt: string | null;
+  firstError: AlertLifecycleRecheckErrorT | null;
+  lastError: AlertLifecycleRecheckErrorT | null;
+  recoveryCount: number;
 }
 
 export interface AlertsRequestT {

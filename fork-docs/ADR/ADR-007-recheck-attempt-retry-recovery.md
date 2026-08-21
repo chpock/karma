@@ -3,7 +3,9 @@
 - Status: Accepted
 - Date: 2026-08-19
 
-Implementation status: Implemented.
+Implementation status: Implemented; the post-acceptance selected-error/shutdown
+precedence defect is tracked separately as Problem 8 in
+`fork-docs/SPEC/silence-recheck-problems.md`.
 The combined fresh
 schema-v1 shape was accepted by ADR-006; this ADR defines the runtime ownership and
 durability rules for the reserved attempt and operator-action tables.
@@ -139,7 +141,11 @@ and releases the FIFO head without deleting any input or history.
 Request identity is `(jobID, requestId)`. The canonical fingerprint is the versioned
 typed object `{action, normalizedReason, normalizedActor}`. An exact replay returns the
 original result; a different action, reason, or actor for the same request ID returns
-HTTP 409. Request bodies are strict, case-sensitive JSON objects: duplicate keys,
+HTTP 409. An exact replay creates no second operator-action row, job/attempt/candidate
+change, domain event, or scheduler wake. Because the replay is itself a committed Store
+writer invocation, it appends exactly one operational `lifecycle_writer_commits` row; that
+row is not operator domain state and does not violate semantic idempotency. Request bodies
+are strict, case-sensitive JSON objects: duplicate keys,
 case-variant keys, non-string/null values, invalid UTF-8, trailing values, unknown fields,
 and bodies over 4096 bytes are rejected. Reasons are never emitted in runtime logs.
 
@@ -153,7 +159,8 @@ and bodies over 4096 bytes are rejected. Reasons are never emitted in runtime lo
   suppression evidence.
 - Operators explicitly control terminal failed jobs without losing FIFO position or
   immutable decision input.
-- Problem 4 remains responsible for the later observability/UI presentation redesign.
+- Problem 4 owns the observability/UI presentation boundary without changing this
+  retry, job-state, candidate, or provenance contract.
 
 ## Verification
 

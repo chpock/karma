@@ -1,6 +1,8 @@
 # Architecture Conformance Matrix
 
-Status: Problems 2 and 3 are implemented. Remaining known violations are tracked by
+Status: Problems 2 and 4 are implemented and independently accepted. Problem 3 completed its
+implementation phase; Problem 8 tracks a post-acceptance shutdown-precedence defect.
+Remaining known violations are tracked by
 `silence-recheck-problems.md`.
 
 This document is the finite traceability contract for the alert lifecycle and
@@ -45,7 +47,7 @@ The executable test coverage for these contracts is summarized in
 | D7 | Preserve HA member disagreement including silence identity; persistent warning until convergence | identity-aware cluster fingerprint, Stats/warning | HA ID/payload/failure/convergence sequence | Implemented |
 | D8 | `is_suppression_retained` proposal is superseded | N/A | schema absence | Superseded by D13 |
 | D9 | Match only original raw labels; missing labels remain unknown | raw-label index, `match_labels_json` | raw-label exclusion tests | Implemented |
-| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats/scheduler/operator routes | Problem 2 immutable-input matrix; Problem 3 state, attempt, scheduler, and operator matrix | Problem 3 implemented; Problem 4 observability presentation remains open |
+| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats/scheduler/operator routes; Store owns durable events and cmd owns invocation/infrastructure telemetry | Problem 2 immutable-input matrix; Problem 3 state, attempt, scheduler, and operator matrix; Problem 4 observability/API/UI matrix | Problem 4 implemented and independently accepted; Problem 8 shutdown precedence pending |
 | D11 | Earlier many-to-many event linkage proposal is superseded | N/A | schema absence | Superseded by D15/D20 |
 | D12 | Revision only on normalized content/updatedAt/new episode; not repeated/status-only poll | latest-revision boundary and HA-wide episode closure | revision sequence and `TestSilenceEpisodeClosesOnlyAfterConfirmedHAWideAbsence` | Implemented; A→B→A appends and reappearance starts a new episode |
 | D13 | One normalized `is_suppressed` axis with strict live invariant | projection/live validation | projection tests | Implemented |
@@ -94,7 +96,9 @@ The executable test coverage for these contracts is summarized in
 The normative event, level, field, redaction, noise, and verification requirements
 are defined in `runtime-logging-contract.md`.
 
-Status: **Implemented**. Lifecycle startup/poll/transition/resolve, silence
+Status: **Problem 4 implemented and independently accepted. Problem 9 generic writer
+diagnostic registration/redaction remains open**.
+Lifecycle startup/poll/transition/resolve, silence
 reconciliation and HA edges, recheck jobs/candidates, housekeeping/retention,
 regroup, preview/cache/autocomplete, status verification, and both submit routes use
 stable structured events and contract levels. Redaction and level behavior have
@@ -155,7 +159,9 @@ adding its invariant/test mapping.
   recorded development CPU (one benchmark iteration, informational budget check);
 - replay: committed 1043-group HA traffic artifact passes poll, SQLite target
   projection and label-index verification;
-All rows above are implemented or explicitly superseded except D10's open Problem 4
-observability presentation. Reproducible test, restart, replay, parser, timezone,
+All rows above are implemented or explicitly superseded except D10's Problem 4
+observability evidence and separately tracked Problem 8 shutdown precedence.
+Reproducible test,
+restart, replay, parser, timezone,
 performance, build, and browser commands are recorded in
 `architecture-verification.md`.

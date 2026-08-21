@@ -1,10 +1,13 @@
 package alertlifecycle
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -345,8 +348,9 @@ func TestProblem3ReviewDelayedBatchReconciliationWakesScheduler(t *testing.T) {
 		t.Fatal("scheduler woke before commit reconciliation")
 	default:
 	}
-	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-		t.Fatalf("reconciliation outcome=%v", err)
+	result, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+	if err != nil || result.Disposition != RecheckBatchCommitted || result.ReconciledOperation != writerOperationRecheckBatch {
+		t.Fatalf("reconciliation result=%+v err=%v", result, err)
 	}
 	select {
 	case <-wake:
@@ -374,6 +378,10 @@ func TestProblem3ReviewOrdinaryBatchCommitDoesNotWakeScheduler(t *testing.T) {
 }
 
 func TestProblem3ReviewDelayedOperatorReplayReturnsCommittedResult(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 	store, _, now := seedProblem2OpenJob(t)
 	t.Cleanup(func() { _ = store.Close() })
 	store.lifecycleTestHooks = &storeLifecycleTestHooks{recheckFault: func(stage string) error {
@@ -415,6 +423,36 @@ func TestProblem3ReviewDelayedOperatorReplayReturnsCommittedResult(t *testing.T)
 	}
 	if !replay.Applied || replay.CurrentStatus != "queued" {
 		t.Fatalf("replayed operator result=%+v", replay)
+	}
+	if count := strings.Count(logs.String(), `"event":"operator_action_applied"`); count != 1 {
+		t.Fatalf("delayed operator commit emitted %d applied events, want 1: %s", count, logs.String())
+	}
+}
+
+func TestProblem4ImmediateOperatorCommitEmitsOneAppliedEvent(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	store, _, now := seedProblem2OpenJob(t)
+	t.Cleanup(func() { _ = store.Close() })
+	store.lifecycleTestHooks = &storeLifecycleTestHooks{recheckFault: func(stage string) error {
+		if stage == recheckStagePersistCandidate {
+			return errors.New("immediate operator event setup failure")
+		}
+		return nil
+	}}
+	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); err == nil {
+		t.Fatal("setup failure unexpectedly succeeded")
+	}
+	store.lifecycleTestHooks = nil
+	actor := "immediate-reviewer"
+	result, err := store.RetryRecheckJobContext(context.Background(), 1, "immediate-retry", "retry", &actor, now.Add(time.Second))
+	if err != nil || !result.Applied || result.CurrentStatus != "queued" {
+		t.Fatalf("immediate operator result=%+v err=%v", result, err)
+	}
+	if count := strings.Count(logs.String(), `"event":"operator_action_applied"`); count != 1 {
+		t.Fatalf("immediate operator commit emitted %d applied events: %s", count, logs.String())
 	}
 }
 
@@ -495,8 +533,9 @@ func TestProblem3ReviewStrictFIFOAcrossPersistedStates(t *testing.T) {
 	if err != nil || head.JobID != 4 || head.Status != "retry_wait" {
 		t.Fatalf("not-due retry head=%+v err=%v", head, err)
 	}
-	if _, runErr := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.As(runErr, new(*recheckQueueBlockedError)) {
-		t.Fatalf("not-due retry unexpectedly ran: %v", runErr)
+	blockedResult, runErr := store.RunSilenceRecheckBatchContext(context.Background(), 1000)
+	if runErr != nil || blockedResult.Disposition != RecheckBatchRetryDeferred {
+		t.Fatalf("not-due retry did not return retry_deferred: result=%+v err=%v", blockedResult, runErr)
 	}
 	if _, execErr := store.db.Exec(`UPDATE silence_recheck_jobs SET next_attempt_at=? WHERE job_id=4`, time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)); execErr != nil {
 		t.Fatal(execErr)

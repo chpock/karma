@@ -128,6 +128,9 @@ Problem 3 and must not mask an unidentified transaction-boundary defect.
   operational `lifecycle_writer_commits` ledger and the Step 0
   `schema_layout_fingerprint` metadata guard; both are part of fresh v1 bootstrap
   and reject unknown physical layouts without modification.
+- Every committed Store writer transaction appends one `lifecycle_writer_commits` row,
+  including a semantically idempotent operator replay. Semantic no-op guarantees apply to
+  domain state/events/wakes, not to this operational reconciliation ledger.
 - A PID path that already exists, is a symlink/reparse point, or is replaced after
   acquisition is never truncated, followed, or removed by this process.
 - Problems 2 and 3 have their own schema-v1 changes and ADRs.

@@ -104,9 +104,6 @@ func TestProblem3Review5RetainedFailedBookkeepingLogsJobFailedOnce(t *testing.T)
 		t.Fatalf("initial unknown bookkeeping=%v", err)
 	}
 	store.writerCommit = nil
-	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !errors.Is(err, ErrWriterCommitReconciled) {
-		t.Fatalf("bookkeeping reconciliation=%v", err)
-	}
 	if _, err := store.RunSilenceRecheckBatchContext(context.Background(), 1000); !IsRecheckDurableFailure(err) {
 		t.Fatalf("durable failed-head replay=%v", err)
 	}

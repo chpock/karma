@@ -29,7 +29,7 @@ export interface FetchGetResultT<T> {
   isLoading: boolean;
   isRetrying: boolean;
   retryCount: number;
-  get: () => void;
+  get: () => Promise<void>;
   cancelGet: () => void;
 }
 
@@ -44,52 +44,84 @@ const useFetchGet = <T>(
     isRetrying: false,
     retryCount: 0,
   });
-  const isCanceledRef = useRef<boolean>(false);
+  const requestGenerationRef = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
 
   const cancelGet = useCallback(() => {
-    isCanceledRef.current = true;
+    requestGenerationRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    setResponse((r) => ({
+      ...r,
+      isLoading: false,
+      isRetrying: false,
+    }));
   }, []);
 
   const get = useCallback(async () => {
-    isCanceledRef.current = false;
+    const generation = requestGenerationRef.current + 1;
+    requestGenerationRef.current = generation;
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const isCurrent = () => requestGenerationRef.current === generation;
 
     try {
-      setResponse((r) => ({
-        ...r,
-        isLoading: true,
-        isRetrying: false,
-        retryCount: 0,
-      }));
+      if (isCurrent()) {
+        setResponse((r) => ({
+          ...r,
+          isLoading: true,
+          isRetrying: false,
+          retryCount: 0,
+        }));
+      }
 
       const res = await promiseRetry(
         (retry: (err: Error) => Promise<Response>, n: number) =>
-          (fetcher || fetch)(uri, {
-            ...{ method: "GET" },
-            ...CommonOptions,
-            mode: n <= FetchRetryConfig.retries ? "cors" : "no-cors",
-          } as RequestInit).catch((err: Error) => {
-            if (!isCanceledRef.current) {
-              setResponse((r) => ({
-                ...r,
-                isRetrying: true,
-                retryCount: n,
-              }));
-              return retry(err);
-            }
+          (isCurrent()
+            ? (fetcher || fetch)(uri, {
+                ...{ method: "GET" },
+                ...CommonOptions,
+                mode: n <= FetchRetryConfig.retries ? "cors" : "no-cors",
+                signal: controller.signal,
+              } as RequestInit)
+            : Promise.reject(new Error("request superseded"))
+          ).catch((err: Error) => {
+            if (!isCurrent()) throw err;
+            setResponse((r) => ({
+              ...r,
+              isRetrying: true,
+              retryCount: n,
+            }));
+            return retry(err);
           }),
         FetchRetryConfig,
       );
 
-      if (res !== undefined && !isCanceledRef.current) {
+      if (res !== undefined && isCurrent()) {
         let body;
         const contentType = res.headers.get("content-type");
-        if (contentType && contentType.indexOf("application/json") !== -1) {
-          body = await res.json();
-        } else {
-          body = await res.text();
+        try {
+          if (contentType && contentType.indexOf("application/json") !== -1) {
+            body = await res.json();
+          } else {
+            body = await res.text();
+          }
+        } catch {
+          if (isCurrent()) {
+            setResponse((r) => ({
+              ...r,
+              error: res.ok
+                ? "invalid response body"
+                : `${res.status} ${res.statusText || "request failed"}`,
+              isLoading: false,
+              isRetrying: false,
+            }));
+          }
+          return;
         }
 
-        if (!isCanceledRef.current) {
+        if (isCurrent()) {
           if (res.ok) {
             setResponse({
               response: body,
@@ -101,7 +133,7 @@ const useFetchGet = <T>(
           } else {
             setResponse({
               response: null,
-              error: body ? body : `${res.status} ${res.statusText}`,
+              error: `${res.status} ${res.statusText || "request failed"}`,
               isLoading: false,
               isRetrying: false,
               retryCount: 0,
@@ -110,13 +142,19 @@ const useFetchGet = <T>(
         }
       }
     } catch (error) {
-      setResponse((r) => ({
-        ...r,
-        error:
-          error instanceof Error ? error.message : `unknown error: ${error}`,
-        isLoading: false,
-        isRetrying: false,
-      }));
+      if (isCurrent()) {
+        setResponse((r) => ({
+          ...r,
+          error:
+            error instanceof Error ? error.message : "unknown request error",
+          isLoading: false,
+          isRetrying: false,
+        }));
+      }
+    } finally {
+      if (isCurrent()) {
+        controllerRef.current = null;
+      }
     }
   }, [uri, fetcher]);
 

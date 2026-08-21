@@ -66,12 +66,19 @@ dimension functions.
   immutable input and progress.
 - The single scheduler wakes only on startup, committed job creation, committed operator
   action, persisted due time, and a delayed cross-operation reconciliation of a selected
-  recheck attempt. Ordinary or immediately reconciled empty/no-work commits never wake it;
-  housekeeping is not a poller. A durable failed head keeps the owner alive for Retry or
-  Abandon, while a terminal infrastructure disposition exits the scheduler owner until
-  application restart.
-- Stats expose queue depth, current ID/status, progress, skipped count, oldest age,
-  and error.
+  `recheck_batch` attempt. Immediate and reconciled committed `recheck_failure` use one
+  finalizer for retained selection/terminal events; only a terminal outcome publishes and
+  releases a terminal-failure finalization barrier. Reconciled failure resumes through the active reconciliation timer
+  and retained retry/failed result without a finalizer wake. A separate operator-action
+  finalization barrier keeps recheck execution behind the applied event attempt without
+  changing timer ownership.
+  Ordinary or immediately reconciled empty/no-work commits never wake it; housekeeping is
+  not a poller. A durable failed head keeps the owner alive for Retry or Abandon, while a
+  terminal infrastructure disposition exits the scheduler owner until application restart.
+- Stats expose the nested `recheck` object with queue depth and the nullable FIFO
+  `headJob`. The head includes durable status, progress/outcome counters, attempt and
+  retry counters, timestamps, and complete first/last error snapshots. Completed and
+  abandoned historical rows are not exposed as the current head.
 - HA inconsistency is last-confirmed state: failed coverage cannot clear it; complete
   successful convergence can. Silence identity is part of the member fingerprint;
   equal payloads with different Alertmanager IDs remain inconsistent because

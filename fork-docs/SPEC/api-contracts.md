@@ -97,20 +97,32 @@ Resolved merge visibility:
 - `suppressedBreakdown` (`current`/`past`)
 - regroup status/progress and expected-state fields
 - DB size/page/freelist and housekeeping timestamps
-- silence-history TTL, HA-inconsistent targets, and recheck queue/job progress
+- silence-history TTL, HA-inconsistent targets, and the nested recheck snapshot:
+  `recheck.queueDepth` plus nullable `recheck.headJob`. The head contains only the
+  oldest nonterminal FIFO job and includes its immutable trigger, status/timestamps,
+  candidate totals/outcomes, attempt/retry/recovery counters, next-attempt time, and
+  first/last typed error snapshots.
 
 ## 5. Warning endpoint
 
 - `GET /alerts-history/warning`
 
-Returns persistent-warning status for DB expected-state contract:
+Returns persistent-warning status for the DB expected-state contract and all
+simultaneous lifecycle conditions. The exact top-level shape is:
 
 - `dbExpectedState`
-- `reason`
-- regroup status/error/progress
-- HA-inconsistent targets and failed recheck status/error
+- `issues[]`, with each item containing `kind`, `severity`, `summary`, and strict
+  discriminated `metadata` for `regroup_out_of_date`, `regroup_in_progress`,
+  `regroup_failed`, `silence_ha_inconsistent`, `recheck_retrying`, or
+  `recheck_blocked`.
+- `status` and `storageEnabled`
 
-UI must keep warning visible while `dbExpectedState=false`.
+Issues are returned in stable contract order and the UI renders every issue rather
+than selecting one reason. UI controls are available only for a failed recheck head
+and an authorized session; mutation results always trigger a fresh warning read. Stats
+and warning projections are read from one SQLite read transaction, so regroup and
+recheck fields cannot be mixed across commits. If a durable error tuple is incomplete,
+the endpoint fails closed instead of returning partial internals.
 
 ## 6. Recheck operator recovery
 
@@ -130,9 +142,15 @@ letters, digits, `.`, `_`, `:`, and `-`; reasons are trimmed UTF-8 strings at mo
 bytes. The object decoder is case-sensitive and rejects duplicate keys, case-variant
 keys, unknown fields, null/non-string values, invalid UTF-8, trailing JSON values, and
 oversized bodies. These malformed requests and malformed IDs are HTTP 400.
-Authentication-enabled requests without an actor are HTTP 401 even when lifecycle
-storage is disabled; unknown jobs are HTTP 404; a state/action/request-fingerprint
-conflict is HTTP 409.
+The request must use `Content-Type: application/json` and the exact application marker
+header `X-Karma-Request: recheck-operator`. Cross-site Fetch Metadata requests,
+missing/invalid markers, or non-JSON media types are rejected before Store access with
+HTTP 403/415. The registered application router's existing authentication middleware owns
+authentication-enabled 401 responses before this handler; it preserves the upstream auth
+response and emits no Problem 4 `operator_action_rejected`. Unknown jobs are HTTP 404; a
+state/action/request-fingerprint conflict is HTTP 409. Every post-authentication handler
+4xx/5xx error uses a stable safe category and never echoes SQL, request bodies, tokens, or
+operator reasons.
 
 Successful first requests and exact replays return HTTP 200:
 

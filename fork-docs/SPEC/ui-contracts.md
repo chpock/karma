@@ -68,6 +68,35 @@ Alt+click still applies negative state filter only (without forced append filter
 
 - Persistent warning banner must be shown while `GET /alerts-history/warning` returns `dbExpectedState=false`.
 - Configuration modal displays fork storage stats, including dynamic state counts and suppressed current/past split.
+- `GET /alerts-history/warning` returns the strict `issues[]` union for regroup, HA
+  inconsistency, and recheck retry/blocker conditions; issue ordering is stable and
+  simultaneous issues are rendered together.
+- Recheck Retry and Abandon controls are shown only after the authoritative alerts
+  response establishes authentication mode and only for a failed head. Abandon requires
+  a reason, duplicate clicks are blocked, and every action result refreshes warning state.
+- A failed warning refresh preserves the last confirmed issue set and displays the
+  refresh/action error separately; only a successful warning response replaces it.
+- Warning refresh requests are generation-owned: a newer refresh cancels or supersedes
+  older transport, body-parse, and retry-timer results; cancellation cannot restore stale
+  data, errors, loading, retry flags, or retry counters.
+- Operator Retry/Abandon requests use `Content-Type: application/json` and the
+  `X-Karma-Request: recheck-operator` marker. Missing/invalid markers and cross-site
+  browser requests are rejected before Store access; non-JSON bodies return 415.
+- `GET /alerts-history/stats` exposes `recheck.queueDepth` and nullable
+  `recheck.headJob` with durable counters, attempt/retry fields, timestamps, and
+  complete error snapshots.
+- Warning controls retain their action semantics in every state: primary Retry is blue,
+  destructive Abandon/Confirm is red, and neutral Cancel is gray. Disabled controls use a
+  darker semantic fill, dashed border, and `not-allowed` cursor rather than color alone;
+  disabled inputs use the same unavailable treatment. Chromium, Firefox, and Android
+  snapshots under `ui/src/e2e/snapshots/<project>/ForkLifecycleWarning-*` include resting,
+  confirmation, focus, hover, active, loading, error, success, and overflow states. The
+  adjacent-layer RGBA composition and rendered contrast table is stored beside them as
+  `ForkLifecycleWarning-{light,dark}-rendered-colors.json`.
+  Each ledger row has a unique semantic state and target control and is captured only after
+  the corresponding focus, hover, active, enabled, disabled, loading, error, or confirmation
+  state is established; it records the rendered pseudo-state, outline, adjacent composited
+  background, opacity, and all applicable contrast ratios.
 
 Malformed individual Alertmanager silence entries appear through the existing toast
 channel as non-fatal warnings. Valid neighboring rules and alerts continue to load.
@@ -87,3 +116,16 @@ channel as non-fatal warnings. Valid neighboring rules and alerts continue to lo
 - Focus enters the first editor control after lazy content mounts, stays trapped in
   the modal, and returns to the invoking control on close.
 - Mobile uses a full-screen single-scroll layout with sticky header/actions.
+
+## Lifecycle warning refresh and presentation
+
+`useFetchGet` gives every GET a monotonically increasing request generation and a
+separate abort controller. A response, error, or loading transition may update state
+only while its generation is current; an older request cannot overwrite a newer
+authoritative warning refresh. Cancellation invalidates the generation before aborting.
+
+The warning card renders all typed issues with their server-provided severity and
+metadata. Warning/error cards use the scoped accessible palette `#8a5a00`/`#9f1d2b`
+with white text and a white boundary; Retry/Abandon action states include resting,
+focus, hover, confirmation, cancel, disabled/loading, error, and successful refresh
+visual evidence in both light and dark themes without horizontal overflow.

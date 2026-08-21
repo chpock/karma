@@ -43,8 +43,8 @@ func TestProblem2GlobalCandidateRequiresPinnedSourceCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if promoted != 0 {
-		t.Fatalf("global candidate crossed pinned source cluster: promoted=%d", promoted)
+	if promoted.OutcomeCounts.Promoted != 0 {
+		t.Fatalf("global candidate crossed pinned source cluster: promoted=%d", promoted.OutcomeCounts.Promoted)
 	}
 	var outcome string
 	if err = store.db.QueryRow(`SELECT outcome FROM silence_recheck_job_candidates`).Scan(&outcome); err != nil {
@@ -87,8 +87,8 @@ func TestProblem2TargetCandidateRequiresPinnedSourceClusterCompleteness(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if promoted != 0 {
-		t.Fatalf("cross-cluster target candidate promoted=%d", promoted)
+	if promoted.OutcomeCounts.Promoted != 0 {
+		t.Fatalf("cross-cluster target candidate promoted=%d", promoted.OutcomeCounts.Promoted)
 	}
 	var outcome string
 	if err = store.db.QueryRow(`SELECT outcome FROM silence_recheck_job_candidates`).Scan(&outcome); err != nil {
@@ -1977,8 +1977,8 @@ func TestProblem2TargetPromotionClassifiesZeroRowAggregateCAS(t *testing.T) {
 	if _, err := store.db.Exec(`CREATE TRIGGER problem2_aggregate_cas_probe AFTER UPDATE OF is_suppressed ON alert_target_states WHEN NEW.alert_id='target-episode' BEGIN UPDATE alert_states SET state='active', is_suppressed=0 WHERE alert_id=NEW.alert_id; END`); err != nil {
 		t.Fatal(err)
 	}
-	if promoted, err := store.RunSilenceRecheckBatch(100); err != nil || promoted != 1 {
-		t.Fatalf("target promotion with zero-row aggregate CAS promoted=%d err=%v", promoted, err)
+	if promoted, err := store.RunSilenceRecheckBatch(100); err != nil || promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("target promotion with zero-row aggregate CAS promoted=%d err=%v", promoted.OutcomeCounts.Promoted, err)
 	}
 	var globalState string
 	if err := store.db.QueryRow(`SELECT state FROM alert_states WHERE alert_id='target-episode'`).Scan(&globalState); err != nil {
@@ -2776,8 +2776,8 @@ func TestProblem2CandidateSnapshotSurvivesMaxAlertEviction(t *testing.T) {
 	if alerts != 1 || candidates != 2 {
 		t.Fatalf("max-alert eviction changed immutable job membership: alerts=%d candidates=%d", alerts, candidates)
 	}
-	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted != 1 {
-		t.Fatalf("max-alert eviction worker result promoted=%d err=%v", promoted, runErr)
+	if promoted, runErr := store.RunSilenceRecheckBatch(100); runErr != nil || promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("max-alert eviction worker result promoted=%d err=%v", promoted.OutcomeCounts.Promoted, runErr)
 	}
 	var missing, pending, processed, total, skippedMissing, ineligible, incomplete, stale int
 	var status string

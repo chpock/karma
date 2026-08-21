@@ -568,6 +568,115 @@ $body-secondary-color: $gray-600;
   // }
 }
 
+.fork-lifecycle-warning-abandon {
+  --bs-btn-bg: #b02a37;
+  --bs-btn-border-color: #b02a37;
+  --bs-btn-hover-bg: #8c1f2b;
+  --bs-btn-hover-border-color: #841d28;
+  --bs-btn-active-bg: #841d28;
+  --bs-btn-active-border-color: #7c1b25;
+}
+
+.fork-lifecycle-warning .btn {
+  --bs-btn-border-color: #fff;
+  --bs-btn-hover-border-color: #fff;
+  --bs-btn-active-border-color: #fff;
+  --bs-btn-disabled-border-color: #fff;
+
+  border-color: #fff !important;
+}
+
+.fork-lifecycle-warning .btn:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+  border-style: dashed !important;
+  pointer-events: auto;
+}
+
+.fork-lifecycle-warning .btn-primary:disabled {
+  color: #fff;
+  background-color: #273f54;
+}
+
+.fork-lifecycle-warning .btn-primary:not(:disabled) {
+  background-color: #375a7f;
+}
+
+.fork-lifecycle-warning .fork-lifecycle-warning-abandon:disabled {
+  color: #fff;
+  background-color: #5f1d25;
+}
+
+.fork-lifecycle-warning .fork-lifecycle-warning-abandon:not(:disabled) {
+  background-color: #b02a37;
+}
+
+.fork-lifecycle-warning .btn-secondary:disabled {
+  color: #fff;
+  background-color: #30363b;
+}
+
+.fork-lifecycle-warning .btn-secondary {
+  --bs-btn-bg: #495057;
+  --bs-btn-hover-bg: #343a40;
+  --bs-btn-active-bg: #212529;
+
+  color: #fff;
+  background-color: #495057;
+}
+
+.fork-lifecycle-warning .btn:focus-visible,
+.fork-lifecycle-warning .form-control:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 2px #212529;
+}
+
+.fork-lifecycle-warning .form-control {
+  border-color: #fff;
+}
+
+.fork-lifecycle-warning .form-control:disabled {
+  color: #fff;
+  background-color: #30363b;
+  cursor: not-allowed;
+  border-style: dashed;
+  opacity: 1;
+}
+
+.fork-lifecycle-warning > .alert-warning,
+.fork-lifecycle-warning > .alert-danger {
+  color: #fff;
+  border-style: solid !important;
+  border-width: 1px !important;
+}
+
+.fork-lifecycle-warning > .alert-warning {
+  --bs-alert-bg: #8a5a00;
+  --bs-alert-border-color: #fff;
+  --bs-alert-color: #fff;
+
+  background-color: #8a5a00 !important;
+  border-color: #fff !important;
+}
+
+.fork-lifecycle-warning-error {
+  color: #fff;
+  background-color: #9f1d2b;
+  border: 1px solid #fff;
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.5rem;
+}
+
+.fork-lifecycle-warning > .alert-danger {
+  --bs-alert-bg: #9f1d2b;
+  --bs-alert-border-color: #fff;
+  --bs-alert-color: #fff;
+
+  background-color: #9f1d2b !important;
+  border-color: #fff !important;
+}
+
 /* stylelint-disable-next-line no-invalid-position-at-import-rule */
 @import "./Components";
 

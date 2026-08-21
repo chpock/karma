@@ -230,10 +230,12 @@ const useFetchGetMock = (
         break;
       }
     }
+
+    return Promise.resolve();
   }, [uri]);
 
   useEffect(() => {
-    if (autorun) get();
+    if (autorun) void get();
   }, [uri, get, cancelGet, autorun, ...deps]);
 
   return {

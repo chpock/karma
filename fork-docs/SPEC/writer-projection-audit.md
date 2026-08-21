@@ -1,6 +1,8 @@
 # Writer and Projection Inventory
 
 Status: Problems 2 and 3 immutable input, retry, and operator recovery are implemented.
+Problem 4 typed results, event ownership, strict APIs, and UI presentation are implemented
+and independently accepted.
 
 This inventory follows writes into every observable projection. It is organized
 by domain transaction, not by source file.

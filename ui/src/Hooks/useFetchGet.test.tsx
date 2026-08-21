@@ -150,6 +150,106 @@ describe("useFetchGet", () => {
     }
   });
 
+  it("keeps a newer generation authoritative while stale JSON parsing rejects", async () => {
+    let rejectOldJSON!: (error: Error) => void;
+    const oldJSON = new Promise<never>((_resolve, reject) => {
+      rejectOldJSON = reject;
+    });
+    let jsonStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      jsonStarted = resolve;
+    });
+    let calls = 0;
+    const fetcher = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        const response = new Response("{}", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+        response.json = () => {
+          jsonStarted();
+          return oldJSON;
+        };
+        return response;
+      }
+      return new Response(JSON.stringify({ generation: "new" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const { result } = renderHook(() =>
+      useFetchGet<{ generation: string }>("http://localhost/generation-json", {
+        autorun: false,
+        fetcher,
+      }),
+    );
+
+    let oldRequest!: Promise<void>;
+    await act(async () => {
+      oldRequest = result.current.get();
+      await started;
+    });
+    await act(async () => result.current.get());
+    expect(result.current.response).toEqual({ generation: "new" });
+    expect(result.current).toMatchObject({ error: null, isLoading: false, isRetrying: false, retryCount: 0 });
+    await act(async () => {
+      rejectOldJSON(new SyntaxError("stale malformed JSON"));
+      await oldRequest;
+    });
+    expect(result.current).toMatchObject({ response: { generation: "new" }, error: null, isLoading: false, isRetrying: false, retryCount: 0 });
+  });
+
+  it("does not let a stale retry clear a newer pending generation", async () => {
+    let resolveNew!: (response: Response) => void;
+    const newest = new Promise<Response>((resolve) => {
+      resolveNew = resolve;
+    });
+    let calls = 0;
+    const fetcher = jest.fn(() => {
+      calls += 1;
+      if (calls === 1) return Promise.reject(new TypeError("old transport failure"));
+      if (calls === 2) return newest;
+      return Promise.reject(new Error("stale retry must not fetch"));
+    });
+    const { result } = renderHook(() =>
+      useFetchGet<{ generation: string }>("http://localhost/generation-retry", {
+        autorun: false,
+        fetcher,
+      }),
+    );
+
+    let oldRequest!: Promise<void>;
+    await act(async () => {
+      oldRequest = result.current.get();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.retryCount).toBe(1));
+    expect(result.current).toMatchObject({ isLoading: true, isRetrying: true, retryCount: 1 });
+    let newRequest!: Promise<void>;
+    await act(async () => {
+      newRequest = result.current.get();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(calls).toBe(2));
+    expect(result.current).toMatchObject({ response: null, error: null, isLoading: true, isRetrying: false, retryCount: 0 });
+    await act(async () => {
+      jest.runOnlyPendingTimers();
+      await oldRequest;
+    });
+    expect(calls).toBe(2);
+    expect(result.current).toMatchObject({ response: null, error: null, isLoading: true, isRetrying: false, retryCount: 0 });
+    await act(async () => {
+      resolveNew(new Response(JSON.stringify({ generation: "new" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+      await newRequest;
+    });
+    expect(result.current.response).toEqual({ generation: "new" });
+    expect(result.current).toMatchObject({ error: null, isLoading: false, isRetrying: false, retryCount: 0 });
+  });
+
   it("response is updated after successful fetch", async () => {
     const { result } = renderHook(() =>
       useFetchGet<string>("http://localhost/ok"),
@@ -182,9 +282,25 @@ describe("useFetchGet", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     expect(result.current.response).toBe(null);
-    expect(result.current.error).toMatchObject({ status: "error" });
+    expect(result.current.error).toBe("500 Internal Server Error");
     expect(result.current.isLoading).toBe(false);
     expect(result.current.isRetrying).toBe(false);
+  });
+
+  it("uses the HTTP status fallback when a non-2xx JSON body is malformed", async () => {
+    fetchMock.route("http://localhost/500/malformed", {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+      body: "{malformed",
+    });
+
+    const { result } = renderHook(() =>
+      useFetchGet<string>("http://localhost/500/malformed"),
+    );
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.error).toBe("500 Internal Server Error");
   });
 
   it("error is updated after 500 response with plain body", async () => {
@@ -200,7 +316,7 @@ describe("useFetchGet", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     expect(result.current.response).toBe(null);
-    expect(result.current.error).toBe("error");
+    expect(result.current.error).toBe("500 Internal Server Error");
     expect(result.current.isLoading).toBe(false);
     expect(result.current.isRetrying).toBe(false);
   });
@@ -266,6 +382,48 @@ describe("useFetchGet", () => {
     expect(result.current.isRetrying).toBe(false);
   });
 
+  it("keeps the newest request authoritative when responses resolve out of order", async () => {
+    const resolvers: Array<(response: Response) => void> = [];
+    const fetcher = jest.fn(
+      () => new Promise<Response>((resolve) => resolvers.push(resolve)),
+    );
+    const { result } = renderHook(() =>
+      useFetchGet<string>("http://localhost/race", {
+        autorun: false,
+        fetcher,
+      }),
+    );
+
+    await act(async () => {
+      result.current.get();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(fetcher.mock.calls).toHaveLength(1));
+    await act(async () => {
+      result.current.get();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(fetcher.mock.calls).toHaveLength(2));
+
+    await act(async () => {
+      resolvers[1]?.(
+        new Response(JSON.stringify("new"), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    await waitFor(() => expect(result.current.response).toBe("new"));
+
+    await act(async () => {
+      resolvers[0]?.(
+        new Response(JSON.stringify("old"), {
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    expect(result.current.response).toBe("new");
+  });
+
   it("error is updated on uparsable JSON", async () => {
     fetchMock.route("http://localhost/json/invalid", {
       headers: { "Content-Type": "application/json" },
@@ -285,9 +443,7 @@ describe("useFetchGet", () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     expect(result.current.response).toBe(null);
-    expect(result.current.error).toBe(
-      "unknown error: SyntaxError: Unexpected token 'h', \"this is not\"... is not valid JSON",
-    );
+    expect(result.current.error).toBe("invalid response body");
     expect(result.current.isLoading).toBe(false);
     expect(result.current.isRetrying).toBe(false);
   });

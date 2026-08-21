@@ -23,12 +23,16 @@ func TestProblem3Review3CommitUnknownOwnsBookkeepingReconciliationBackoff(t *tes
 	scheduler := newRecheckScheduler(nil, clock)
 	timer := clock.NewTimer(time.Second)
 	bookkeepingErr := alertlifecycle.NewRecheckFailurePersistenceError(errors.New("review3 bookkeeping unavailable"), true)
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, bookkeepingErr }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, bookkeepingErr
+	}
 	scheduler.process(timer, nil)
 	scheduler.process(timer, nil)
 
 	joined := errors.Join(bookkeepingErr, alertlifecycle.ErrWriterCommitOutcomeUnknown, context.DeadlineExceeded)
-	scheduler.runner = func(context.Context, int) (int, error) { return 0, joined }
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
+		return alertlifecycle.RecheckBatchResult{}, joined
+	}
 	scheduler.process(timer, nil)
 	want := []time.Duration{time.Second, 5 * time.Second, time.Second}
 	if len(clock.timer.resets) != len(want) {
@@ -90,9 +94,39 @@ func TestProblem3Review3RegisteredRouterOperatorContract(t *testing.T) {
 	})
 	router := chi.NewRouter()
 	registerAlertLifecycleRecheckRoutes(router)
+	boundaryRequest := func(body, contentType, marker, fetchSite string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/review3/alerts-history/recheck/1/retry", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", contentType)
+		if marker != "" {
+			req.Header.Set(recheckOperatorRequestHeader, marker)
+		}
+		if fetchSite != "" {
+			req.Header.Set("Sec-Fetch-Site", fetchSite)
+		}
+		return req.WithContext(context.WithValue(req.Context(), authUserKey("user"), "attacker"))
+	}
+	for name, request := range map[string]*http.Request{
+		"missing marker": boundaryRequest(`{"requestId":"hostile-missing"}`, "application/json", "", "same-origin"),
+		"cross-site":     boundaryRequest(`{"requestId":"hostile-cross-site"}`, "application/json", "recheck-operator", "cross-site"),
+		"simple text":    boundaryRequest(`{"requestId":"hostile-text"}`, "text/plain", "recheck-operator", "same-origin"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			want := http.StatusForbidden
+			if name == "simple text" {
+				want = http.StatusUnsupportedMediaType
+			}
+			if recorder.Code != want {
+				t.Fatalf("boundary status=%d want=%d body=%s", recorder.Code, want, recorder.Body.String())
+			}
+		})
+	}
 
 	request := func(path, body, actor string) *http.Request {
 		req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(recheckOperatorRequestHeader, "recheck-operator")
 		return req.WithContext(context.WithValue(req.Context(), authUserKey("user"), actor))
 	}
 	retry := httptest.NewRecorder()
@@ -156,10 +190,10 @@ func TestProblem3Review3TerminalDispositionStopsSchedulerOwner(t *testing.T) {
 	scheduler := newRecheckScheduler(nil, &reviewSchedulerClock{now: time.Date(2026, time.August, 19, 10, 0, 0, 0, time.UTC)})
 	calls := make(chan int, 2)
 	call := 0
-	scheduler.runner = func(context.Context, int) (int, error) {
+	scheduler.runner = func(context.Context, int) (alertlifecycle.RecheckBatchResult, error) {
 		call++
 		calls <- call
-		return 0, errors.Join(alertlifecycle.ErrWriterOperationInvariant, errors.New("review3 terminal invariant"))
+		return alertlifecycle.RecheckBatchResult{}, errors.Join(alertlifecycle.ErrWriterOperationInvariant, errors.New("review3 terminal invariant"))
 	}
 	scheduler.Start()
 	if first := <-calls; first != 1 {

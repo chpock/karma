@@ -104,11 +104,25 @@ Operationally:
   state and an after-unlock observability `run` callback. Regroup consumes the
   captured committed phase result instead of treating `ErrWriterCommitReconciled`
   as a domain failure; recheck infrastructure errors never become job failures.
+- Immediate and reconciled committed recheck failure bookkeeping share one
+  operation-specific event finalizer. A terminal outcome publishes a terminal-failure
+  finalization barrier under writer ownership, emits retained selection/terminal events,
+  and releases the barrier after unlock. Retry/Abandon
+  waits outside the writer mutex for that barrier. A successful action publishes a separate
+  operator-action finalization barrier so recheck execution remains behind its applied
+  event attempt and scheduler wake. This does not change the generic writer finalizer
+  contract.
 - `Store.Close` transitions through `closing`, waits for the writer mutex and all
   Store-owned workers, then closes the writer connection before the read pool.
 - Regroup and silence recheck release the writer between batches, so poll/resolve/housekeeping can make progress.
 - Poll runtime events are immutable transaction-local payloads emitted by the
   committed transaction's finalizer; no post-commit query by poll timestamp is used.
+- Recheck worker results use the typed Problem 4 disposition contract. Store-owned
+  committed domain events are distinct from cmd-owned scheduler infrastructure events;
+  a failed FIFO head is represented once and remains wakeable for operator recovery.
+- Stats and warning readers expose server-authoritative nested recheck state and
+  ordered typed issues. Observability metadata collection is best effort and cannot
+  alter the surrounding lifecycle transaction or operator result.
 - SQLite also uses a 5-second busy timeout for brief locks outside the Store process.
 - The PID path is an owned lease, not global mutable state: exclusive creation keeps
   an open handle and platform identity, and release validates that identity before

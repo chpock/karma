@@ -91,11 +91,11 @@ type Store struct {
 	path                       string
 	silenceHistoryRetentionTTL time.Duration
 	writeMu                    sync.Mutex
-	recheckBlockedJobLogged    int64
 	recheckCommitWake          func()
 	recheckReconciledWake      func()
 	recheckStateMu             sync.Mutex
 	pendingRecheckFailure      *recheckPendingFailure
+	pendingRecheckOperator     *recheckOperatorFinalization
 	lifecycleState             lifecycleState
 	writerRecoveryState        writerRecoveryState
 	pendingWriterCommit        *pendingWriterCommit
@@ -114,6 +114,103 @@ type storeLifecycleTestHooks struct {
 	// recheckFault is a test-only named-stage fault boundary for Problem 3.
 	// Production Stores leave it nil and execute the normal SQL path.
 	recheckFault func(string) error
+	// observabilityFault is a test-only boundary for best-effort poll metadata.
+	observabilityFault func(string, string) error
+	// postCommitEventEmissionFault is a test-only post-commit logging boundary.
+	postCommitEventEmissionFault func(string) error
+	// statsSnapshotAfterCurrentRows is a test-only causal boundary for proving
+	// all stats fields come from one read transaction.
+	statsSnapshotAfterCurrentRows func()
+	// recheckBatchDuration overrides only the emitted batch duration in tests.
+	recheckBatchDuration func(time.Duration) time.Duration
+	// recheckResultReadFault proves that confirmed reconciliation does not depend
+	// on a later observability read. Production Stores leave it nil.
+	recheckResultReadFault func() error
+	// recheckNow fixes worker transition time only in deterministic evidence tests.
+	recheckNow func() time.Time
+	// regroupNow fixes regroup transition time only in deterministic evidence tests.
+	regroupNow func() time.Time
+	// recheckOperatorBarrier exposes the two operation-specific barrier checks to
+	// deterministic concurrency tests. Production Stores leave it nil.
+	recheckOperatorBarrier func(string)
+	// recheckWorkerBarrier exposes operator-finalization checks to real scheduler tests.
+	recheckWorkerBarrier func(string)
+	// recheckOperatorFinalizer pauses the after-unlock operator event path in tests.
+	recheckOperatorFinalizer func()
+	// recheckFailureFinalizer pauses retained failure events after writer release in tests.
+	recheckFailureFinalizer func()
+}
+
+func (s *Store) signalRecheckOperatorBarrier(stage string) {
+	if s == nil || s.lifecycleTestHooks == nil {
+		return
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	hook := s.lifecycleTestHooks.recheckOperatorBarrier
+	s.lifecycleTestHooks.mu.Unlock()
+	if hook != nil {
+		hook(stage)
+	}
+}
+
+func (s *Store) signalRecheckWorkerBarrier(stage string) {
+	if s == nil || s.lifecycleTestHooks == nil {
+		return
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	hook := s.lifecycleTestHooks.recheckWorkerBarrier
+	s.lifecycleTestHooks.mu.Unlock()
+	if hook != nil {
+		hook(stage)
+	}
+}
+
+func (s *Store) signalRecheckOperatorFinalizer() {
+	if s == nil || s.lifecycleTestHooks == nil {
+		return
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	hook := s.lifecycleTestHooks.recheckOperatorFinalizer
+	s.lifecycleTestHooks.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+func (s *Store) signalRecheckFailureFinalizer() {
+	if s == nil || s.lifecycleTestHooks == nil {
+		return
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	hook := s.lifecycleTestHooks.recheckFailureFinalizer
+	s.lifecycleTestHooks.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+}
+
+func (s *Store) currentRecheckTime() time.Time {
+	if s != nil && s.lifecycleTestHooks != nil {
+		s.lifecycleTestHooks.mu.Lock()
+		now := s.lifecycleTestHooks.recheckNow
+		s.lifecycleTestHooks.mu.Unlock()
+		if now != nil {
+			return now().UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+
+func (s *Store) currentRegroupTime() time.Time {
+	if s != nil && s.lifecycleTestHooks != nil {
+		s.lifecycleTestHooks.mu.Lock()
+		now := s.lifecycleTestHooks.regroupNow
+		s.lifecycleTestHooks.mu.Unlock()
+		if now != nil {
+			return now().UTC()
+		}
+	}
+	return time.Now().UTC()
 }
 
 func (s *Store) recheckPostCASReadError(stage string) error {
@@ -140,6 +237,34 @@ func (s *Store) recheckStageFault(stage string) error {
 		return nil
 	}
 	return hook(stage)
+}
+
+func (s *Store) observabilityCollectionFault(stage, eventFamily string) error {
+	if s == nil || s.lifecycleTestHooks == nil {
+		return nil
+	}
+	s.lifecycleTestHooks.mu.Lock()
+	hook := s.lifecycleTestHooks.observabilityFault
+	s.lifecycleTestHooks.mu.Unlock()
+	if hook == nil {
+		return nil
+	}
+	return hook(stage, eventFamily)
+}
+
+func (s *Store) emitRuntimeEventsBestEffort(ctx context.Context, eventFamily string, events []runtimeEvent) {
+	if s != nil && s.lifecycleTestHooks != nil {
+		s.lifecycleTestHooks.mu.Lock()
+		hook := s.lifecycleTestHooks.postCommitEventEmissionFault
+		s.lifecycleTestHooks.mu.Unlock()
+		if hook != nil {
+			if err := hook(eventFamily); err != nil {
+				runtimeLog.WarnContext(ctx, "alert_lifecycle", "observability_collection_failed", "Post-commit event emission failed", slog.String("stage", "post_commit_event"), slog.String("event_family", eventFamily), slog.String("error", SanitizeRecheckError(err)))
+				return
+			}
+		}
+	}
+	emitRuntimeEventsContext(ctx, events)
 }
 
 func (s *Store) signalLifecycleHook(signal chan struct{}) {
@@ -946,9 +1071,10 @@ type recheckWriterReconciliation struct {
 	resolved  bool
 	operation string
 	outcome   string
+	result    *RecheckBatchResult
 }
 
-func (s *Store) reconcileWriterForRecheck(ctx context.Context) (recheckWriterReconciliation, error) {
+func (s *Store) reconcileWriterForRecheck(ctx context.Context, pending recheckPendingFailure) (recheckWriterReconciliation, error) {
 	if s == nil {
 		return recheckWriterReconciliation{}, ErrStoreNotInitialized
 	}
@@ -964,19 +1090,32 @@ func (s *Store) reconcileWriterForRecheck(ctx context.Context) (recheckWriterRec
 	if err != nil && errors.Is(err, ErrWriterUnavailable) && !errors.Is(err, ErrWriterCommitOutcomeUnknown) && !IsWriterAcquisitionError(err) {
 		err = &writerAcquisitionError{operation: writerOperationRecheckFailure, err: err}
 	}
-	if err == nil && result.attempted {
+	if err == nil && result.attempted && isRecheckWriterOperation(result.operation) {
 		result.resolved = true
 		result.outcome = "absent"
 	}
 	if outcomeOperation, outcome, ok := RecheckWriterCommitDisposition(err); ok && outcome == "committed" {
 		result.attempted = true
-		result.resolved = true
 		result.operation = outcomeOperation
 		result.outcome = "committed"
+		if isRecheckWriterOperation(outcomeOperation) {
+			result.resolved = true
+			if !pending.ResultReady || pending.Operation != outcomeOperation {
+				s.writeMu.Unlock()
+				runWriterFinalizer(finalizer)
+				return result, fmt.Errorf("%w: retained recheck result missing for %s", ErrWriterOperationInvariant, outcomeOperation)
+			}
+			retained := pending.Result
+			result.result = &retained
+		}
 	}
 	s.writeMu.Unlock()
 	runWriterFinalizer(finalizer)
 	return result, err
+}
+
+func isRecheckWriterOperation(operation string) bool {
+	return operation == writerOperationRecheckBatch || operation == writerOperationRecheckFailure
 }
 
 func (s *Store) rollbackWriterTxLocked(tx *sql.Tx) error {
@@ -3050,7 +3189,7 @@ func (s *Store) RunHousekeepingContext(ctx context.Context, retentionTTL time.Du
 		return HousekeepingResult{}, err
 	}
 
-	stats, err := s.GetStats()
+	stats, err := s.GetStatsContext(ctx)
 	if err != nil {
 		return HousekeepingResult{}, err
 	}
@@ -3072,86 +3211,30 @@ func (s *Store) RunHousekeepingContext(ctx context.Context, retentionTTL time.Du
 }
 
 func (s *Store) GetStats() (Stats, error) {
+	return s.GetStatsContext(context.Background())
+}
+
+func (s *Store) GetStatsContext(ctx context.Context) (Stats, error) {
 	if s == nil || s.db == nil {
 		return Stats{}, ErrStoreNotInitialized
 	}
-
-	currentRows, err := queryInt(s.db, `SELECT COUNT(*) FROM alert_states`)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return Stats{}, fmt.Errorf("failed to count current alerts: %w", err)
+		return Stats{}, fmt.Errorf("failed to begin lifecycle stats snapshot: %w", err)
 	}
-	stateCounts, err := s.queryStateCounts()
+	var statsBoundary func()
+	if s.lifecycleTestHooks != nil {
+		s.lifecycleTestHooks.mu.Lock()
+		statsBoundary = s.lifecycleTestHooks.statsSnapshotAfterCurrentRows
+		s.lifecycleTestHooks.mu.Unlock()
+	}
+	stats, err := getStatsSnapshotFromHook(tx, statsBoundary)
 	if err != nil {
+		_ = tx.Rollback()
 		return Stats{}, err
 	}
-	suppressedCurrent, suppressedPast, err := s.querySuppressedBreakdown()
-	if err != nil {
-		return Stats{}, err
-	}
-	historyRows, err := queryInt(s.db, `SELECT COUNT(*) FROM alert_events`)
-	if err != nil {
-		return Stats{}, fmt.Errorf("failed to count state history rows: %w", err)
-	}
-	pageCount, err := queryInt(s.db, `PRAGMA page_count`)
-	if err != nil {
-		return Stats{}, fmt.Errorf("failed to query sqlite page_count: %w", err)
-	}
-	pageSize, err := queryInt(s.db, `PRAGMA page_size`)
-	if err != nil {
-		return Stats{}, fmt.Errorf("failed to query sqlite page_size: %w", err)
-	}
-	freelistCount, err := queryInt(s.db, `PRAGMA freelist_count`)
-	if err != nil {
-		return Stats{}, fmt.Errorf("failed to query sqlite freelist_count: %w", err)
-	}
-
-	lastHousekeepingAt, err := s.getOptionalMetadataTime(metaLastHousekeepingAt)
-	if err != nil {
-		return Stats{}, err
-	}
-	lastVacuumAt, err := s.getOptionalMetadataTime(metaLastIncrementalVacuumAt)
-	if err != nil {
-		return Stats{}, err
-	}
-	groupingFingerprint, err := s.getMetadataString(metaGroupingFingerprint)
-	if err != nil {
-		return Stats{}, err
-	}
-	regroupTargetFingerprint, err := s.getMetadataString(metaRegroupTargetFingerprint)
-	if err != nil {
-		return Stats{}, err
-	}
-	regroupStatus, err := s.getMetadataString(metaRegroupStatus)
-	if err != nil {
-		return Stats{}, err
-	}
-	regroupError, err := s.getMetadataString(metaRegroupError)
-	if err != nil {
-		return Stats{}, err
-	}
-	regroupProcessed, err := s.getMetadataInt(metaRegroupProcessed)
-	if err != nil {
-		return Stats{}, err
-	}
-	regroupTotal, err := s.getMetadataInt(metaRegroupTotal)
-	if err != nil {
-		return Stats{}, err
-	}
-	regroupStartedAt, err := s.getOptionalMetadataTime(metaRegroupStartedAt)
-	if err != nil {
-		return Stats{}, err
-	}
-	regroupFinishedAt, err := s.getOptionalMetadataTime(metaRegroupFinishedAt)
-	if err != nil {
-		return Stats{}, err
-	}
-	inconsistentClusters, err := s.queryInconsistentSilenceClusters()
-	if err != nil {
-		return Stats{}, err
-	}
-	recheckStats, err := s.queryRecheckStats()
-	if err != nil {
-		return Stats{}, err
+	if commitErr := tx.Commit(); commitErr != nil {
+		return Stats{}, fmt.Errorf("failed to commit lifecycle stats snapshot: %w", commitErr)
 	}
 
 	stat, err := os.Stat(s.sqlitePath())
@@ -3161,12 +3244,96 @@ func (s *Store) GetStats() (Stats, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Stats{}, fmt.Errorf("failed to stat sqlite file: %w", err)
 	}
-
-	if fileSize == 0 && pageCount > 0 && pageSize > 0 {
-		estimated := int64(pageCount) * int64(pageSize)
+	if fileSize == 0 && stats.PageCount > 0 && stats.PageSizeBytes > 0 {
+		estimated := int64(stats.PageCount) * int64(stats.PageSizeBytes)
 		if estimated > 0 {
 			fileSize = estimated
 		}
+	}
+	stats.FileSizeBytes = fileSize
+	return stats, nil
+}
+
+func getStatsSnapshotFromHook(q lifecycleStatsQueryer, afterCurrentRows func()) (Stats, error) {
+	currentRows, err := queryInt(q, `SELECT COUNT(*) FROM alert_states`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("failed to count current alerts: %w", err)
+	}
+	if afterCurrentRows != nil {
+		afterCurrentRows()
+	}
+	stateCounts, err := queryStateCountsFrom(q)
+	if err != nil {
+		return Stats{}, err
+	}
+	suppressedCurrent, suppressedPast, err := querySuppressedBreakdownFrom(q)
+	if err != nil {
+		return Stats{}, err
+	}
+	historyRows, err := queryInt(q, `SELECT COUNT(*) FROM alert_events`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("failed to count state history rows: %w", err)
+	}
+	pageCount, err := queryInt(q, `PRAGMA page_count`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("failed to query sqlite page_count: %w", err)
+	}
+	pageSize, err := queryInt(q, `PRAGMA page_size`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("failed to query sqlite page_size: %w", err)
+	}
+	freelistCount, err := queryInt(q, `PRAGMA freelist_count`)
+	if err != nil {
+		return Stats{}, fmt.Errorf("failed to query sqlite freelist_count: %w", err)
+	}
+
+	lastHousekeepingAt, err := getOptionalMetadataTimeFrom(q, metaLastHousekeepingAt)
+	if err != nil {
+		return Stats{}, err
+	}
+	lastVacuumAt, err := getOptionalMetadataTimeFrom(q, metaLastIncrementalVacuumAt)
+	if err != nil {
+		return Stats{}, err
+	}
+	groupingFingerprint, err := getMetadataStringFrom(q, metaGroupingFingerprint)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupTargetFingerprint, err := getMetadataStringFrom(q, metaRegroupTargetFingerprint)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupStatus, err := getMetadataStringFrom(q, metaRegroupStatus)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupError, err := getMetadataStringFrom(q, metaRegroupError)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupProcessed, err := getMetadataIntFrom(q, metaRegroupProcessed)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupTotal, err := getMetadataIntFrom(q, metaRegroupTotal)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupStartedAt, err := getOptionalMetadataTimeFrom(q, metaRegroupStartedAt)
+	if err != nil {
+		return Stats{}, err
+	}
+	regroupFinishedAt, err := getOptionalMetadataTimeFrom(q, metaRegroupFinishedAt)
+	if err != nil {
+		return Stats{}, err
+	}
+	inconsistentClusters, err := queryInconsistentSilenceClustersFrom(q)
+	if err != nil {
+		return Stats{}, err
+	}
+	recheckStats, err := queryRecheckStatsFrom(q)
+	if err != nil {
+		return Stats{}, err
 	}
 
 	return Stats{
@@ -3183,37 +3350,29 @@ func (s *Store) GetStats() (Stats, error) {
 		RegroupTotal:                regroupTotal,
 		RegroupStartedAt:            regroupStartedAt,
 		RegroupFinishedAt:           regroupFinishedAt,
-		FileSizeBytes:               fileSize,
+		FileSizeBytes:               0,
 		PageCount:                   pageCount,
 		PageSizeBytes:               pageSize,
 		FreelistCount:               freelistCount,
 		LastHousekeepingAt:          lastHousekeepingAt,
 		LastIncrementalVacuumAt:     lastVacuumAt,
 		SilenceInconsistentClusters: inconsistentClusters,
-		RecheckQueueDepth:           recheckStats.queueDepth,
-		RecheckCurrentJobID:         recheckStats.jobID,
-		RecheckCurrentStatus:        recheckStats.status,
-		RecheckCurrentProcessed:     recheckStats.processed,
-		RecheckCurrentPromoted:      recheckStats.promoted,
-		RecheckCurrentSkipped:       recheckStats.skipped,
-		RecheckCurrentError:         recheckStats.lastError,
-		RecheckOldestCreatedAt:      recheckStats.oldestCreatedAt,
+		Recheck:                     RecheckStats{QueueDepth: recheckStats.queueDepth, HeadJob: recheckStats.headJob},
 	}, nil
 }
 
 type recheckStatsSnapshot struct {
-	queueDepth      int
-	jobID           int64
-	status          string
-	processed       int
-	promoted        int
-	skipped         int
-	lastError       string
-	oldestCreatedAt *time.Time
+	queueDepth int
+	headJob    *RecheckHeadJob
 }
 
-func (s *Store) queryInconsistentSilenceClusters() ([]string, error) {
-	rows, err := s.db.Query(`SELECT cluster_id FROM alertmanager_cluster_consistency WHERE status='inconsistent' ORDER BY cluster_id`)
+type lifecycleStatsQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func queryInconsistentSilenceClustersFrom(q lifecycleStatsQueryer) ([]string, error) {
+	rows, err := q.Query(`SELECT cluster_id FROM alertmanager_cluster_consistency WHERE status='inconsistent' ORDER BY cluster_id`)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query inconsistent silence clusters: %w", err)
 	}
@@ -3229,42 +3388,175 @@ func (s *Store) queryInconsistentSilenceClusters() ([]string, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) queryRecheckStats() (recheckStatsSnapshot, error) {
+func queryRecheckStatsFrom(q lifecycleStatsQueryer) (recheckStatsSnapshot, error) {
 	var out recheckStatsSnapshot
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','retry_wait','failed')`).Scan(&out.queueDepth); err != nil {
+	if err := validateRecheckStatsRowsFrom(q); err != nil {
+		return out, err
+	}
+	if err := q.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','retry_wait','failed')`).Scan(&out.queueDepth); err != nil {
 		return out, fmt.Errorf("failed to query recheck queue depth: %w", err)
 	}
-	var createdAtRaw, lastError sql.NullString
-	err := s.db.QueryRow(`
-SELECT job_id, status, processed_candidates, promoted_candidates,
-       skipped_ineligible + skipped_missing_labels + skipped_incomplete_sources + stale_conflicts,
-       COALESCE(last_error_message, first_error_message, ''), created_at
+	var (
+		jobID, totalCandidates, processedCandidates, promotedCandidates                   int64
+		skippedIneligible, skippedMissingLabels, skippedIncompleteSources, staleConflicts int64
+		attemptCount, retryCount, consecutiveRetryCount, recoveryCount                    int64
+		triggerType, status                                                               string
+		createdAtRaw, startedAtRaw, finishedAtRaw, nextAttemptAtRaw                       sql.NullString
+		firstErrorMessage, firstErrorClass, firstErrorStage, firstErrorAt                 sql.NullString
+		lastErrorMessage, lastErrorClass, lastErrorStage, lastErrorAt                     sql.NullString
+	)
+	err := q.QueryRow(`
+SELECT job_id, trigger_type, status, created_at, started_at, finished_at,
+       total_candidates, processed_candidates, promoted_candidates,
+       skipped_ineligible, skipped_missing_labels, skipped_incomplete_sources,
+       stale_conflicts, attempt_count, retry_count, consecutive_retry_count,
+       next_attempt_at, first_error_message, first_error_class, first_error_stage,
+       first_error_at, last_error_message, last_error_class, last_error_stage,
+       last_error_at, recovery_count
 FROM silence_recheck_jobs
 WHERE status IN ('queued','running','retry_wait','failed')
 ORDER BY job_id ASC
 LIMIT 1
-`).Scan(&out.jobID, &out.status, &out.processed, &out.promoted, &out.skipped, &lastError, &createdAtRaw)
+`).Scan(
+		&jobID, &triggerType, &status, &createdAtRaw, &startedAtRaw, &finishedAtRaw,
+		&totalCandidates, &processedCandidates, &promotedCandidates,
+		&skippedIneligible, &skippedMissingLabels, &skippedIncompleteSources,
+		&staleConflicts, &attemptCount, &retryCount, &consecutiveRetryCount,
+		&nextAttemptAtRaw, &firstErrorMessage, &firstErrorClass, &firstErrorStage,
+		&firstErrorAt, &lastErrorMessage, &lastErrorClass, &lastErrorStage,
+		&lastErrorAt, &recoveryCount,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, nil
 	}
 	if err != nil {
 		return out, fmt.Errorf("failed to query current recheck job: %w", err)
 	}
-	out.lastError = lastError.String
-	if createdAtRaw.Valid {
-		parsed, parseErr := time.Parse(time.RFC3339Nano, createdAtRaw.String)
-		if parseErr != nil {
-			return out, fmt.Errorf("failed to parse oldest recheck job timestamp: %w", parseErr)
-		}
-		out.oldestCreatedAt = &parsed
+	createdAt, parseErr := parseRecheckStatsTime(createdAtRaw, "created_at")
+	if parseErr != nil {
+		return out, parseErr
+	}
+	if createdAt == nil {
+		return out, errors.New("failed to read current recheck job: created_at is NULL")
+	}
+	startedAt, err := parseRecheckStatsTime(startedAtRaw, "started_at")
+	if err != nil {
+		return out, err
+	}
+	finishedAt, err := parseRecheckStatsTime(finishedAtRaw, "finished_at")
+	if err != nil {
+		return out, err
+	}
+	nextAttemptAt, err := parseRecheckStatsTime(nextAttemptAtRaw, "next_attempt_at")
+	if err != nil {
+		return out, err
+	}
+	firstError, err := buildRecheckStatsError(firstErrorMessage, firstErrorClass, firstErrorStage, firstErrorAt)
+	if err != nil {
+		return out, err
+	}
+	lastError, err := buildRecheckStatsError(lastErrorMessage, lastErrorClass, lastErrorStage, lastErrorAt)
+	if err != nil {
+		return out, err
+	}
+	if err := validateRecheckResultState(status, nextAttemptAt, firstError, lastError); err != nil {
+		return out, err
+	}
+	out.headJob = &RecheckHeadJob{
+		JobID: jobID, TriggerType: triggerType, Status: status, CreatedAt: *createdAt,
+		StartedAt: startedAt, FinishedAt: finishedAt, TotalCandidates: int(totalCandidates),
+		ProcessedCandidates: int(processedCandidates), OutcomeCounts: RecheckOutcomeCounts{
+			Promoted: int(promotedCandidates), Stale: int(staleConflicts),
+			Ineligible: int(skippedIneligible), MissingLabels: int(skippedMissingLabels),
+			IncompleteSources: int(skippedIncompleteSources),
+		}, AttemptCount: int(attemptCount), RetryCount: int(retryCount),
+		ConsecutiveRetryCount: int(consecutiveRetryCount), NextAttemptAt: nextAttemptAt,
+		FirstError: firstError, LastError: lastError, RecoveryCount: int(recoveryCount),
 	}
 	return out, nil
 }
 
-func (s *Store) queryStateCounts() (map[string]int, error) {
+func validateRecheckStatsRowsFrom(q lifecycleStatsQueryer) error {
+	rows, err := q.Query(`
+SELECT status, next_attempt_at,
+       first_error_message, first_error_class, first_error_stage, first_error_at,
+       last_error_message, last_error_class, last_error_stage, last_error_at
+FROM silence_recheck_jobs`)
+	if err != nil {
+		return fmt.Errorf("failed to validate recheck error tuples: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			status                                                     string
+			nextAttemptRaw                                             sql.NullString
+			firstMessage, firstClass, firstStage, firstAt, lastMessage sql.NullString
+			lastClass, lastStage, lastAt                               sql.NullString
+		)
+		if err := rows.Scan(&status, &nextAttemptRaw, &firstMessage, &firstClass, &firstStage, &firstAt, &lastMessage, &lastClass, &lastStage, &lastAt); err != nil {
+			return fmt.Errorf("failed to scan recheck error tuple: %w", err)
+		}
+		nextAttempt, err := parseRecheckStatsTime(nextAttemptRaw, "next_attempt_at")
+		if err != nil {
+			return err
+		}
+		firstError, err := buildRecheckStatsError(firstMessage, firstClass, firstStage, firstAt)
+		if err != nil {
+			return err
+		}
+		lastError, err := buildRecheckStatsError(lastMessage, lastClass, lastStage, lastAt)
+		if err != nil {
+			return err
+		}
+		if err := validateRecheckResultState(status, nextAttempt, firstError, lastError); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("failed to iterate recheck error tuples: %w", err)
+	}
+	return nil
+}
+
+func parseRecheckStatsTime(raw sql.NullString, field string) (*time.Time, error) {
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, raw.String)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse recheck %s: %w", field, err)
+	}
+	parsed = parsed.UTC()
+	return &parsed, nil
+}
+
+func buildRecheckStatsError(message, class, stage, at sql.NullString) (*RecheckErrorSnapshot, error) {
+	validCount := 0
+	for _, field := range []sql.NullString{message, class, stage, at} {
+		if field.Valid {
+			validCount++
+		}
+	}
+	if validCount == 0 {
+		return nil, nil
+	}
+	if validCount != 4 || strings.TrimSpace(message.String) == "" || strings.TrimSpace(class.String) == "" || strings.TrimSpace(stage.String) == "" {
+		return nil, errors.New("incomplete recheck error tuple")
+	}
+	errorAt, err := parseRecheckStatsTime(at, "error_at")
+	if err != nil {
+		return nil, err
+	}
+	if errorAt == nil {
+		return nil, errors.New("recheck error tuple has NULL error_at")
+	}
+	return &RecheckErrorSnapshot{Class: strings.TrimSpace(class.String), Stage: strings.TrimSpace(stage.String), At: *errorAt, Message: strings.TrimSpace(message.String)}, nil
+}
+
+func queryStateCountsFrom(q lifecycleStatsQueryer) (map[string]int, error) {
 	out := map[string]int{}
 
-	rows, err := s.db.Query(`
+	rows, err := q.Query(`
 SELECT state, COUNT(*)
 FROM alert_states
 GROUP BY state
@@ -3293,8 +3585,8 @@ GROUP BY state
 	return out, nil
 }
 
-func (s *Store) querySuppressedBreakdown() (int, int, error) {
-	rows, err := s.db.Query(`
+func querySuppressedBreakdownFrom(q lifecycleStatsQueryer) (int, int, error) {
+	rows, err := q.Query(`
 SELECT is_live, COUNT(*)
 FROM alert_states
 WHERE state = ?
@@ -3470,7 +3762,7 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 
 	ctx := context.Background()
 	var committedPollResult pollTransactionResult
-	var pollEventsCollector runtimeEventCollector
+	pollEventsCollector := runtimeEventCollector{observabilityFault: s.observabilityCollectionFault}
 	pollFinalizer := &writerAfterCommitFinalizer{
 		ctx:           ctx,
 		operationKind: writerOperationPoll,
@@ -3480,7 +3772,7 @@ func (s *Store) ApplyPollCycle(input PollCycleInput) (PollCycleResult, error) {
 			}
 		},
 		run: func(bool) {
-			emitRuntimeEvents(committedPollResult.events)
+			s.emitRuntimeEventsBestEffort(ctx, "poll", committedPollResult.events)
 		},
 	}
 	txResult, err := withWriterTxValueAfterCommit(ctx, s, writerOperationPoll, func(tx *sql.Tx) (pollTransactionResult, error) {
@@ -3761,9 +4053,10 @@ type runtimeEvent struct {
 }
 
 type runtimeEventCollector struct {
-	events            []runtimeEvent
-	nextSequence      uint64
-	eligibilityScopes []recheckCandidateScope
+	events             []runtimeEvent
+	nextSequence       uint64
+	eligibilityScopes  []recheckCandidateScope
+	observabilityFault func(string, string) error
 }
 
 func (c *runtimeEventCollector) append(event runtimeEvent) {
@@ -3773,6 +4066,25 @@ func (c *runtimeEventCollector) append(event runtimeEvent) {
 	event.sequence = c.nextSequence
 	c.nextSequence++
 	c.events = append(c.events, event)
+}
+
+func (c *runtimeEventCollector) observabilityError(stage, eventFamily string, err error) error {
+	if c == nil {
+		return err
+	}
+	if c.observabilityFault != nil {
+		if injected := c.observabilityFault(stage, eventFamily); injected != nil {
+			err = injected
+		}
+	}
+	return err
+}
+
+func (c *runtimeEventCollector) appendObservabilityFailureValue(stage, eventFamily string, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	c.append(runtimeEvent{level: slog.LevelWarn, component: "alert_lifecycle", event: "observability_collection_failed", message: "Poll observability metadata collection failed", attrs: []slog.Attr{slog.String("stage", stage), slog.String("event_family", eventFamily), slog.String("error", "observability_error")}})
 }
 
 func (c *runtimeEventCollector) appendEligibilityScope(scope recheckCandidateScope) {
@@ -3839,10 +4151,6 @@ func alertTransitionRuntimeEvent(transition AlertStateTransition) runtimeEvent {
 	}
 }
 
-func emitRuntimeEvents(events []runtimeEvent) {
-	emitRuntimeEventsContext(context.Background(), events)
-}
-
 func emitRuntimeEventsContext(ctx context.Context, events []runtimeEvent) {
 	for _, event := range events {
 		runtimeLog.Event(ctx, event.level, event.component, event.event, event.message, event.attrs...)
@@ -3879,7 +4187,7 @@ func (s *Store) beginOrResumeRegroup(ctx context.Context, targetFingerprint stri
 }
 
 func (s *Store) beginOrResumeRegroupPhase(ctx context.Context, targetFingerprint string, completion *regroupPhaseCompletion, finalizer *writerAfterCommitFinalizer) (regroupStartResult, error) {
-	now := time.Now().UTC()
+	now := s.currentRegroupTime()
 	return withWriterTxValueAfterCommit(ctx, s, writerOperationRegroupBegin, func(tx *sql.Tx) (regroupStartResult, error) {
 		currentFingerprint, err := readMetadataStringTx(tx, metaGroupingFingerprint)
 		if err != nil {
@@ -4059,7 +4367,7 @@ LIMIT ?
 		rows.Close()
 
 		if len(batch) == 0 {
-			now := time.Now().UTC()
+			now := s.currentRegroupTime()
 			if err = setMetadataTx(tx, metaGroupingFingerprint, targetFingerprint); err != nil {
 				return false, 0, 0, 0, err
 			}
@@ -4096,7 +4404,7 @@ LIMIT ?
 				return false, 0, 0, totalRows, fmt.Errorf("failed to regroup alert %s: %w", row.AlertID, computeErr)
 			}
 
-			updatedAt := time.Now().UTC().Format(time.RFC3339Nano)
+			updatedAt := s.currentRegroupTime().Format(time.RFC3339Nano)
 			res, updateErr := tx.Exec(`
 UPDATE alert_states
 SET group_id = ?, group_labels_json = ?, updated_at = ?
@@ -4146,7 +4454,7 @@ func (s *Store) failRegroup(ctx context.Context, targetFingerprint, reason strin
 			return readErr
 		}
 		if strings.TrimSpace(status) == regroupStatusRunning && strings.TrimSpace(activeTarget) == targetFingerprint {
-			now := time.Now().UTC()
+			now := s.currentRegroupTime()
 			if err := setMetadataTx(tx, metaRegroupStatus, regroupStatusError); err != nil {
 				return err
 			}
@@ -5470,7 +5778,7 @@ type suppressionCauseMember struct {
 	known      bool
 }
 
-func (s *Store) RunSilenceRecheckBatch(batchSize int) (promotedResult int, resultErr error) {
+func (s *Store) RunSilenceRecheckBatch(batchSize int) (batchResult RecheckBatchResult, resultErr error) {
 	return s.RunSilenceRecheckBatchContext(context.Background(), batchSize)
 }
 
@@ -6753,8 +7061,8 @@ func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceStat
 	}
 	result := silenceReconciliationResult{}
 	previousConsistency, consistencyErr := readClusterConsistencyStatusesTx(tx)
-	if consistencyErr != nil {
-		collector.append(runtimeEvent{level: slog.LevelError, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect previous HA consistency state for logging", attrs: []slog.Attr{slog.Any("error", consistencyErr)}})
+	if observabilityErr := collector.observabilityError("event_payload", "ha_consistency_previous", consistencyErr); observabilityErr != nil {
+		collector.appendObservabilityFailureValue("event_payload", "ha_consistency_previous", observabilityErr)
 		previousConsistency = map[string]clusterConsistencySnapshot{}
 	}
 	normalizedSources := make([]SourceSilenceState, len(sources))
@@ -6843,8 +7151,8 @@ func reconcileSilenceSourcesWithEventsTx(tx *sql.Tx, sources []SourceSilenceStat
 		return silenceReconciliationResult{}, err
 	}
 	currentConsistency, consistencyErr := readClusterConsistencyStatusesTx(tx)
-	if consistencyErr != nil {
-		collector.append(runtimeEvent{level: slog.LevelError, component: "silence_reconciliation", event: "observability_collection_failed", message: "Failed to collect current HA consistency state for logging", attrs: []slog.Attr{slog.Any("error", consistencyErr)}})
+	if observabilityErr := collector.observabilityError("event_payload", "ha_consistency_current", consistencyErr); observabilityErr != nil {
+		collector.appendObservabilityFailureValue("event_payload", "ha_consistency_current", observabilityErr)
 	} else {
 		for _, event := range clusterConsistencyRuntimeEvents(previousConsistency, currentConsistency) {
 			collector.append(event)
@@ -7524,9 +7832,9 @@ func setMetadataTx(tx *sql.Tx, key, value string) error {
 	return nil
 }
 
-func (s *Store) getOptionalMetadataTime(key string) (*time.Time, error) {
+func getOptionalMetadataTimeFrom(q lifecycleStatsQueryer, key string) (*time.Time, error) {
 	var raw sql.NullString
-	err := s.db.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&raw)
+	err := q.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&raw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -7644,9 +7952,9 @@ func setMetadataTimeTx(tx *sql.Tx, key string, ts *time.Time) error {
 	return setMetadataTx(tx, key, v)
 }
 
-func (s *Store) getMetadataString(key string) (string, error) {
+func getMetadataStringFrom(q lifecycleStatsQueryer, key string) (string, error) {
 	var value sql.NullString
-	err := s.db.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&value)
+	err := q.QueryRow(`SELECT value FROM metadata WHERE key = ?`, key).Scan(&value)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
@@ -7659,8 +7967,8 @@ func (s *Store) getMetadataString(key string) (string, error) {
 	return value.String, nil
 }
 
-func (s *Store) getMetadataInt(key string) (int, error) {
-	raw, err := s.getMetadataString(key)
+func getMetadataIntFrom(q lifecycleStatsQueryer, key string) (int, error) {
+	raw, err := getMetadataStringFrom(q, key)
 	if err != nil {
 		return 0, err
 	}

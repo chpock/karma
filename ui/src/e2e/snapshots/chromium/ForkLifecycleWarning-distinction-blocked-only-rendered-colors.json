@@ -1,0 +1,63 @@
+{
+  "state": "distinction-blocked-only",
+  "cards": [
+    {
+      "kind": "recheck_blocked",
+      "background": "rgb(159, 29, 43)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 7.8217674024740145,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "recheck_blocked",
+      "background": "rgb(159, 29, 43)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 7.8217674024740145,
+      "borderContrast": 7.242559234853841
+    }
+  ],
+  "controls": [
+    {
+      "label": "Retry",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(55, 90, 127)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 7.163881058134201,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "label": "Abandon",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(176, 42, 55)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 6.496772712016201,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "label": "Retry",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(55, 90, 127)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 7.163881058134201,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "label": "Abandon",
+      "disabled": false,
+      "color": "rgb(255, 255, 255)",
+      "background": "rgb(176, 42, 55)",
+      "border": "rgb(255, 255, 255)",
+      "borderStyle": "solid",
+      "textContrast": 6.496772712016201,
+      "borderContrast": 7.242559234853841
+    }
+  ]
+}

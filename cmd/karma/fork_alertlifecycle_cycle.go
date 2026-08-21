@@ -50,6 +50,8 @@ func runAlertLifecyclePollCycle(successfulUpstreams map[string]bool) {
 		slog.Int("skippedInactive", result.SkippedInactive),
 		slog.Int("transitions", result.Transitions),
 		slog.Int("recheckJobsQueued", result.RecheckJobsQueued),
+		slog.Int("recheckJobsSourceContextChanged", result.RecheckJobsSourceContextChanged),
+		slog.Int("recheckJobsAlertBecameEligible", result.RecheckJobsAlertBecameEligible),
 		slog.Duration("duration", time.Since(startedAt)),
 	)
 }

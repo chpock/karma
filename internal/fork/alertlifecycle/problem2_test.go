@@ -183,8 +183,8 @@ func TestProblem2WorkerRecordsOneTerminalOutcomePerCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if promoted != 1 {
-		t.Fatalf("expected one promoted candidate, got=%d", promoted)
+	if promoted.OutcomeCounts.Promoted != 1 {
+		t.Fatalf("expected one promoted candidate, got=%d", promoted.OutcomeCounts.Promoted)
 	}
 	var outcome string
 	if err = store.db.QueryRow(`SELECT outcome FROM silence_recheck_job_candidates`).Scan(&outcome); err != nil {

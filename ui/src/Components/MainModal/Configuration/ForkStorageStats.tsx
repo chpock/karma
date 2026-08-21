@@ -97,6 +97,55 @@ const ForkStorageStats: FC<{
         <strong>{timeOrDash(response.lastRegroupFinishedAt)}</strong>
       </div>
       <div className="mb-2">
+        <span className="text-muted">Recheck queue:</span>{" "}
+        <strong>{response.recheck.queueDepth}</strong>
+        {response.recheck.headJob ? (
+          <span className="text-muted">
+            {" "}
+            (head job {response.recheck.headJob.jobId}, {response.recheck.headJob.status})
+          </span>
+        ) : null}
+      </div>
+      {response.recheck.headJob ? (
+        <div className="border rounded p-2 mb-2">
+          <div>
+            <span className="text-muted">Recheck progress:</span>{" "}
+            <strong>
+              {response.recheck.headJob.processedCandidates}/
+              {response.recheck.headJob.totalCandidates}
+            </strong>
+          </div>
+          <div>
+            <span className="text-muted">Attempts:</span>{" "}
+            <strong>{response.recheck.headJob.attemptCount}</strong>
+            <span className="text-muted">, retries:</span>{" "}
+            <strong>{response.recheck.headJob.retryCount}</strong>
+            <span className="text-muted">, recovery:</span>{" "}
+            <strong>{response.recheck.headJob.recoveryCount}</strong>
+          </div>
+          <div>
+            <span className="text-muted">Outcomes:</span>{" "}
+            <strong>{response.recheck.headJob.outcomeCounts.promoted} promoted</strong>
+            <span className="text-muted">, </span>
+            <strong>{response.recheck.headJob.outcomeCounts.stale} stale</strong>
+            <span className="text-muted">, </span>
+            <strong>{response.recheck.headJob.outcomeCounts.ineligible} ineligible</strong>
+            <span className="text-muted">, </span>
+            <strong>{response.recheck.headJob.outcomeCounts.missingLabels} missing labels</strong>
+            <span className="text-muted">, </span>
+            <strong>{response.recheck.headJob.outcomeCounts.incompleteSources} incomplete</strong>
+          </div>
+          <div>
+            <span className="text-muted">Last error:</span>{" "}
+            <strong>
+              {response.recheck.headJob.lastError
+                ? `${response.recheck.headJob.lastError.class}/${response.recheck.headJob.lastError.stage}`
+                : "-"}
+            </strong>
+          </div>
+        </div>
+      ) : null}
+      <div className="mb-2">
         <span className="text-muted">SQLite path:</span>{" "}
         <code>{response.sqlitePath}</code>
       </div>

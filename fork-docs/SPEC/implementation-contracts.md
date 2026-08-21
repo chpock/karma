@@ -105,9 +105,15 @@ Required checks for this model:
   confirmed commit validates the complete attempt tuple, while the original commit cause
   remains available for BUSY allowlist classification.
 - One cmd-owned recheck scheduler is the only automatic worker. Startup, committed poll
-  job creation and operator actions own the ordinary wake; a reconciled recheck commit owns
-  a separate reconciled wake. Ordinary recheck batches and empty/no-work commits never
-  self-signal. Housekeeping is not a periodic wake source. The scheduler stores timer kind,
+  job creation and operator actions own the ordinary wake; a delayed reconciled
+  `recheck_batch` commit owns a separate reconciled wake. Reconciled `recheck_failure`
+  returns through the already-active reconciliation timer and retained result without a
+  finalizer wake. Immediate and reconciled committed failure use one operation-specific
+  event finalizer; a terminal outcome emits retained selection/terminal events and releases
+  its terminal-failure finalization barrier. A separate operator-action finalization barrier orders the applied
+  event attempt before recheck execution and the operator wake. Ordinary recheck batches
+  and empty/no-work commits never self-signal.
+  Housekeeping is not a periodic wake source. The scheduler stores timer kind,
   owner, and absolute deadline; all wakes are coalesced while a process-local backoff or
   persisted head due timer is active. It is joined before Store close, and persisted
   `retry_wait` due times drive its timer. Typed acquisition, pre-attempt,
@@ -119,20 +125,39 @@ Required checks for this model:
   scheduler's own context is normal shutdown.
 - Authenticated retry/abandon routes perform semantic CAS on `failed` jobs and append an
   idempotent operator-action row in the same transaction. They preserve immutable input,
-  candidate progress, and attempt history. The request decoder rejects duplicate or
+  candidate progress, and attempt history. An exact replay returns the original result
+  without another domain action/event/wake, while its committed writer invocation appends
+  one operational `lifecycle_writer_commits` row. The request decoder rejects duplicate or
   case-variant keys, invalid UTF-8, null/non-string values, unknown fields, trailing JSON,
   and oversized bodies.
 - Post-commit finalizers have an in-lock handoff for completion state and an
   after-unlock structured-log callback. Regroup consumes a committed phase result
-  after delayed reconciliation. Recheck poll job-creation and operator wakes belong to the
-  original finalizer and run exactly once after immediate or cross-operation
-  reconciliation. A recheck batch owned by the active scheduler does not wake after an
+  after delayed reconciliation. Recheck poll job-creation wakes belong to the original
+  finalizer. Immediate and delayed retry/terminal failure share one event finalizer; a
+  terminal outcome publishes its failure-finalization barrier under writer ownership,
+  emits retained failure events after unlock, and releases the barrier before any waiting
+  operator mutation. A committed operator publishes a separate action-finalization barrier,
+  attempts `operator_action_applied` after unlock, releases that barrier, and only then
+  makes its deferred scheduler wake runnable. A recheck batch
+  owned by the active scheduler does not wake after an
   ordinary immediate commit; its retained finalizer wakes only after delayed
   cross-operation reconciliation. Recheck writer infrastructure errors never become job
   failure state.
 - Poll transaction order is source/silence reconciliation first, then alert state/events/live cause history, then commit.
 - Poll runtime event payloads are captured in the transaction-local collector and are
   never reconstructed by querying rows with a timestamp after commit.
+- Recheck execution returns `RecheckBatchResult` with the ten approved dispositions;
+  the Store emits committed domain events, while the cmd scheduler alone emits
+  acquisition, retry-deferred, failed-head, and terminal infrastructure events.
+  Persisted failed heads remain wakeable for operator Retry/Abandon and never emit a
+  worker-selected or duplicate failure event.
+- Lifecycle stats expose only the nonterminal FIFO head under `recheck.headJob`, and
+  the warning endpoint exposes the ordered typed `issues[]` contract. Operator
+  presentation never derives a job state from counters or error text.
+- Poll metadata and post-commit event collection are best effort: queue depth,
+  consistency snapshots, event payloads, and logging failures use a safe default or
+  warning event and cannot roll back source reconciliation, alert transitions, or job
+  creation.
 - A failed source refresh updates health only and preserves the last successful source set and fingerprint.
 - Poll reconciliation creates recheck jobs only after global and target transitions
   finish. A source-context job snapshots all final eligible scopes; an unchanged

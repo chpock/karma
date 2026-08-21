@@ -1,0 +1,70 @@
+{
+  "state": "warning-only",
+  "cards": [
+    {
+      "kind": "regroup_out_of_date",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_in_progress",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "silence_ha_inconsistent",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "recheck_retrying",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_out_of_date",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "regroup_in_progress",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "silence_ha_inconsistent",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    },
+    {
+      "kind": "recheck_retrying",
+      "background": "rgb(138, 90, 0)",
+      "border": "rgb(255, 255, 255)",
+      "foreground": "rgb(255, 255, 255)",
+      "textContrast": 5.9269788497474005,
+      "borderContrast": 7.242559234853841
+    }
+  ],
+  "controls": []
+}

@@ -33,6 +33,7 @@ export default defineConfig({
     },
     {
       name: "webkit",
+      grepInvert: /Fork lifecycle warning/,
       use: {
         ...devices["Desktop Safari"],
         viewport: { width: 1280, height: 720 },
@@ -40,6 +41,7 @@ export default defineConfig({
     },
     {
       name: "iphone",
+      grepInvert: /Fork lifecycle warning/,
       use: {
         ...devices["iPhone 15"],
       },
