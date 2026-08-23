@@ -14,7 +14,8 @@ go test ./cmd/karma -count=1 -timeout 180s
 Coverage includes pure/fuzz lifecycle invariants, target topology, sticky multi-job
 causes, FIFO failure blocking, HA inconsistency, fresh schema v1 bootstrap/reopen,
 restart, schema-layout fingerprint validation, and the recorded traffic replay
-(`TestRecordedTrafficReplayThroughLifecycleStore`).
+(`TestRecordedTrafficReplayThroughLifecycleStore`). Problems 5/8/9 have no remaining independent-
+review findings; their final completion gate is recorded below.
 
 SQLite writer ownership is covered by:
 
@@ -370,16 +371,55 @@ Problem 3 verification is organized by runtime capability.
   route registration, configured prefix, strict JSON/body limits, 400/401/404/409 mapping,
   authenticated actor propagation, and post-commit wake.
 
-Problem 8 in `silence-recheck-problems.md` records the post-acceptance selected-error and
-shutdown-precedence branch that is not covered by this accepted Problem 3 matrix and must
-close before the final end-to-end gate.
+Problem 8 production precedence is corrected. `problem8ExpectedFailureSnapshot` and
+`problem8ExpectedCommittedSnapshot` now compare the complete jobs, candidates, attempts, events,
+writer-ledger, operator-action, and pending-writer captures for cancellation-first,
+retryable/terminal selected failures, confirmed-not-committed, unknown Commit, and reconciliation
+phases; only operational timestamps and tokens are normalized. No independent-review finding
+remains; the final completion gate passed.
 
-Problem 9 records the independent generic writer diagnostic redaction/event-registration
-gap that must close before the final runtime-logging and end-to-end gate.
+Problem 9 production logging is panic-isolated and the registry is synchronized. `assertProblem9WriterEvent`
+counts the complete registered `writer_observability_failed` records, requires exactly one, and
+rejects additional lifecycle-writer or poll/recheck writer events while retaining whole-output
+redaction assertions. No independent-review finding remains; the final completion gate passed.
 
 Problem 4 verification is organized by presentation capability. It is implemented and
 independently accepted. Operator replay-ledger semantics are defined by ADR-005, ADR-007,
 `storage-schema.md`, and `implementation-contracts.md`.
+
+**Problem 5 end-to-end verification (implemented and independently accepted)**
+
+The deterministic lifecycle sequence now has the required production-created head/follower lineage,
+cross-restart failure scripts, exact fault counts, and causal phase checks. Recorded replay keeps the
+independent manifest and production failed-source setup. The immutable model now covers every persisted
+job-rule, candidate, rule, episode, revision, and source-provenance column from controlled input and
+returned setup identities. The final source-job model is independently constructed from that input and
+controlled transitions, including complete parent/candidate rows and deterministic timestamps; stats and
+warning expectations are built from the independent durable model. The recorded-traffic test executes
+all successor, immutable-input, final-row, and stats/warning
+capabilities in one replay so the race gate stays inside the mandatory timeout without duplicating
+the 1100-scope fixture.
+
+**Problems 5/8/9 final completion gate**
+
+The accepted candidate passed from the repository root:
+
+```bash
+go test ./cmd/karma -run 'TestProblem5|TestRecordedTrafficReplayThroughLifecycleStore' -count=1 -timeout 180s
+go test ./internal/fork/alertlifecycle -run 'TestProblem8|TestProblem9|TestWriterPanicCleanupPreservesPanicAndLogsRecoveryFailure' -count=1 -timeout 180s
+go test ./cmd/karma -run '^TestProblem5CompleteDeterministicLifecycleSequence$' -count=20 -timeout 180s
+go test -race ./cmd/karma -run '^(TestRecordedTrafficReplayThroughLifecycleStore|TestProblem5CompleteDeterministicLifecycleSequence)$' -count=1 -timeout 180s
+go test ./... -count=1 -timeout 180s
+make lint
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test -race ./cmd/karma -count=1 -timeout 180s
+git diff --check
+```
+
+Final results: focused Problem 5 3.1s; focused Problems 8/9 0.57s; deterministic sequence 20/20;
+focused Problem 5 race 51.4s; full Go 38.1s; root lint 0 issues; lifecycle race 134.9s; cmd race
+132.6s; patch-integrity clean. Both race suites remained under the mandatory 180s timeout and ran
+sequentially.
 
 **Typed worker result and event ownership**
 

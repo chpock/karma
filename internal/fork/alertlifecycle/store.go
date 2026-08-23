@@ -783,7 +783,7 @@ func withOwnedWriterTxValueAfterCommit[T any](ctx context.Context, s *Store, ope
 			if !commitAttempted {
 				if rollbackErr := s.rollbackWriterTxLocked(tx); rollbackErr != nil {
 					if recoveryErr := s.discardWriterAfterFailureLocked(ctx); recoveryErr != nil {
-						runtimeLog.ErrorContext(ctx, "lifecycle_writer", "observability_collection_failed", "Writer panic cleanup could not recover the writer connection", slog.String("writer_operation", operationKind), slog.String("stage", "panic_rollback_recovery"), slog.Any("error", recoveryErr))
+						logWriterObservabilityFailure(ctx, operationKind, "panic_rollback_recovery", writerSafeErrorCategory(recoveryErr))
 					}
 				}
 			} else {
@@ -931,7 +931,7 @@ func runWriterFinalizer(finalizer *writerAfterCommitFinalizer) {
 		return
 	}
 	if finalizer.handoffErr != nil {
-		runtimeLog.ErrorContext(finalizer.ctx, "lifecycle_writer", "observability_collection_failed", "Writer post-commit handoff failed", slog.String("writer_operation", finalizer.operationKind), slog.String("stage", "after_commit_handoff"), slog.Any("error", finalizer.handoffErr))
+		logWriterObservabilityFailure(finalizer.ctx, finalizer.operationKind, "after_commit_handoff", writerSafeErrorCategory(finalizer.handoffErr))
 		return
 	}
 	if finalizer.run == nil {
@@ -939,7 +939,7 @@ func runWriterFinalizer(finalizer *writerAfterCommitFinalizer) {
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			runtimeLog.ErrorContext(finalizer.ctx, "lifecycle_writer", "observability_collection_failed", "Writer post-commit finalizer panicked", slog.String("writer_operation", finalizer.operationKind), slog.String("stage", "after_commit_run"), slog.Any("error", recovered))
+			logWriterObservabilityFailure(finalizer.ctx, finalizer.operationKind, "after_commit_run", writerSafePanicCategory(recovered))
 		}
 	}()
 	if finalizer.reconciled {
@@ -1137,7 +1137,7 @@ func (s *Store) finishWriterCallbackErrorLocked(ctx context.Context, tx *sql.Tx,
 	if recoveryErr == nil {
 		return errors.Join(operationErr, errWriterRollbackFailed, rollbackErr)
 	}
-	runtimeLog.ErrorContext(ctx, "lifecycle_writer", "observability_collection_failed", "Writer rollback cleanup could not recover the writer connection", slog.String("writer_operation", operationKind), slog.String("stage", "rollback_recovery"), slog.Any("error", recoveryErr))
+	logWriterObservabilityFailure(ctx, operationKind, "rollback_recovery", writerSafeErrorCategory(recoveryErr))
 	return errors.Join(operationErr, errWriterRollbackFailed, rollbackErr, ErrWriterUnavailable, recoveryErr)
 }
 

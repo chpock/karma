@@ -34,14 +34,16 @@ Implemented in fork scope:
   verified under Problem 2; Problem 3 adds durable attempts, bounded
   retry, token reconciliation, one scheduler owner, and audited operator recovery;
   the Problem 3 implementation phase is complete; its post-acceptance
-  selected-error/shutdown precedence defect is tracked as Problem 8,
+  selected-error/shutdown precedence is implemented and independently accepted as Problem 8,
 - effective suppression evidence on retained past-alert cards using the ordinary
   silence-rule presentation and actions,
 - compact create/edit/recreate silence editor with automatic preview,
 - structured runtime logging with redaction and edge-sensitive levels; Problem 4 recheck
   result projection, event ownership, strict APIs, and operator presentation are
-  implemented and independently accepted, while generic writer
-  diagnostic registration/redaction is tracked separately as Problem 9.
+  implemented and independently accepted, including generic writer registration/redaction and exact
+  one-event evidence from Problem 9;
+- Problem 5 end-to-end evidence and the combined Problems 5/8/9 completion gate are implemented and
+  independently accepted.
 
 ## 3. Deferred items
 

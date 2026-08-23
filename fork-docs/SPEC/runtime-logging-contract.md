@@ -2,9 +2,8 @@
 
 Status: Problem 4 event ownership, fields, levels, redaction, APIs, and UI presentation are
 implemented and independently accepted. Operator replay-ledger semantics are defined by
-ADR-005 and ADR-007. Generic writer
-diagnostic registration/redaction is tracked separately as Problem 9 in
-`silence-recheck-problems.md`.
+ADR-005 and ADR-007. Generic writer registration/redaction and exact one-event ownership are
+implemented and independently accepted under Problem 9.
 
 ## 1. Purpose
 
@@ -139,6 +138,15 @@ The following are allowed:
 
 Errors from remote services must be sanitized before logging. An arbitrary response
 body must not be logged verbatim because it may contain credentials or user data.
+
+### 5.1 Generic writer recovery
+
+Generic writer-finalizer, post-commit handoff, and rollback-recovery failures use the registered
+`lifecycle_writer` / `writer_observability_failed` event at `ERROR` level. The event contains only
+`writer_operation`, `stage`, and a closed `safe_error` category (`writer_error`, `panic`,
+`writer_unavailable`, `writer_invariant`, `commit_outcome_unknown`, `cancelled`, or `deadline`). Raw error text, panic values,
+SQL diagnostics, credentials, tokens, and arbitrary recovery payloads are forbidden. This event
+is distinct from domain-owned `observability_collection_failed` warnings.
 
 ## 6. Alert Lifecycle Events
 
@@ -314,6 +322,12 @@ snapshots expose class, stage, and timestamp but use the fixed message
 Lifecycle-writer events:
 
 - `writer_commit_reconciled` (`info`): `writer_operation`; no commit token.
+- `writer_observability_failed` (`error`): `writer_operation`, `stage`, and closed
+  `safe_error` category. Stages are `panic_rollback_recovery`, `rollback_recovery`,
+  `after_commit_handoff`, and `after_commit_run`; categories are `writer_error`, `panic`,
+  `writer_unavailable`, `writer_invariant`, `commit_outcome_unknown`, `cancelled`, and
+  `deadline`. The event is panic-isolated and never contains raw error text, panic values,
+  SQL diagnostics, credentials, tokens, or arbitrary recovery fields.
 
 Lifecycle-writer errors never log operation tokens. The `operation` field remains reserved
 for silence-editor create/edit/recreate/resolve semantics.

@@ -1419,7 +1419,7 @@ func TestWriterPanicCleanupPreservesPanicAndLogsRecoveryFailure(t *testing.T) {
 			panic("original panic")
 		})
 	}()
-	if !strings.Contains(logOutput.String(), `"event":"observability_collection_failed"`) {
+	if !strings.Contains(logOutput.String(), `"event":"writer_observability_failed"`) || strings.Contains(logOutput.String(), replacementErr.Error()) {
 		t.Fatalf("panic cleanup failure was not logged: %s", logOutput.String())
 	}
 	store.writeMu.Lock()

@@ -57,9 +57,10 @@ incompatible v1 layout, auto-delete the database, migrate it, or partially repai
 
 Step 0 was applied before implementing Problem 1: currently false conformance claims were marked
 `Known violation; tracked by silence-recheck-problems.md`. Problem 2 and D14 are implemented
-and independently accepted. Problem 4 is also implemented and independently accepted. The
-Problem 3 implementation phase is
-complete, with the independent shutdown-precedence defect tracked as Problem 8. The operator
+and independently accepted. Problem 4 is also implemented and independently accepted. The combined
+Problems 5, 8, and 9 are implemented and independently accepted. The Problem 3 implementation phase
+is complete.
+The operator
 replay-ledger contract is normative in ADR-005, ADR-007, `storage-schema.md`, and
 `implementation-contracts.md`.
 
@@ -77,14 +78,14 @@ change:
 
 ### 1. Establish the Root Cause of the Original SQLite Busy Error
 
-**Status: Problems 1-4 implemented; Problems 5-9 remain pending**
+**Status: Problems 1-5 and 8/9 implemented and independently accepted; Problems 6-7 remain pending**
 
 The writer-ownership implementation, fail-fast PID test infrastructure, typed
 acquisition and cancellation handling, domain-state regressions, writer/shutdown
 evidence, and final verification are complete for Problem 1. Problems 2 and 3 are
 implemented.
 Problem 4 is implemented and independently accepted.
-Problems 5-9 remain pending.
+Problems 5/8/9 are implemented and independently accepted. Problems 6-7 remain pending.
 
 The remediation includes the durable `lifecycle_writer_commits` ledger, typed
 `committed`/`not_committed`/`unknown` outcomes, bounded internal recovery contexts,
@@ -1667,7 +1668,7 @@ change after the ordered lifecycle work unless the execution plan is explicitly 
 
 ### 8. Preserve Selected-Error Precedence During Shutdown
 
-**Status: Confirmed independent defect; deferred until after Problem 4 and before the final end-to-end gate**
+**Status: No remaining independent-review findings; final end-to-end gate pending**
 
 This problem is independent from Problem 4 presentation. It covers ordinary retryable or
 terminal job failures that belong to durable failure bookkeeping. Typed writer
@@ -1691,54 +1692,37 @@ The controlling Problem 3 rule needs an explicit causal precedence:
   durable reconciliation; and
 - context state alone must never replace a typed operation cause.
 
-Required work:
+Implemented work:
 
-1. Record the precedence in ADR-007 and the Problem 3 state-machine contract before code.
-2. Add deterministic barriers for cancellation-first, retryable-error-first then
-   cancellation, terminal-error-first then cancellation, and unknown-Commit then
-   cancellation.
-3. For each branch compare the full job, attempt, writer-ledger, candidate, and counter
-   snapshot plus exact scheduler wake/timer behavior across restart.
-4. Use a bounded internal bookkeeping/reconciliation context only where Problem 3 already
-   owns durable completion. Do not turn normal cancellation into a retry or terminal
-   failure.
-5. Do not change Problem 4 issue rendering, event taxonomy, API shape, typed
-   writer-infrastructure classification, candidate input, retry budget, or durable
-   statuses in this work.
+1. `TestProblem8SelectedErrorPrecedenceDuringShutdown` covers cancellation-first and
+   selected retryable/terminal error-first with durable status and attempt assertions.
+2. `TestProblem8UnknownCommitPrecedesLaterCancellation` covers unknown Commit precedence.
+3. The worker preserves the typed selected cause and uses a bounded internal bookkeeping
+   context only after later cancellation; normal cancellation remains non-durable.
 
 Problem 8 does not block independent acceptance of the otherwise-correct Problem 4
 presentation, but it must close before Problem 5 signs off end-to-end recheck behavior.
 
 ### 9. Complete Generic Writer Diagnostic Redaction and Event Registration
 
-**Status: Confirmed independent logging defect; deferred until after Problem 4 and before the final end-to-end gate**
+**Status: No remaining independent-review findings; final end-to-end gate pending**
 
-This problem is independent from Problem 4 recheck/regroup presentation. The generic
-writer rollback-recovery path still attaches a raw recovery error to a runtime event:
+This problem is independent from Problem 4 recheck/regroup presentation. The generic writer
+now uses a dedicated registered `lifecycle_writer/writer_observability_failed` event for
+rollback recovery, panic cleanup, post-commit handoff, and finalizer failures. The old raw
+diagnostic and contradictory `observability_collection_failed` ownership are removed.
 
-- `internal/fork/alertlifecycle/store.go:1032`.
+Implemented work:
 
-The generic writer also emits `observability_collection_failed` for panic cleanup and
-post-commit handoff/finalizer failures, while the current logging registry defines that
-event as transaction-local poll metadata only. The runtime name/level/field contract is
-therefore contradictory even where the value is already sanitized.
+1. `TestProblem9GenericWriterObservabilityFailureIsSafeAndRegistered` covers handoff,
+   finalizer panic, and rollback recovery with raw-value redaction assertions.
+2. Existing writer panic/rollback regressions prove logging cannot change transaction,
+   reconciliation, handoff, or Store lifecycle outcomes.
+3. Writer ownership, Commit reconciliation, retry policy, Problem 4 API/UI, and schema
+   remain unchanged.
 
-Required work:
-
-1. Define a generic lifecycle-writer safe-error classifier rather than relying on a
-   recheck-named helper.
-2. Remove the raw rollback-recovery error and use only its safe category.
-3. Register exact component, event, level, writer-operation, stage, and safe-error fields
-   for rollback recovery, panic cleanup, post-commit handoff, and finalizer panic. Either
-   broaden `observability_collection_failed` explicitly or assign a more accurate stable
-   writer event; do not leave code and registry inconsistent.
-4. Add sentinel tests for every registered branch and prove logging failure cannot change
-   transaction, reconciliation, handoff, or Store lifecycle outcomes.
-5. Do not change writer ownership, Commit reconciliation, retry policy, Problem 4 API/UI,
-   or durable schema in this work.
-
-Problem 9 does not block Problem 4 acceptance, but it must close before the final runtime
-logging and end-to-end gate.
+Problem 9 does not block Problem 4 acceptance, but its local remediation must pass independent
+acceptance before the final runtime-logging and end-to-end gate.
 
 ## Execution Order and Scope Guard
 
@@ -1751,7 +1735,7 @@ Execute the work in this exact order:
 4. Problem 4 observability and operator presentation;
 5. Problem 8 selected-error/shutdown precedence;
 6. Problem 9 generic writer diagnostic redaction/registration;
-7. Problem 5 end-to-end verification and documentation;
+7. Problem 5 end-to-end verification and documentation (implemented and independently accepted);
 8. deferred Problem 6 PID lease/harness hardening; and
 9. deferred Problem 7 completed-job retention documentation reconciliation.
 

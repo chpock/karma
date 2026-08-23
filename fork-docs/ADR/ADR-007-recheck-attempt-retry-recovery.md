@@ -3,9 +3,8 @@
 - Status: Accepted
 - Date: 2026-08-19
 
-Implementation status: Implemented; the post-acceptance selected-error/shutdown
-precedence defect is tracked separately as Problem 8 in
-`fork-docs/SPEC/silence-recheck-problems.md`.
+Implementation status: Implemented and independently accepted, including selected-error/shutdown
+precedence from Problem 8.
 The combined fresh
 schema-v1 shape was accepted by ADR-006; this ADR defines the runtime ownership and
 durability rules for the reserved attempt and operator-action tables.
@@ -40,9 +39,12 @@ Only `queued` may have a null job `started_at`. A committed selection persists i
 batch transaction; if that transaction rolls back, durable failure bookkeeping restores
 the same immutable attempt start time before writing `retry_wait` or `failed`.
 
-Pre-selection writer acquisition failures and normal shutdown cancellation are
-infrastructure outcomes outside the job state machine: they create no attempt row, do
-not increment counters, and do not persist a job failure.
+Pre-selection writer acquisition failures and cancellation-first shutdown are infrastructure
+outcomes outside the job state machine: they create no attempt row, do not increment counters,
+and do not persist a job failure. If a selected retryable or terminal operation error is already
+established and cancellation starts afterward, that selected error owns classification and durable
+failure bookkeeping runs under a bounded internal context. Unknown Commit remains higher precedence
+than both selected-error and cancellation classification.
 
 ### Attempt ledger and commit ownership
 

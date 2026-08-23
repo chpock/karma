@@ -421,6 +421,7 @@ func (s *Store) runSilenceRecheckBatchContext(ctx context.Context, batchSize int
 		return RecheckBatchResult{Disposition: RecheckBatchAcquisitionFailed}, resultErr
 	}
 	if resultErr != nil && selectedJobID != 0 {
+		s.signalRecheckWorkerBarrier("after_selected_error")
 		var commitOutcomeErr *writerCommitOutcomeError
 		hasCommitOutcome := errors.As(resultErr, &commitOutcomeErr)
 		commitNotCommitted := hasCommitOutcome && commitOutcomeErr.outcome == writerCommitOutcomeNotCommitted && selectedAttempt != nil
@@ -449,11 +450,13 @@ func (s *Store) runSilenceRecheckBatchContext(ctx context.Context, batchSize int
 		if selectedAttempt != nil {
 			s.clearPendingRecheckFailure(selectedAttempt.Token)
 		}
-		if commitNotCommitted && expectedRecheckCancellationReason(ctx, resultErr) != "" {
-			result := selectedResult(RecheckBatchInfrastructureFailed, "")
-			result.FailureClass = expectedRecheckCancellationReason(ctx, resultErr)
-			result.FailureStage = "batch"
-			return result, resultErr
+		if commitNotCommitted {
+			if cancellationReason := recheckErrorCancellationReason(commitOutcomeErr.OriginalCause()); cancellationReason != "" {
+				result := selectedResult(RecheckBatchInfrastructureFailed, "")
+				result.FailureClass = cancellationReason
+				result.FailureStage = "batch"
+				return result, resultErr
+			}
 		}
 		if commitNotCommitted {
 			selectedAttempt.FailureCause = commitOutcomeErr.OriginalCause()
@@ -466,12 +469,9 @@ func (s *Store) runSilenceRecheckBatchContext(ctx context.Context, batchSize int
 			result.FailureStage = "batch"
 			return result, resultErr
 		}
-		if ctx.Err() != nil || context.Cause(ctx) != nil {
+		if cancellationReason := recheckErrorCancellationReason(resultErr); cancellationReason != "" {
 			result := selectedResult(RecheckBatchInfrastructureFailed, "")
-			result.FailureClass = expectedRecheckCancellationReason(ctx, resultErr)
-			if result.FailureClass == "" {
-				result.FailureClass = "worker_cancelled"
-			}
+			result.FailureClass = cancellationReason
 			result.FailureStage = "batch"
 			return result, resultErr
 		}
@@ -486,7 +486,9 @@ func (s *Store) runSilenceRecheckBatchContext(ctx context.Context, batchSize int
 		pendingResult := selectedResult(RecheckBatchFailurePersistenceFailed, "")
 		pendingResult.FailureClass, pendingResult.FailureStage = string(selectedAttempt.FailureClass), selectedAttempt.FailureStage
 		s.setPendingRecheckFailure(recheckPendingFailure{Attempt: *selectedAttempt, Operation: writerOperationRecheckFailure, Result: pendingResult, Selection: recheckFailureSelection{Status: selectedJobStatus, QueueDepth: selectedQueueDepth, BatchSize: batchSize}, Completion: newRecheckFailureCompletion()})
-		failureResult, persistErr := s.persistRecheckAttemptFailure(ctx, *selectedAttempt)
+		bookkeepingCtx, cancelBookkeeping := context.WithTimeout(context.WithoutCancel(ctx), writerRecoveryTimeout)
+		failureResult, persistErr := s.persistRecheckAttemptFailure(bookkeepingCtx, *selectedAttempt)
+		cancelBookkeeping()
 		if persistErr != nil {
 			runtimeLog.ErrorContext(ctx, "silence_recheck", "failure_persistence_failed", "Silence recheck failure bookkeeping was not confirmed", slog.Int64("job_id", selectedJobID), slog.String("stage", recheckStagePersistFailure), slog.String("error", SanitizeRecheckError(persistErr)))
 			result := selectedResult(RecheckBatchFailurePersistenceFailed, "")
@@ -556,11 +558,11 @@ func recheckJobDuration(snapshot *RecheckBatchResult, fallback time.Time) time.D
 	return time.Since(*snapshot.StartedAt)
 }
 
-func expectedRecheckCancellationReason(ctx context.Context, err error) string {
-	if errors.Is(err, context.DeadlineExceeded) || (ctx != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(context.Cause(ctx), context.DeadlineExceeded))) {
+func recheckErrorCancellationReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
 		return "worker_deadline"
 	}
-	if errors.Is(err, context.Canceled) || (ctx != nil && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(context.Cause(ctx), context.Canceled))) {
+	if errors.Is(err, context.Canceled) {
 		return "worker_cancelled"
 	}
 	return ""

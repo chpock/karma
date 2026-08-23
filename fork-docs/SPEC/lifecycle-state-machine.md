@@ -55,7 +55,9 @@ dimension functions.
   Each immutable candidate reaches one constrained terminal outcome; parent counters
   equal processed membership.
 - Selected attempts are append-only and tokenized. Pre-selection acquisition failures and
-  normal shutdown cancellation create no attempt. Commit uncertainty is reconciled by
+  cancellation-first shutdown create no attempt. A selected retryable or terminal operation
+  error established before later cancellation remains the durable failure cause and is persisted
+  under a bounded internal bookkeeping context. Commit uncertainty is reconciled by
   the attempt token before another candidate batch can start; transient tuple reads keep
   reconciliation pending, while only durable absence or mismatch is invariant. Internal
   recovery deadlines are not shutdown. A connection-invalidating reconciliation read
