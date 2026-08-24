@@ -29,10 +29,17 @@ type managedTickerSource struct {
 }
 
 type managedKarmaDependencies struct {
-	resolveExecutable func() (string, error)
-	command           func(string, []string) *exec.Cmd
-	newTimer          func(time.Duration) managedTimerSource
-	newTicker         func(time.Duration) managedTickerSource
+	resolveExecutable   func() (string, error)
+	command             func(string, []string) *exec.Cmd
+	newTimer            func(time.Duration) managedTimerSource
+	newTicker           func(time.Duration) managedTickerSource
+	writeFile           func(string, string, string) error
+	cleanupProcessGroup func(int, time.Duration) error
+}
+
+type managedFinalizeOperations struct {
+	writeFile           func(string, string, string) error
+	cleanupProcessGroup func(int, time.Duration) error
 }
 
 func managedKarmaMain() {
@@ -78,7 +85,23 @@ func productionManagedKarmaDependencies() managedKarmaDependencies {
 			ticker := time.NewTicker(duration)
 			return managedTickerSource{C: ticker.C, Stop: ticker.Stop}
 		},
+		writeFile:           writeManagedFile,
+		cleanupProcessGroup: cleanupManagedProcessGroup,
 	}
+}
+
+func managedFinalizeOperationsFromDependencies(deps managedKarmaDependencies) managedFinalizeOperations {
+	operations := managedFinalizeOperations{
+		writeFile:           deps.writeFile,
+		cleanupProcessGroup: deps.cleanupProcessGroup,
+	}
+	if operations.writeFile == nil {
+		operations.writeFile = writeManagedFile
+	}
+	if operations.cleanupProcessGroup == nil {
+		operations.cleanupProcessGroup = cleanupManagedProcessGroup
+	}
+	return operations
 }
 
 func runManagedKarmaWithDependencies(args []string, deps managedKarmaDependencies) int {
@@ -183,35 +206,44 @@ func runManagedKarmaWithDependencies(args []string, deps managedKarmaDependencie
 				_ = status
 				return managedProtocolCode
 			}
-			return managedWaitAfterReady(stateDir, waitResult, signalCh, cmd, shutdownGrace)
+			return managedWaitAfterReady(stateDir, waitResult, signalCh, cmd, shutdownGrace, managedFinalizeOperationsFromDependencies(deps))
 		}
 	}
 }
 
-func managedWaitAfterReady(stateDir string, waitResult <-chan error, signalCh <-chan os.Signal, cmd *exec.Cmd, shutdownGrace time.Duration) int {
+func managedWaitAfterReady(stateDir string, waitResult <-chan error, signalCh <-chan os.Signal, cmd *exec.Cmd, shutdownGrace time.Duration, operations managedFinalizeOperations) int {
 	for {
 		select {
 		case err := <-waitResult:
-			return managedFinalizeExit(stateDir, err, cmd.Process.Pid)
+			return managedFinalizeExitWithOperations(stateDir, err, cmd.Process.Pid, operations)
 		case <-signalCh:
 			status, terminateErr := terminateManagedProcess(cmd, waitResult, shutdownGrace)
 			if terminateErr != nil {
 				_ = writeManagedError(stateDir, terminateErr)
 				return managedProtocolCode
 			}
-			return managedFinalizeStatus(stateDir, status, cmd.Process.Pid)
+			return managedFinalizeStatusWithOperations(stateDir, status, cmd.Process.Pid, operations)
 		}
 	}
 }
 
-func managedFinalizeExit(stateDir string, err error, pid int) int {
-	return managedFinalizeStatus(stateDir, managedStatusToken(err), pid)
+func managedFinalizeExitWithOperations(stateDir string, err error, pid int, operations managedFinalizeOperations) int {
+	return managedFinalizeStatusWithOperations(stateDir, managedStatusToken(err), pid, operations)
 }
 
-func managedFinalizeStatus(stateDir, status string, pid int) int {
-	_ = writeManagedFile(stateDir, "exit", status+"\n")
-	if cleanupErr := cleanupManagedProcessGroup(pid, 2*time.Second); cleanupErr != nil {
-		_ = writeManagedError(stateDir, cleanupErr)
+func managedFinalizeStatusWithOperations(stateDir, status string, pid int, operations managedFinalizeOperations) int {
+	cleanupErr := operations.cleanupProcessGroup(pid, 2*time.Second)
+	if cleanupErr != nil {
+		if err := writeManagedErrorWith(operations.writeFile, stateDir, cleanupErr); err != nil {
+			return managedProtocolCode
+		}
+		if err := operations.writeFile(stateDir, "exit", status+"\n"); err != nil {
+			_ = writeManagedErrorWith(operations.writeFile, stateDir, errors.Join(cleanupErr, err))
+		}
+		return managedProtocolCode
+	}
+	if err := operations.writeFile(stateDir, "exit", status+"\n"); err != nil {
+		_ = writeManagedErrorWith(operations.writeFile, stateDir, err)
 		return managedProtocolCode
 	}
 	if strings.HasPrefix(status, "exit:") {
@@ -263,10 +295,14 @@ func writeManagedMarker(stateDir, marker string) error {
 }
 
 func writeManagedError(stateDir string, err error) error {
+	return writeManagedErrorWith(writeManagedFile, stateDir, err)
+}
+
+func writeManagedErrorWith(writeFile func(string, string, string) error, stateDir string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return writeManagedFile(stateDir, "harness-error", err.Error()+"\n")
+	return writeFile(stateDir, "harness-error", err.Error()+"\n")
 }
 
 func writeManagedFile(stateDir, name, contents string) error {

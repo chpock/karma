@@ -67,36 +67,30 @@ func pidLeaseCleanupAfterAcquireFailure(lease *pidFileLease) error {
 }
 
 func pidLeaseRelease(lease *pidFileLease) error {
-	if lease.file == nil {
-		return pidLeaseOwnershipLost(lease, ErrPIDLeaseOwnershipLost)
-	}
-	if !lease.identityValid {
-		identity, err := pidLeaseCaptureIdentity(lease)
-		if err != nil {
-			if errors.Is(err, ErrPIDLeaseOwnershipLost) || errors.Is(err, os.ErrNotExist) {
-				return pidLeaseOwnershipLost(lease, err)
+	return pidLeaseReleaseWithPrimitives(lease, pidLeasePlatformReleasePrimitives())
+}
+
+func pidLeasePlatformReleasePrimitives() pidLeaseReleasePrimitives {
+	return pidLeaseReleasePrimitives{
+		captureIdentity: pidLeaseCaptureIdentity,
+		captureIdentityOwnershipLost: func(err error) bool {
+			return errors.Is(err, ErrPIDLeaseOwnershipLost) || errors.Is(err, os.ErrNotExist)
+		},
+		openCurrent: func(lease *pidFileLease) pidLeaseCurrentResult {
+			pathInfo, err := os.Lstat(lease.resolvedPath)
+			if err != nil {
+				return pidLeaseCurrentResult{err: err, ownershipLost: errors.Is(err, os.ErrNotExist)}
 			}
-			return errors.Join(ErrPIDLeaseIdentityUnavailable, err)
-		}
-		lease.identity = identity
-		lease.identityValid = true
+			return pidLeaseCurrentResult{handle: &pidLeaseCurrentHandle{
+				identity: pidFileIdentity{fileInfo: pathInfo},
+				close:    func() error { return nil },
+				delete:   func() error { return os.Remove(lease.resolvedPath) },
+			}}
+		},
+		sameIdentity: func(expected, current pidFileIdentity) bool {
+			return os.SameFile(expected.fileInfo, current.fileInfo)
+		},
 	}
-	pathInfo, err := os.Lstat(lease.resolvedPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return pidLeaseOwnershipLost(lease, err)
-		}
-		return err
-	}
-	if !os.SameFile(lease.identity.fileInfo, pathInfo) {
-		return pidLeaseOwnershipLost(lease, ErrPIDLeaseOwnershipLost)
-	}
-	if err = os.Remove(lease.resolvedPath); err != nil {
-		return err
-	}
-	closeErr := lease.file.Close()
-	lease.clear()
-	return closeErr
 }
 
 func pidLeaseOwnershipLost(lease *pidFileLease, _ error) error {

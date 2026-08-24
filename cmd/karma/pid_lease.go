@@ -35,6 +35,74 @@ type pidFileOps struct {
 	release                    func(*pidFileLease) error
 }
 
+type pidLeaseCurrentHandle struct {
+	identity pidFileIdentity
+	close    func() error
+	delete   func() error
+}
+
+type pidLeaseCurrentResult struct {
+	handle        *pidLeaseCurrentHandle
+	err           error
+	ownershipLost bool
+}
+
+type pidLeaseReleasePrimitives struct {
+	captureIdentity              func(*pidFileLease) (pidFileIdentity, error)
+	captureIdentityOwnershipLost func(error) bool
+	openCurrent                  func(*pidFileLease) pidLeaseCurrentResult
+	sameIdentity                 func(pidFileIdentity, pidFileIdentity) bool
+}
+
+func pidLeaseReleaseWithPrimitives(lease *pidFileLease, primitives pidLeaseReleasePrimitives) error {
+	if lease.file == nil {
+		return pidLeaseOwnershipLost(lease, ErrPIDLeaseOwnershipLost)
+	}
+	if !lease.identityValid {
+		identity, err := primitives.captureIdentity(lease)
+		if err != nil {
+			if primitives.captureIdentityOwnershipLost(err) {
+				return pidLeaseOwnershipLost(lease, err)
+			}
+			return errors.Join(ErrPIDLeaseIdentityUnavailable, err)
+		}
+		lease.identity = identity
+		lease.identityValid = true
+	}
+
+	currentResult := primitives.openCurrent(lease)
+	if currentResult.err != nil {
+		currentCloseErr := closePIDLeaseCurrentHandle(currentResult.handle)
+		if currentResult.ownershipLost {
+			return errors.Join(pidLeaseOwnershipLost(lease, currentResult.err), currentCloseErr)
+		}
+		return errors.Join(currentResult.err, currentCloseErr)
+	}
+	current := currentResult.handle
+	if current == nil {
+		return errors.New("PID lease current handle is unavailable")
+	}
+	if !primitives.sameIdentity(lease.identity, current.identity) {
+		currentCloseErr := closePIDLeaseCurrentHandle(current)
+		return errors.Join(pidLeaseOwnershipLost(lease, ErrPIDLeaseOwnershipLost), currentCloseErr)
+	}
+	if err := current.delete(); err != nil {
+		return errors.Join(err, closePIDLeaseCurrentHandle(current))
+	}
+
+	currentCloseErr := closePIDLeaseCurrentHandle(current)
+	ownedCloseErr := lease.file.Close()
+	lease.clear()
+	return errors.Join(currentCloseErr, ownedCloseErr)
+}
+
+func closePIDLeaseCurrentHandle(current *pidLeaseCurrentHandle) error {
+	if current == nil || current.close == nil {
+		return nil
+	}
+	return current.close()
+}
+
 func newPIDFileLease(ops *pidFileOps) *pidFileLease {
 	if ops == nil {
 		ops = &defaultPIDLeaseOps

@@ -1,6 +1,6 @@
 # Architecture Conformance Matrix
 
-Status: Problems 2-5 and 8/9 are implemented and independently accepted. Problem 3 completed its
+Status: Problems 2-6 and 8/9 are implemented and independently accepted. Problem 3 completed its
 implementation phase.
 Remaining known violations are tracked by
 `silence-recheck-problems.md`.
@@ -60,6 +60,13 @@ The executable test coverage for these contracts is summarized in
 | D20 | One event links directly to one complete cause set | global/target event-cause transactions | FK, multi-job and restart tests | Implemented |
 | D21 | Retain non-completed/referenced/latest completed jobs; clean older unreferenced | housekeeping | `TestRunHousekeepingCleansCompletedUnreferencedJobs` | Implemented |
 | D22 | Lease/fencing deferred; all derived writes pass one Store-owned immediate-writer transaction boundary with durable completion reconciliation | runtime integration | Problem 1 writer/PID regressions and final commit gates in `architecture-verification.md` | Implemented |
+
+## 2.1 Process Infrastructure Decisions
+
+| ID | Invariant | Runtime owner | Verification | Status / required action |
+|---|---|---|---|---|
+| P6-1 | PID ownership is an identity-checked lease. Transient identity failure preserves the open handle and permits a later release retry; replacement paths are never removed; relevant close errors are joined through one shared release state machine with phase-specific ownership classification. | `cmd/karma/pid_lease.go` and platform adapters | `TestPIDLeaseSharedReleasePrimitivesUsesPhaseSpecificOwnershipClassification`, `TestPIDLeaseSharedReleasePrimitivesOpenCurrentOwnershipLossClosesCurrentAndOwned`, complete snapshot assertions with non-zero identities, Windows cross-compilation, optional native Windows filesystem tests | Implemented and independently accepted |
+| P6-2 | Managed final exit is published only after process cleanup. Cleanup and marker failures are persisted as harness failure before a waiter can report success; marker publication failure is fail-closed. | `cmd/karma/managed_process_test.go` | `TestManagedFinalizeStatusPublishesExitAfterCleanup`, `TestManagedFinalizeStatusPersistsCleanupFailureBeforeExit`, `TestManagedFinalizeStatusFailsClosedWhenExitMarkerWriteFails` | Implemented and independently accepted |
 
 ## 3. Silence Editor Decisions Q1-Q25
 

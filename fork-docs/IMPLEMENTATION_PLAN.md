@@ -44,6 +44,9 @@ Implemented in fork scope:
   one-event evidence from Problem 9;
 - Problem 5 end-to-end evidence and the combined Problems 5/8/9 completion gate are implemented and
   independently accepted.
+- PID lease recovery and managed-harness finalization with deterministic retry,
+  ownership-loss, close-error, cleanup-order, and marker-failure evidence are
+  implemented and independently accepted under Problem 6.
 
 ## 3. Deferred items
 

@@ -389,7 +389,7 @@ old job could therefore evaluate a newer alert episode and use that newer value 
 CAS expectation. The current worker consumes the pinned input and validates exact
 source/cluster completeness and provenance.
 
-**Required contract**
+**Implemented contract**
 
 - One transaction creates the job parent, pinned rules, complete candidate input,
   trigger provenance, and initial counters.
@@ -1591,36 +1591,43 @@ patch-integrity check fails.
 
 ### 6. Harden PID Lease Recovery and Managed-Harness Finalization
 
+**Status: Implemented and independently accepted.**
+
 **Dependency and scope**
 
-This is a deferred infrastructure problem discovered while reviewing Problem 1. It does
-not cause the SQLite lock-upgrade failure and does not block Problem 1 after the
-fail-fast direct-child PID harness gate passes.
+This is a separate infrastructure change discovered while reviewing Problem 1. It does
+not cause the SQLite lock-upgrade failure and does not change lifecycle domain behavior.
 
-**Confirmed defects**
+**Resolved defects**
 
-- `pidFileLease.Release` returns immediately when ownership is retained with invalid
-  identity, so a transient identity-capture failure can never recover on a later
-  Release call.
-- The Windows release adapter discards temporary current-path handle Close errors on
-  existing success/failure branches.
-- The external managed wrapper publishes its exit marker before cleanup and writes a
-  cleanup-error marker afterward. A waiter can observe exit and check success before
-  the cleanup failure is visible. Exit-marker write errors are also discarded.
+- `pidFileLease.Release` retries identity capture while retaining ownership after a
+  transient failure; no path is removed until identity is proven.
+- The Windows release adapter joins temporary current-path and owned-handle Close
+  errors on both success and failure branches.
+- The managed wrapper performs cleanup before publishing its exit marker and records
+  cleanup or marker failures as harness failures before a waiter can report success.
 
-**Required contract**
+**Implemented contract**
 
 - Retry identity capture from a retained valid handle; preserve ownership on transient
   failure and remove nothing until identity is proven.
 - Join every temporary/current/owned handle Close error without deleting a replacement
   path.
+- Route both platform release adapters through one platform-neutral release state
+  machine whose injected primitives cover identity capture, current-path inspection,
+  deletion, and current/owned handle close outcomes.
+- Classify ownership loss at the exact boundary that proves it. A retained-handle
+  identity-read error remains retryable unless the adapter explicitly marks definitive
+  loss; current-path absence and confirmed reparse replacement may clear ownership.
 - Publish managed final exit only after termination cleanup is complete. Atomically
   persist cleanup/marker failure as harness failure before a waiter may report success.
 - Add deterministic primitive-seam tests for retry, ownership loss, Close-error joins,
   and cleanup/exit ordering. Native Windows execution is not required; shared tests and
   Windows cross-compilation are sufficient in the available environment.
 
-Do not implement this problem as part of Problem 1.
+Implemented in `cmd/karma/pid_lease_*` and the managed test harness. The accepted
+verification matrix and completion commands are recorded in
+`fork-docs/SPEC/architecture-verification.md`.
 
 ### 7. Reconcile the Completed Recheck-Job Retention Documentation
 

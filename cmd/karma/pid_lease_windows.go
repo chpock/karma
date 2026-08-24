@@ -87,55 +87,53 @@ func pidLeaseCleanupAfterAcquireFailure(lease *pidFileLease) error {
 }
 
 func pidLeaseRelease(lease *pidFileLease) error {
-	if lease.file == nil {
-		return pidLeaseOwnershipLost(lease, ErrPIDLeaseOwnershipLost)
-	}
-	if !lease.identityValid {
-		identity, err := pidLeaseCaptureIdentity(lease)
-		if err != nil {
-			if errors.Is(err, errPIDLeaseReparsePoint) || errors.Is(err, ErrPIDLeaseOwnershipLost) {
-				return pidLeaseOwnershipLost(lease, err)
+	return pidLeaseReleaseWithPrimitives(lease, pidLeasePlatformReleasePrimitives())
+}
+
+func pidLeasePlatformReleasePrimitives() pidLeaseReleasePrimitives {
+	return pidLeaseReleasePrimitives{
+		captureIdentity: pidLeaseCaptureIdentity,
+		captureIdentityOwnershipLost: func(err error) bool {
+			return errors.Is(err, errPIDLeaseReparsePoint) ||
+				errors.Is(err, ErrPIDLeaseOwnershipLost)
+		},
+		openCurrent: func(lease *pidFileLease) pidLeaseCurrentResult {
+			current, err := windows.CreateFile(
+				windows.StringToUTF16Ptr(lease.resolvedPath),
+				windows.FILE_READ_ATTRIBUTES,
+				windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+				nil,
+				windows.OPEN_EXISTING,
+				windows.FILE_FLAG_OPEN_REPARSE_POINT,
+				0,
+			)
+			if err != nil {
+				return pidLeaseCurrentResult{
+					err:           err,
+					ownershipLost: errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND),
+				}
 			}
-			return errors.Join(ErrPIDLeaseIdentityUnavailable, err)
-		}
-		lease.identity = identity
-		lease.identityValid = true
+			currentFile := os.NewFile(uintptr(current), lease.resolvedPath)
+			currentHandle := &pidLeaseCurrentHandle{
+				close: currentFile.Close,
+				delete: func() error {
+					if err := windows.DeleteFile(windows.StringToUTF16Ptr(lease.resolvedPath)); err != nil {
+						return fmt.Errorf("delete PID file: %w", err)
+					}
+					return nil
+				},
+			}
+			identity, identityErr := pidLeaseIdentityFromHandle(currentFile)
+			if identityErr != nil {
+				return pidLeaseCurrentResult{handle: currentHandle, err: identityErr, ownershipLost: errors.Is(identityErr, errPIDLeaseReparsePoint)}
+			}
+			currentHandle.identity = identity
+			return pidLeaseCurrentResult{handle: currentHandle}
+		},
+		sameIdentity: func(expected, current pidFileIdentity) bool {
+			return expected == current
+		},
 	}
-	current, err := windows.CreateFile(
-		windows.StringToUTF16Ptr(lease.resolvedPath),
-		windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
-			return pidLeaseOwnershipLost(lease, err)
-		}
-		return err
-	}
-	currentFile := os.NewFile(uintptr(current), lease.resolvedPath)
-	currentIdentity, identityErr := pidLeaseIdentityFromHandle(currentFile)
-	if identityErr != nil {
-		closeErr := currentFile.Close()
-		if errors.Is(identityErr, errPIDLeaseReparsePoint) {
-			return errors.Join(pidLeaseOwnershipLost(lease, identityErr), closeErr)
-		}
-		return errors.Join(identityErr, closeErr)
-	}
-	if currentIdentity != lease.identity {
-		closeErr := currentFile.Close()
-		return errors.Join(pidLeaseOwnershipLost(lease, ErrPIDLeaseOwnershipLost), closeErr)
-	}
-	if err = windows.DeleteFile(windows.StringToUTF16Ptr(lease.resolvedPath)); err != nil {
-		return errors.Join(fmt.Errorf("delete PID file: %w", err), currentFile.Close())
-	}
-	currentCloseErr := currentFile.Close()
-	closeErr := lease.file.Close()
-	lease.clear()
-	return errors.Join(currentCloseErr, closeErr)
 }
 
 func pidLeaseOwnershipLost(lease *pidFileLease, _ error) error {

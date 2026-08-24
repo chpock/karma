@@ -128,6 +128,18 @@ Operationally:
   an open handle and platform identity, and release validates that identity before
   removing the path. A pre-existing, symlinked, replaced, or unowned path is never
   removed by startup rollback or shutdown.
+- PID lease identity capture is retryable: a transient failure preserves ownership and
+  the open handle, while ownership loss clears the lease without touching a replacement.
+  Unix and Windows release adapters join temporary/current/owned handle close errors.
+- Unix and Windows release adapters use one shared platform-neutral release state machine;
+  only identity extraction, current-path inspection, deletion, and handle operations are
+  platform-specific primitives.
+- Ownership-loss classification is phase-specific: retained-handle identity reads remain
+  retryable unless definitive loss is marked, while current-path absence and confirmed
+  reparse replacement can clear the lease.
+- The managed test harness performs process-group cleanup before publishing its final
+  `exit` marker. Cleanup and marker failures are persisted as `harness-error` before a
+  waiter can report success; marker publication failure returns the protocol failure code.
 - Regroup and housekeeping owners use explicit `stopped/running/stopping` arbitration
   with one cancellation and one worker join. Expected shutdown is an explicit cause;
   external cancellation is not silently downgraded to normal shutdown.

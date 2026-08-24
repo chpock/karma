@@ -104,14 +104,34 @@ Delayed-reconciliation and shutdown coverage additionally includes:
 
 Problem 1 is implemented. The verification below
 names PID ownership, exact regroup severity, deterministic ordering, and real-component
-coverage. Problems 2 and 3 are implemented.
+coverage. Problems 2, 3, and 6 are implemented and independently accepted.
 
 Additional writer/shutdown evidence includes:
 
 - `TestPIDLeaseRejectsExistingPathWithoutChangingIt`,
   `TestPIDLeaseDoesNotFollowSymlinkOrDirectory`,
   `TestPIDLeaseAcquireWriteRelease`, replacement detection, partial-write cleanup,
-  identity-retry cleanup, and startup cleanup with an unowned pre-existing file;
+  identity-retry cleanup, transient-release retry, close-error joining, and startup
+  cleanup with an unowned pre-existing file;
+- `TestPIDLeaseSharedReleasePrimitivesRetryIdentityAndPreserveState`,
+  `TestPIDLeaseSharedReleasePrimitivesCurrentInspectionFailureJoinsClose`,
+  `TestPIDLeaseSharedReleasePrimitivesOwnershipLossJoinsBothCloseErrors`,
+  `TestPIDLeaseSharedReleasePrimitivesDeleteFailureRetainsLease`, and
+  `TestPIDLeaseSharedReleasePrimitivesSuccessfulDeleteJoinsBothCloseErrors`, which
+  execute the production-owned platform-neutral release state machine;
+- `TestPIDLeaseSharedReleasePrimitivesUsesPhaseSpecificOwnershipClassification` and
+  `TestPIDLeaseSharedReleasePrimitivesOpenCurrentOwnershipLossClosesCurrentAndOwned`,
+  which prove identical raw errors retain the lease during retained identity capture,
+  clear it only at current-path open, preserve it during non-ownership current identity
+  reads, and cover both current-path ownership-loss forms. These branches also
+  compare complete cleared snapshots with injected owned Close errors and explicit
+  non-zero identities;
+- `TestManagedFinalizeStatusPublishesExitAfterCleanup`,
+  `TestManagedFinalizeStatusPersistsCleanupFailureBeforeExit`,
+  `TestManagedFinalizeStatusFailsClosedWhenExitMarkerWriteFails`, and
+  `TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID`, which prove managed
+  finalization ordering, failure publication, fail-closed marker handling, child
+  termination, and reap;
 - `TestRegroupInfrastructureReasonSeverityUsesExactPairs`, the structured expected
   shutdown/external cancellation logs, and exact stage/reason validation;
 - `TestRegroupOwnerStopJoinsWorkerWithoutElapsedOrderingProof` and concurrent-stop
@@ -149,6 +169,25 @@ rm -f /tmp/karma-cmd-windows.test.exe
 
 The Windows command is local cross-compilation only; native Windows execution is not a
 Problem 1 completion requirement.
+
+Problem 6 process-infrastructure verification is reproducible with:
+
+```sh
+go test ./cmd/karma -run 'TestPIDLease(Unix|SharedReleasePrimitives)|TestManagedFinalizeStatus|TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID' -count=1 -timeout 180s
+GOOS=windows GOARCH=amd64 go test -c ./cmd/karma -o /tmp/karma-cmd-windows.test.exe
+rm -f /tmp/karma-cmd-windows.test.exe
+```
+
+The shared matrix is the Linux-runnable evidence gate for the platform-neutral release
+decisions; the platform adapters remain covered by Windows cross-compilation and optional
+native filesystem tests.
+
+Problem 6 passed its independent acceptance and completion gate on 2026-08-24. The
+focused command and Windows cross-compilation above passed, followed by the full Go
+suite, both race suites run sequentially, and root `make lint`. The first lifecycle
+race invocation exposed a non-reproduced existing cancellation-test signal; the exact
+test passed 20 race repetitions and the complete lifecycle race gate then passed on a
+fresh rerun. No Problem 6 behavior or acceptance assertion was changed in response.
 
 Effective suppression explainability is covered by:
 
