@@ -114,11 +114,12 @@ Validation:
 
 Meaning:
 
-- cleanup window for unreferenced closed silence revisions, episodes, retired
-  sources, and old completed recheck-job data;
-- current silence relations, queued/running/failed jobs, the latest completed job,
-  and history referenced by retained alerts or evidence are protected regardless of
-  age;
+- cleanup window for unreferenced retired sources, unreferenced revisions, closed
+  episodes, and unreferenced rules;
+- `queued`, `running`, `retry_wait`, `failed`, and `abandoned` jobs, completed jobs
+  referenced by global or target suppression-cause history, and the latest completed
+  job are protected regardless of age; other completed unreferenced jobs are removed
+  by the next housekeeping cycle and are not retained by this TTL;
 - this setting is independent from alert retention because silence evidence may
   have a different lifecycle from alert rows.
 
@@ -137,8 +138,9 @@ Meaning:
 
 - interval for the complete background housekeeping cycle;
 - one cycle runs immediately at worker startup and then at this interval;
-- each cycle runs alert TTL cleanup, maxAlerts cleanup, reference-safe silence/job
-  history cleanup, incremental vacuum, and one silence-recheck batch.
+- each cycle runs alert TTL cleanup, maxAlerts cleanup, reference-safe completed-job
+  cleanup, silence-history TTL cleanup, incremental vacuum, and one silence-recheck
+  batch.
 
 Validation:
 

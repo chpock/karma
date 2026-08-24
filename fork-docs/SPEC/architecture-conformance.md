@@ -1,7 +1,8 @@
 # Architecture Conformance Matrix
 
 Status: Problems 2-6 and 8/9 are implemented and independently accepted. Problem 3 completed its
-implementation phase.
+implementation phase. Problem 7 has no remaining independent-review findings; its final
+completion gate is pending.
 Remaining known violations are tracked by
 `silence-recheck-problems.md`.
 
@@ -58,7 +59,7 @@ The executable test coverage for these contracts is summarized in
 | D18 | Future remote DB uses one elected reconciler; domain remains portable | process/store boundary | architecture review | Implemented constraint; no active-active path added |
 | D19 | Enqueue only promotion-capable context, including failed/invalid→success recovery | previous/next evaluation-state diff | Problem 2 replay/idempotency and committed event-accounting matrix | Implemented |
 | D20 | One event links directly to one complete cause set | global/target event-cause transactions | FK, multi-job and restart tests | Implemented |
-| D21 | Retain non-completed/referenced/latest completed jobs; clean older unreferenced | housekeeping | `TestRunHousekeepingCleansCompletedUnreferencedJobs` | Implemented |
+| D21 | Retain `queued`, `running`, `retry_wait`, `failed`, and `abandoned` jobs; retain global/target cause-referenced completed jobs and the latest completed job as bounded post-run diagnostic context; clean older unreferenced completed graphs | housekeeping | `TestRunHousekeepingCleansCompletedUnreferencedJobs` (older unreferenced deletion), `TestRunHousekeepingPreservesRulesOfLatestCompletedJob` (latest rule input), `TestRunHousekeepingCascadesSupersededJobGraphAndPreservesLatestGraph` (cascade/latest graph); `runPhase2RetentionTx` + schema-v1 FK inspection (cause protection and attempts/actions cascade) | Implemented locally; final completion gate pending |
 | D22 | Lease/fencing deferred; all derived writes pass one Store-owned immediate-writer transaction boundary with durable completion reconciliation | runtime integration | Problem 1 writer/PID regressions and final commit gates in `architecture-verification.md` | Implemented |
 
 ## 2.1 Process Infrastructure Decisions

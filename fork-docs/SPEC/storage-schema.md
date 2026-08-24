@@ -238,10 +238,15 @@ Phase 2 matching inputs:
 
 ## 6. Retention inputs
 
-- TTL uses `alert_states.last_seen_at`.
+- Alert TTL uses `alert_states.last_seen_at` only. Silence-history TTL uses retired
+  source `retired_at`, revision/rule `last_observed_at`, and closed-episode `ended_at`.
 - Max-alert limit eviction ordering uses latest change timestamp from `alert_events` (fallback to `alert_states.updated_at`).
 
-Phase 2 housekeeping also prunes unreferenced completed recheck jobs and stale unreferenced silence history entities under FK constraints.
+Phase 2 housekeeping retains `queued`, `running`, `retry_wait`, `failed`, and
+`abandoned` jobs, plus global/target cause-referenced and latest completed graphs;
+it deletes older unreferenced completed recheck jobs at the next cycle and separately
+prunes stale unreferenced silence-history entities under the mapped timestamps and
+silence-history TTL, with FK constraints protecting referenced graphs.
 
 The complete schema-v1 inventory and relationship contract is maintained in
 `phase2-silence-awareness-schema.md`. Literal executable DDL exists only in

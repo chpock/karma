@@ -17,9 +17,14 @@ Retention policy:
 
 1. TTL cleanup first (default 30 days from `last_seen_at`).
 2. apply max-record limit second (default 100000 alerts) if still over cap.
-3. prune unreferenced silence/job history under its independent 30-day TTL while
-   preserving current/referenced rows.
-4. limit eviction order is oldest by state-change age.
+3. retain `queued`, `running`, `retry_wait`, `failed`, and `abandoned` recheck jobs;
+   retain completed jobs referenced by global or target suppression-cause history and
+   the latest completed job as bounded post-run diagnostic context; delete older
+   completed unreferenced jobs during the next housekeeping cycle.
+4. prune unreferenced retired sources by `retired_at`, revisions/rules by
+   `last_observed_at`, and closed episodes by `ended_at` under the independent
+   30-day silence-history TTL.
+5. limit eviction order is oldest by state-change age.
 
 Vacuum policy:
 
@@ -32,6 +37,12 @@ Vacuum policy:
 
 ## Consequences
 
-- Predictable cleanup behavior and bounded disk usage.
+- Predictable cleanup behavior. Alert rows, older completed unreferenced job graphs,
+  and unreferenced silence history are bounded by their existing limit/retention
+  mechanisms; `queued`, `running`, `retry_wait`, `failed`, and `abandoned` job graphs
+  are deliberately retained without a storage bound in schema v1 for durable queue
+  and operator-audit history.
+- Any future bound for abandoned-job history requires a separate architecture,
+  runtime, and audit-retention decision.
 - Simpler operations for initial rollout.
 - Multi-replica support explicitly deferred.

@@ -78,14 +78,16 @@ change:
 
 ### 1. Establish the Root Cause of the Original SQLite Busy Error
 
-**Status: Problems 1-5 and 8/9 implemented and independently accepted; Problems 6-7 remain pending**
+**Status: Problems 1-6 and 8/9 implemented and independently accepted; Problem 7 final completion gate pending**
 
 The writer-ownership implementation, fail-fast PID test infrastructure, typed
 acquisition and cancellation handling, domain-state regressions, writer/shutdown
 evidence, and final verification are complete for Problem 1. Problems 2 and 3 are
 implemented.
 Problem 4 is implemented and independently accepted.
-Problems 5/8/9 are implemented and independently accepted. Problems 6-7 remain pending.
+Problems 5/8/9 are implemented and independently accepted. Problem 6 is implemented and
+independently accepted. Problem 7 has no remaining independent-review findings; its
+final completion gate is pending.
 
 The remediation includes the durable `lifecycle_writer_commits` ledger, typed
 `committed`/`not_committed`/`unknown` outcomes, bounded internal recovery contexts,
@@ -1631,47 +1633,59 @@ verification matrix and completion commands are recorded in
 
 ### 7. Reconcile the Completed Recheck-Job Retention Documentation
 
+**Status: No remaining independent-review findings; final completion gate pending.**
+
 **Dependency and scope**
 
-This is a deferred documentation-contract problem discovered while independently
-reviewing Problem 2. It is not part of immutable job creation, candidate processing, or
-Problem 2 acceptance and must not be mixed into the Problem 2 remediation change.
+This documentation-contract problem was discovered while independently reviewing
+Problem 2. It is not part of immutable job creation, candidate processing, or Problem 2
+acceptance and is kept as a separate documentation change.
 
-**Confirmed inconsistency**
+**Implemented contract**
 
 Decision D21 in `phase2-silence-awareness-plan.md` defines reference-based completed-job
-retention: non-completed, cause-referenced, and latest-completed jobs are protected;
-other completed unreferenced jobs are operational detail and are removed by the next
-housekeeping without a separate job TTL. The runtime and
-`TestRunHousekeepingCleansCompletedUnreferencedJobs` implement that decision.
+retention. The explicit schema-v1 status policy is that `queued`, `running`, `retry_wait`,
+`failed`, and `abandoned` jobs are retained regardless of age; completed jobs referenced
+by global or target suppression-cause history are retained; the latest completed job is
+retained as bounded post-run diagnostic context; and older completed unreferenced jobs
+and their job-owned graph are removed by the next housekeeping without a separate job
+TTL. The stats and warning readers do not expose the latest completed job as the current
+queue head.
 
-Other authoritative-looking documents contradict D21 by saying that old completed jobs
-or job pins use the independent silence-history TTL, including `CONFIGURATION.md`,
-`phase2-silence-awareness-schema.md`, and `lifecycle-state-machine.md`. This leaves the
-public configuration meaning and the retention contract ambiguous even though the
-runtime behavior is internally consistent.
+The authoritative summaries now use this same finite status set and distinguish alert
+retention from silence-history retention. Silence-history timestamps are `retired_at`
+for retired sources, `last_observed_at` for revisions and rules, and `ended_at` for
+closed episodes.
 
-**Required contract**
+**Contract and evidence**
 
 - Preserve D21 as the decided runtime contract unless a separate architecture decision
   explicitly supersedes it; do not silently add a job TTL during documentation cleanup.
-- State consistently that non-completed jobs, jobs referenced by global or target
-  suppression-cause history, and the latest completed job are retained regardless of
-  age.
+- State consistently that `queued`, `running`, `retry_wait`, `failed`, and `abandoned`
+  jobs are retained regardless of age; the accepted `abandoned` retention policy is
+  explicit and is not an accidental consequence of a generic predicate.
+- State consistently that jobs referenced by global or target suppression-cause history
+  and the latest completed job as bounded post-run diagnostic context are retained;
+  stats and warning readers do not read the latest completed job as queue head.
 - State consistently that other completed unreferenced jobs are deleted by the next
   housekeeping. Job-owned rules, candidates, attempts, and operator-action rows are
   part of that deletable graph and may cascade.
 - Limit `alertLifecycle.silenceHistory.retention.ttl` to unreferenced retired sources,
   revisions, closed episodes, and rules. It is independent from alert retention but is
   not a completed-job retention promise.
-- Update `CONFIGURATION.md`, `phase2-silence-awareness-schema.md`,
-  `lifecycle-state-machine.md`, `writer-projection-audit.md`, and any other conflicting
-  summary to one contract.
-- Keep the current immediate-cleanup regression and add documentation assertions only
-  if this repository has a suitable contract-test mechanism.
+- `CONFIGURATION.md`, `phase2-silence-awareness-plan.md`,
+  `phase2-silence-awareness-schema.md`,
+  `lifecycle-state-machine.md`, `writer-projection-audit.md`,
+  `retention-and-vacuum.md`, `storage-schema.md`, and ADR-003 must state one contract.
+- Keep the current immediate-cleanup regressions. Existing tests are cited by the
+  capability they actually execute; SQL/FK inspection establishes cause-reference
+  protection and attempts/operator-action cascade rather than being attributed to a
+  partial test.
 
-Problem 7 does not block Problem 2 acceptance and must be implemented as a separate
-change after the ordered lifecycle work unless the execution plan is explicitly changed.
+Problem 7 does not block Problem 2 acceptance and remains a separate documentation-only
+remediation after the ordered lifecycle work. It introduces no runtime, schema,
+configuration, or retention-policy behavior. Problem 10 remains a separate housekeeping
+recheck-executor documentation issue.
 
 ### 8. Preserve Selected-Error Precedence During Shutdown
 
@@ -1731,6 +1745,24 @@ Implemented work:
 Problem 9 does not block Problem 4 acceptance, but its local remediation must pass independent
 acceptance before the final runtime-logging and end-to-end gate.
 
+### 10. Remove the False Housekeeping-Owned Recheck Batch Documentation
+
+**Status: Documentation remediation required.**
+
+This problem is independent from Problem 7 retention. `CONFIGURATION.md` says that each
+housekeeping cycle runs one silence-recheck batch, but runtime housekeeping invokes only
+`RunHousekeepingContext`. The accepted Problem 3 scheduler is the sole recheck executor;
+housekeeping neither executes a batch nor owns a scheduler wake.
+
+Required correction:
+
+- remove the recheck-batch claim from the housekeeping interval description;
+- keep immediate startup and periodic housekeeping cadence unchanged;
+- point recheck execution semantics to ADR-007 and the scheduler owner;
+- do not change runtime scheduling, timers, signals, configuration keys, or defaults;
+  and
+- verify no other configuration summary assigns recheck execution to housekeeping.
+
 ## Execution Order and Scope Guard
 
 Execute the work in this exact order:
@@ -1743,8 +1775,10 @@ Execute the work in this exact order:
 5. Problem 8 selected-error/shutdown precedence;
 6. Problem 9 generic writer diagnostic redaction/registration;
 7. Problem 5 end-to-end verification and documentation (implemented and independently accepted);
-8. deferred Problem 6 PID lease/harness hardening; and
-9. deferred Problem 7 completed-job retention documentation reconciliation.
+8. Problem 6 PID lease/harness hardening (completed); and
+9. Problem 7 completed-job retention documentation reconciliation (no remaining
+   independent-review findings; final completion gate pending); and
+10. Problem 10 housekeeping/recheck ownership documentation correction.
 
 Finish the production code, focused regressions, and required documentation for one
 problem before implementing the next. Problems 2 and 3 must share one approved

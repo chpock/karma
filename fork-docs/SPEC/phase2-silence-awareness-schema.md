@@ -214,14 +214,16 @@ Housekeeping order is:
 
 1. alert TTL cleanup;
 2. max-alert eviction if still over the configured cap;
-3. reference-safe cleanup of old unreferenced completed jobs, retired sources,
-   revisions, episodes, and rules using the independent silence-history TTL;
+3. reference-safe cleanup of older unreferenced completed jobs during the next
+   housekeeping cycle, plus retired sources, revisions, episodes, and rules when
+   unreferenced under the independent silence-history TTL;
 4. commit;
 5. incremental vacuum.
 
 Alert deletion cascades its events and cause histories. Current source relations,
-non-completed jobs, the latest completed job, and any job/evidence references protect
-the required source/rule/revision graph. Housekeeping never disables foreign keys.
+`queued`, `running`, `retry_wait`, `failed`, and `abandoned` jobs, the latest completed
+job, and any global or target job/evidence references protect the required
+source/rule/revision graph. Housekeeping never disables foreign keys.
 
 ## 7. Required schema verification
 

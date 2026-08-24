@@ -72,14 +72,17 @@ by domain transaction, not by source file.
 
 ## W4: Housekeeping
 
-- Authority: server clock, alert TTL/max count, silence-history TTL.
+- Authority: server clock, alert TTL/max count, reference-safe completed-job cleanup,
+  and silence-history TTL.
 - Transaction/order: Store writer ownership spans alert TTL, max-count, phase-2
   reference-safe retention, incremental vacuum, and vacuum metadata. The order is
   alert TTL, max-count, phase-2 retention, incremental vacuum.
-- Deletes: alert rows through cascades, unreferenced old completed jobs/rule pins,
-  retired sources and unreferenced rule/episode/revision history.
-- Protected: current source relations, non-completed/latest jobs, and all job/
-  evidence referenced history.
+- Deletes: alert rows through cascades, older completed unreferenced jobs and their
+  job-owned graph on the next housekeeping cycle, retired sources, and unreferenced
+  rule/episode/revision history after the silence-history TTL.
+- Protected: current source relations, `queued`, `running`, `retry_wait`, `failed`, and
+  `abandoned` jobs, cause-referenced completed jobs, the latest completed job as
+  bounded post-run diagnostic context, and all job/evidence referenced history.
 - Readers: stats and all lifecycle APIs.
 - Restart: schema v1 FK actions remain identical after close/reopen; one blocked
   child must not roll back unrelated eligible deletion.

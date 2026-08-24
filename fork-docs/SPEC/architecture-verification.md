@@ -75,7 +75,15 @@ The writer smoke test is not matrix evidence. The mutation-specific evidence is:
 - resolve: `TestResolveAlertSuccessFromInactive` and
   `TestResolveWriterPhaseUpdatesGlobalAndAllTargetRows`;
 - housekeeping cleanup/retention/vacuum:
-  `TestHousekeepingCleanupAndVacuumUseSeparateWriterTransactions`;
+  `TestHousekeepingCleanupAndVacuumUseSeparateWriterTransactions` and
+  `TestRunHousekeepingCleansCompletedUnreferencedJobs`, which proves deletion of an
+  older unreferenced completed job while one completed job remains, plus
+  `TestRunHousekeepingPreservesRulesOfLatestCompletedJob`, which proves latest-job
+  immutable rule input retention, and
+  `TestRunHousekeepingCascadesSupersededJobGraphAndPreservesLatestGraph`, which proves
+  superseded rule/candidate cascade and latest-graph retention; direct inspection of
+  `runPhase2RetentionTx` and schema-v1 foreign keys establishes global/target cause
+  reference protection and attempts/operator-action cascade;
 - regroup begin/resume/batch/completion/failure:
   `TestRegroupBeginBatchAndCompletionUseRealWriterPhases`,
   `TestRegroupResumesAfterDelayedBeginCommitReconciliation`,
@@ -104,7 +112,8 @@ Delayed-reconciliation and shutdown coverage additionally includes:
 
 Problem 1 is implemented. The verification below
 names PID ownership, exact regroup severity, deterministic ordering, and real-component
-coverage. Problems 2, 3, and 6 are implemented and independently accepted.
+coverage. Problems 2, 3, and 6 are implemented and independently accepted. Problem 7
+has no remaining independent-review findings; its final completion gate is pending.
 
 Additional writer/shutdown evidence includes:
 

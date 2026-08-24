@@ -24,8 +24,12 @@ Implemented in fork scope:
 - merge layer for non-live persisted alerts,
 - idempotent manual resolve endpoint for non-live alerts,
 - UI support for projected states and suppressed `current/past` split,
-- housekeeping (alert TTL -> limit -> reference-safe silence/job cleanup ->
-  incremental vacuum),
+- housekeeping (alert TTL -> limit -> reference-safe completed-job cleanup and
+  silence-history TTL cleanup -> incremental vacuum),
+- D21 completed-job retention documentation is reconciled under Problem 7, with no
+  remaining independent-review findings and the final completion gate pending; runtime
+  cleanup remains reference-based and next-housekeeping while silence-history TTL
+  remains independent,
 - storage and warning observability endpoints.
 - per-target lifecycle state and topology retirement,
 - silence source/revision/episode history and HA consistency tracking,

@@ -100,7 +100,10 @@ dimension functions.
   members. A relevant failed, invalid, or unknown source makes that candidate
   incomplete; stale last-successful relations can never satisfy the job. Recovery
   creates a complete successor context.
-- Retiring a source clears only its mutable `alertmanager_source_silences` current
-  relations. Immutable job/evidence references remain. Expired completed-job rule
-  pins are pruned after silence-history TTL so unreferenced source/rule/revision
-  history can be collected.
+ - Retiring a source clears only its mutable `alertmanager_source_silences` current
+  relations. Immutable job/evidence references remain. `queued`, `running`,
+  `retry_wait`, `failed`, and `abandoned` jobs are retained; older completed
+  unreferenced job-owned rule pins are deleted with their job during the next
+  housekeeping cycle. Unreferenced retired sources are collected by `retired_at`,
+  unreferenced revisions and rules by `last_observed_at`, and closed episodes by
+  `ended_at` under the silence-history TTL.

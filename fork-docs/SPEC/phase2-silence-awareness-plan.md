@@ -523,9 +523,12 @@ the exact schema. Context fingerprint is not globally unique across completed jo
 1. Alert cause history/members follow alert retention.
 2. Current source relations, pinned jobs, and cause members protect revisions by FK.
 3. Open episodes/current source relations are never TTL-deleted.
-4. Unreferenced closed rule history uses D4 silence-history TTL.
-5. Queued/running/failed and cause-referenced completed jobs are retained.
-6. Keep latest completed job; delete older completed unreferenced jobs and child rules.
+4. Unreferenced rule history uses D4 silence-history TTL; closure applies only to
+   episodes.
+5. `queued`, `running`, `retry_wait`, `failed`, and `abandoned` jobs are retained
+   regardless of age under the accepted schema-v1 policy.
+6. Keep the latest completed job as bounded post-run diagnostic context; delete older
+   completed unreferenced jobs and their child graph.
 7. Retired sources delete only after D4 TTL and after every FK reference disappears.
 8. Housekeeping never disables FKs or deletes evidence required by events/UI.
 
@@ -1195,10 +1198,14 @@ Transaction/FK contract:
 
 Decision:
 
-- queued/running/failed jobs are never TTL-deleted,
-- completed jobs referenced by suppression cause history are retained while any reference exists,
+- `queued`, `running`, `retry_wait`, `failed`, and `abandoned` jobs are never
+  TTL-deleted,
+- completed jobs referenced by global or target suppression-cause history are retained
+  while any reference exists,
 - `alert_suppression_cause_history.recheck_job_id` is non-NULL only for `source=silence_recheck` and uses `ON DELETE RESTRICT`,
-- keep the latest completed job for operator stats even when unreferenced,
+- keep the latest completed job as bounded post-run diagnostic context even when
+  unreferenced; the stats and warning readers do not expose it as the current queue
+  head,
 - delete older completed unreferenced jobs during housekeeping,
 - delete pinned `silence_recheck_job_rules` with their job via cascade,
 - do not introduce a separate job-retention TTL/config.
@@ -1206,7 +1213,8 @@ Decision:
 Rationale:
 
 - referenced job input is part of the proof that D2 source coverage caused promotion,
-- non-completed jobs are required for FIFO/resume/error visibility,
+- `queued`, `running`, `retry_wait`, `failed`, and `abandoned` jobs are retained for
+  FIFO/resume/error visibility and operator recovery,
 - completed jobs with no promotions are operational execution detail, not user history,
 - exact rule/revision/episode history remains after unreferenced job cleanup,
 - housekeeping cadence naturally provides short-lived diagnostics without promising another retention contract.
