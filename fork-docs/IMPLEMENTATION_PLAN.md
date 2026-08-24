@@ -30,6 +30,9 @@ Implemented in fork scope:
   remaining independent-review findings and the final completion gate pending; runtime
   cleanup remains reference-based and next-housekeeping while silence-history TTL
   remains independent,
+- Problem 10 housekeeping documentation has no remaining independent-review findings
+  and its final documentation gate is pending: housekeeping does not execute or wake
+  recheck work; ADR-007 and the cmd/karma scheduler own recheck execution,
 - storage and warning observability endpoints.
 - per-target lifecycle state and topology retirement,
 - silence source/revision/episode history and HA consistency tracking,

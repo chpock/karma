@@ -3,6 +3,8 @@
 Status: Problems 2-6 and 8/9 are implemented and independently accepted. Problem 3 completed its
 implementation phase. Problem 7 has no remaining independent-review findings; its final
 completion gate is pending.
+Problem 10 has no remaining independent-review findings; its final documentation gate
+is pending.
 Remaining known violations are tracked by
 `silence-recheck-problems.md`.
 

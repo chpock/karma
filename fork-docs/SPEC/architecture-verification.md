@@ -82,8 +82,12 @@ The writer smoke test is not matrix evidence. The mutation-specific evidence is:
   immutable rule input retention, and
   `TestRunHousekeepingCascadesSupersededJobGraphAndPreservesLatestGraph`, which proves
   superseded rule/candidate cascade and latest-graph retention; direct inspection of
-  `runPhase2RetentionTx` and schema-v1 foreign keys establishes global/target cause
-  reference protection and attempts/operator-action cascade;
+   `runPhase2RetentionTx` and schema-v1 foreign keys establishes global/target cause
+   reference protection and attempts/operator-action cascade;
+- Problem 10 configuration ownership: `CONFIGURATION.md` describes housekeeping as
+  alert/limit/retention/vacuum only and points recheck execution to ADR-007; the
+  cmd/karma scheduler remains the sole recheck owner and housekeeping is not a wake
+  source;
 - regroup begin/resume/batch/completion/failure:
   `TestRegroupBeginBatchAndCompletionUseRealWriterPhases`,
   `TestRegroupResumesAfterDelayedBeginCommitReconciliation`,
@@ -114,6 +118,8 @@ Problem 1 is implemented. The verification below
 names PID ownership, exact regroup severity, deterministic ordering, and real-component
 coverage. Problems 2, 3, and 6 are implemented and independently accepted. Problem 7
 has no remaining independent-review findings; its final completion gate is pending.
+Problem 10 has no remaining independent-review findings; its final documentation gate
+is pending.
 
 Additional writer/shutdown evidence includes:
 

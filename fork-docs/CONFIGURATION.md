@@ -139,8 +139,10 @@ Meaning:
 - interval for the complete background housekeeping cycle;
 - one cycle runs immediately at worker startup and then at this interval;
 - each cycle runs alert TTL cleanup, maxAlerts cleanup, reference-safe completed-job
-  cleanup, silence-history TTL cleanup, incremental vacuum, and one silence-recheck
-  batch.
+  cleanup, silence-history TTL cleanup, and incremental vacuum;
+- this cycle does not execute or wake silence recheck work. The cmd/karma recheck
+  scheduler is the sole automatic recheck executor; see ADR-007 for its startup,
+  committed-job, timer, and operator-wake ownership.
 
 Validation:
 

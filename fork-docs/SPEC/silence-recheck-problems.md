@@ -1747,21 +1747,21 @@ acceptance before the final runtime-logging and end-to-end gate.
 
 ### 10. Remove the False Housekeeping-Owned Recheck Batch Documentation
 
-**Status: Documentation remediation required.**
+**Status: No remaining independent-review findings; final documentation gate pending.**
 
-This problem is independent from Problem 7 retention. `CONFIGURATION.md` says that each
-housekeeping cycle runs one silence-recheck batch, but runtime housekeeping invokes only
-`RunHousekeepingContext`. The accepted Problem 3 scheduler is the sole recheck executor;
-housekeeping neither executes a batch nor owns a scheduler wake.
+This problem is independent from Problem 7 retention. The corrected
+`CONFIGURATION.md` describes housekeeping as retention/vacuum work only; runtime
+housekeeping invokes `RunHousekeepingContext`. The accepted Problem 3 scheduler is the
+sole recheck executor; housekeeping neither executes a batch nor owns a scheduler wake.
 
-Required correction:
+Implemented correction:
 
-- remove the recheck-batch claim from the housekeeping interval description;
+- the recheck-batch claim is removed from the housekeeping interval description;
 - keep immediate startup and periodic housekeeping cadence unchanged;
 - point recheck execution semantics to ADR-007 and the scheduler owner;
 - do not change runtime scheduling, timers, signals, configuration keys, or defaults;
   and
-- verify no other configuration summary assigns recheck execution to housekeeping.
+- no other configuration summary assigns recheck execution to housekeeping.
 
 ## Execution Order and Scope Guard
 
@@ -1778,7 +1778,8 @@ Execute the work in this exact order:
 8. Problem 6 PID lease/harness hardening (completed); and
 9. Problem 7 completed-job retention documentation reconciliation (no remaining
    independent-review findings; final completion gate pending); and
-10. Problem 10 housekeeping/recheck ownership documentation correction.
+10. Problem 10 housekeeping/recheck ownership documentation correction (no remaining
+    independent-review findings; final documentation gate pending).
 
 Finish the production code, focused regressions, and required documentation for one
 problem before implementing the next. Problems 2 and 3 must share one approved
