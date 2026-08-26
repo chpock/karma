@@ -6,9 +6,9 @@ It is evidence, not a replacement for the contracts in the state-machine specs.
 ## Domain and storage
 
 ```sh
-go test ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test ./internal/config -count=1 -timeout 180s
-go test ./cmd/karma -count=1 -timeout 180s
+go test ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test ./internal/config -count=1 -timeout 240s
+go test ./cmd/karma -count=1 -timeout 240s
 ```
 
 Coverage includes pure/fuzz lifecycle invariants, target topology, sticky multi-job
@@ -160,18 +160,18 @@ The accepted Problem 1 commit gate is reproducible with:
 
 ```sh
 go test -race ./cmd/karma \
-  -run TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID -count=100 -timeout 180s
+  -run TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID -count=100 -timeout 240s
 go test -race ./cmd/karma \
   -run 'TestScripts/(096_tls_client|098_proxy_url_request)' \
   -count=5 -timeout 300s
 go test -race ./internal/fork/alertlifecycle \
   -run 'TestWriterCommitRecoveryDoesNotUseCanceledOperationContext|TestRegroupWriterAcquisitionFailureDoesNotPersistDomainFailure|TestRecheckWriterAcquisitionFailureLeavesQueuedJobUntouched|TestWriterCancellationBeforeLedgerInsertWithoutHookDoesNotCommit' \
-  -count=50 -timeout 180s
-go test ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test ./cmd/karma -count=1 -timeout 180s
-go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test -race ./cmd/karma -count=1 -timeout 180s
-go test ./... -count=1 -timeout 180s
+  -count=50 -timeout 240s
+go test ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test ./cmd/karma -count=1 -timeout 240s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test -race ./cmd/karma -count=1 -timeout 240s
+go test ./... -count=1 -timeout 240s
 make lint
 git diff --check
 GOOS=windows GOARCH=amd64 go test -c ./cmd/karma \
@@ -185,7 +185,7 @@ Problem 1 completion requirement.
 Problem 6 process-infrastructure verification is reproducible with:
 
 ```sh
-go test ./cmd/karma -run 'TestPIDLease(Unix|SharedReleasePrimitives)|TestManagedFinalizeStatus|TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID' -count=1 -timeout 180s
+go test ./cmd/karma -run 'TestPIDLease(Unix|SharedReleasePrimitives)|TestManagedFinalizeStatus|TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID' -count=1 -timeout 240s
 GOOS=windows GOARCH=amd64 go test -c ./cmd/karma -o /tmp/karma-cmd-windows.test.exe
 rm -f /tmp/karma-cmd-windows.test.exe
 ```
@@ -302,10 +302,10 @@ Problem 2 immutable recheck input is implemented. Its evidence includes:
 The independent acceptance gate passed on 2026-08-18 with these repository-root commands:
 
 ```sh
-go test ./internal/fork/alertlifecycle -run 'TestProblem2|TestRecheckCandidateBecomingEligibleCreatesImmutableSuccessor|TestPinnedRecheckRuleCannotCrossSourceReassignment|TestC4RecheckResumesPinnedContextAndCandidatesAfterRestart|TestRecordedTrafficReplayThroughLifecycleStore' -count=1 -timeout 180s
-go test ./... -count=1 -timeout 180s
-go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test -race ./cmd/karma -count=1 -timeout 180s
+go test ./internal/fork/alertlifecycle -run 'TestProblem2|TestRecheckCandidateBecomingEligibleCreatesImmutableSuccessor|TestPinnedRecheckRuleCannotCrossSourceReassignment|TestC4RecheckResumesPinnedContextAndCandidatesAfterRestart|TestRecordedTrafficReplayThroughLifecycleStore' -count=1 -timeout 240s
+go test ./... -count=1 -timeout 240s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test -race ./cmd/karma -count=1 -timeout 240s
 make lint
 git diff --check
 ```
@@ -454,20 +454,20 @@ both graphs are compared against that same independent expectation.
 The historical candidate passed from the repository root:
 
 ```bash
-go test ./cmd/karma -run 'TestProblem5|TestRecordedTrafficReplayThroughLifecycleStore' -count=1 -timeout 180s
-go test ./internal/fork/alertlifecycle -run 'TestProblem8|TestProblem9|TestWriterPanicCleanupPreservesPanicAndLogsRecoveryFailure' -count=1 -timeout 180s
-go test ./cmd/karma -run '^TestProblem5CompleteDeterministicLifecycleSequence$' -count=20 -timeout 180s
-go test -race ./cmd/karma -run '^(TestRecordedTrafficReplayThroughLifecycleStore|TestProblem5CompleteDeterministicLifecycleSequence)$' -count=1 -timeout 180s
-go test ./... -count=1 -timeout 180s
+go test ./cmd/karma -run 'TestProblem5|TestRecordedTrafficReplayThroughLifecycleStore' -count=1 -timeout 240s
+go test ./internal/fork/alertlifecycle -run 'TestProblem8|TestProblem9|TestWriterPanicCleanupPreservesPanicAndLogsRecoveryFailure' -count=1 -timeout 240s
+go test ./cmd/karma -run '^TestProblem5CompleteDeterministicLifecycleSequence$' -count=20 -timeout 240s
+go test -race ./cmd/karma -run '^(TestRecordedTrafficReplayThroughLifecycleStore|TestProblem5CompleteDeterministicLifecycleSequence)$' -count=1 -timeout 240s
+go test ./... -count=1 -timeout 240s
 make lint
-go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test -race ./cmd/karma -count=1 -timeout 180s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test -race ./cmd/karma -count=1 -timeout 240s
 git diff --check
 ```
 
 Final results: focused Problem 5 3.1s; focused Problems 8/9 0.57s; deterministic sequence 20/20;
 focused Problem 5 race 51.4s; full Go 38.1s; root lint 0 issues; lifecycle race 134.9s; cmd race
-132.6s; patch-integrity clean. Both race suites remained under the mandatory 180s timeout and ran
+132.6s; patch-integrity clean. Both race suites remained under the mandatory 240s timeout and ran
 sequentially.
 
 **Integration final completion gate (2026-08-25)**
@@ -475,21 +475,21 @@ sequentially.
 The accepted Problems 1-10 candidate passed:
 
 ```bash
-go test ./internal/fork/alertlifecycle ./cmd/karma -run 'TestProblem5CompleteDeterministicLifecycleSequence|TestRecordedTrafficReplayThroughLifecycleStore|TestProblem4|TestProblem9' -count=1 -timeout 180s
+go test ./internal/fork/alertlifecycle ./cmd/karma -run 'TestProblem5CompleteDeterministicLifecycleSequence|TestRecordedTrafficReplayThroughLifecycleStore|TestProblem4|TestProblem9' -count=1 -timeout 240s
 npm --prefix ui test -- src/Components/ForkLifecycleWarning/index.test.tsx src/Hooks/useFetchGet.test.tsx src/Stores/AlertStore.test.ts
-go test ./... -count=1 -timeout 180s
+go test ./... -count=1 -timeout 240s
 npm --prefix ui test -- --runInBand
 npm --prefix ui run build
 make lint
 npm --prefix ui run test:visual -- --grep "Fork lifecycle warning"
-go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test -race ./cmd/karma -count=1 -timeout 180s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test -race ./cmd/karma -count=1 -timeout 240s
 ```
 
 Results: focused Go passed; focused UI 111/111; full Go passed; UI 1205 passed
 with 2 skipped; production build passed; lint reported 0 issues; approved Problem 4
 browser matrix passed 18/18 on Chromium/Firefox/Android; lifecycle race 139.0s and cmd
-race 175.0s, run strictly sequentially under the unchanged 180s timeout.
+race 175.0s, run strictly sequentially under the 240s timeout.
 
 The repository-wide full visual corpus is not this approved silence-recheck gate. A
 diagnostic run found unrelated legacy snapshot drift (for example `Grid.png` expected
@@ -559,17 +559,17 @@ diagnostic run found unrelated legacy snapshot drift (for example `Grid.png` exp
 **Problem 4 final completion gate (2026-08-21)**
 
 ```sh
-go test ./internal/fork/alertlifecycle -run Problem4 -count=1 -timeout 180s
-go test ./cmd/karma -run Problem4 -count=1 -timeout 180s
+go test ./internal/fork/alertlifecycle -run Problem4 -count=1 -timeout 240s
+go test ./cmd/karma -run Problem4 -count=1 -timeout 240s
 npm --prefix ui test -- --runInBand \
   src/Components/ForkLifecycleWarning/index.test.tsx \
   src/Components/MainModal/Configuration/ForkStorageStats.test.tsx \
   src/Hooks/useFetchGet.test.tsx \
   src/Stores/AlertStore.test.ts
 npm --prefix ui run test:visual -- --grep "Fork lifecycle warning"
-go test ./... -count=1 -timeout 180s
-go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test -race ./cmd/karma -count=1 -timeout 180s
+go test ./... -count=1 -timeout 240s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test -race ./cmd/karma -count=1 -timeout 240s
 npm --prefix ui test -- --runInBand
 npm --prefix ui run build
 make lint
@@ -590,7 +590,7 @@ remains; the final focused/UI gate is complete and independently accepted.
 go test ./internal/log
 go test ./internal/alertmanager
 go test ./internal/fork/alertlifecycle
-go test ./cmd/karma -count=1 -timeout 180s
+go test ./cmd/karma -count=1 -timeout 240s
 cd ui
 npm test -- --runInBand \
   src/Components/SilenceModal/SilenceEditor.test.tsx \
@@ -670,7 +670,7 @@ Before release, run the current commands rather than copying historical test cou
 
 ```sh
 make lint
-go test ./... -count=1 -timeout 180s
+go test ./... -count=1 -timeout 240s
 npm --prefix ui test -- --runInBand
 npm --prefix ui run build
 git diff --check

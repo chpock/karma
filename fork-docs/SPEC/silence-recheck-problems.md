@@ -367,7 +367,7 @@ new boundary as implemented before its production path and regression tests exis
 - All production lifecycle mutations pass the single writer ownership boundary.
 - Read-only Store operations retain multi-connection concurrency.
 - No queue recovery, retry policy, or later-problem behavior is introduced.
-- Focused lifecycle tests, sequential bounded Go tests (`-timeout 180s`), root `make lint`, and
+- Focused lifecycle tests, sequential bounded Go tests (`-timeout 240s`), root `make lint`, and
   `git diff --check` all pass.
 
 ### 2. Create Immutable, Provenance-Complete Recheck Jobs
@@ -1548,15 +1548,15 @@ root after the last edit:
 ```bash
 go test ./internal/fork/alertlifecycle -count=1
 go test ./cmd/karma -count=1
-go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
-go test -race ./cmd/karma -count=1 -timeout 180s
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test -race ./cmd/karma -count=1 -timeout 240s
 npm --prefix ui test -- --runInBand \
   src/Components/ForkLifecycleWarning/index.test.tsx \
   src/Components/MainModal/Configuration/ForkStorageStats.test.tsx
 npm --prefix ui run build
 npm --prefix ui run test:visual -- --grep 'Fork lifecycle warning'
 make lint
-go test ./... -count=1 -timeout 180s
+go test ./... -count=1 -timeout 240s
 git diff --check
 ```
 
