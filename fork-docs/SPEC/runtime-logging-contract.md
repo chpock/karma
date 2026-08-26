@@ -1,7 +1,7 @@
 # Runtime Logging Contract
 
-Status: Problem 4 production event ownership, fields, levels, redaction, APIs, UI
-presentation, and integration evidence are implemented and independently accepted.
+Status: Problem 4 production event ownership, fields, levels, redaction, APIs, and UI
+presentation are implemented and independently accepted.
 Operator replay-ledger semantics are defined by ADR-005 and ADR-007. Generic writer
 registration/redaction and exact operator-path evidence are implemented and independently
 accepted under Problem 9.
@@ -256,6 +256,12 @@ the selected job ID when known, an exact reason code, and a sanitized error. It
 terminates the scheduler owner for terminal infrastructure failures; durable failed
 heads are not terminal infrastructure failures and remain wakeable for Retry/Abandon.
 No `scheduler_stopped`, `queue_blocked`, or `queue_empty` wrapper event is emitted.
+
+Scheduler-owned event emission is best effort after the durable control decision has been
+made. Queue-blocked, retry-deferred, retry-scheduled, acquisition, queue-read, and
+infrastructure branches all preserve their timer, backoff, and terminal state when the
+configured logger panics. The recovery diagnostic is itself panic-isolated and contains
+only the safe `observability_error` category.
 
 Regroup failure reconciliation closes its completion barrier in a defer. Once the
 failure commit is confirmed and its finalizer finishes, the original result returns

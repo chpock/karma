@@ -49,27 +49,50 @@ func terminateManagedProcess(cmd *exec.Cmd, waitResult <-chan error, grace time.
 }
 
 func cleanupManagedProcessGroup(pid int, grace time.Duration) error {
-	if err := syscall.Kill(-pid, 0); err == nil {
-		if killErr := syscall.Kill(-pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-			return killErr
+	return cleanupManagedProcessGroupWithProbe(pid, grace, syscall.Kill)
+}
+
+func cleanupManagedProcessGroupWithProbe(pid int, grace time.Duration, probe func(int, syscall.Signal) error) error {
+	initialErr := probe(-pid, 0)
+	if initialErr != nil {
+		if errors.Is(initialErr, syscall.ESRCH) {
+			return nil
 		}
-		timer := time.NewTimer(grace)
-		defer timer.Stop()
-		for {
-			if err := syscall.Kill(-pid, 0); errors.Is(err, syscall.ESRCH) {
-				return nil
-			}
-			select {
-			case <-timer.C:
-				if killErr := syscall.Kill(-pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-					return killErr
-				}
-				return nil
-			case <-time.After(10 * time.Millisecond):
-			}
+		return initialErr
+	}
+	if killErr := probe(-pid, syscall.SIGTERM); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+		return killErr
+	}
+	if err := waitManagedProcessGroupGone(pid, grace, probe); err == nil {
+		return nil
+	} else if !errors.Is(err, errManagedProcessGroupStillPresent) {
+		return err
+	}
+	if killErr := probe(-pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+		return killErr
+	}
+	return waitManagedProcessGroupGone(pid, grace, probe)
+}
+
+var errManagedProcessGroupStillPresent = errors.New("managed process group did not disappear")
+
+func waitManagedProcessGroupGone(pid int, timeout time.Duration, probe func(int, syscall.Signal) error) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		err := probe(-pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		select {
+		case <-timer.C:
+			return errManagedProcessGroupStillPresent
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	return nil
 }
 
 func signalNotify(ch chan<- os.Signal, signals ...os.Signal) {

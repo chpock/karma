@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-19
 
-Implementation status: Implemented and independently verified on 2026-08-21.
+Implementation status: Implemented and independently accepted.
 
 ## Context
 
@@ -12,6 +12,11 @@ and the retry/recovery state machine. The remaining presentation layer still
 collapses independent conditions into one warning string, exposes an incomplete
 flat recheck snapshot, and lets worker, Store, and command wrappers emit
 overlapping events.
+
+The warning GET exposes the numeric HTTP status to its owner. An authoritative current
+401 invalidates AlertStore authentication while retaining the last confirmed warning text
+for display without controls; network, parse, and 5xx failures do not imply logout. Request
+generations make the status and response pair authoritative together.
 
 ## Decision
 

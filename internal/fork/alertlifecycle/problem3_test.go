@@ -128,6 +128,7 @@ func TestProblem3StateTransitions(t *testing.T) {
 			}
 		})
 	}
+	runCompleteRecheckStateEventMatrix(t)
 }
 
 func TestProblem3RetryableErrorCodes(t *testing.T) {

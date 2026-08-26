@@ -76,6 +76,11 @@ Alt+click still applies negative state filter only (without forced append filter
   a reason, duplicate clicks are blocked, and every action result refreshes warning state.
 - A failed warning refresh preserves the last confirmed issue set and displays the
   refresh/action error separately; only a successful warning response replaces it.
+- The warning fetch exposes its current numeric HTTP status together with the
+  generation-owned response. A current `401` invalidates AlertStore authentication but
+  retains the last confirmed issue text while hiding Retry/Abandon controls. Network,
+  parse, and `5xx` failures retain authentication and do not authorize or remove controls
+  by themselves.
 - Warning refresh requests are generation-owned: a newer refresh cancels or supersedes
   older transport, body-parse, and retry-timer results; cancellation cannot restore stale
   data, errors, loading, retry flags, or retry counters.

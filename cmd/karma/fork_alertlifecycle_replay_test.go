@@ -354,6 +354,10 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 	if err = assertProblem5IndependentImmutableModel(db, sourceJobID, activeSources, sources, controlledRules, expectedRelevantSources, expectedTargetMembers, controlledSnapshots, manifest, successorRecordedID, matcherValue, now); err != nil {
 		t.Fatal(err)
 	}
+	recordedRecheckCauseModel, err := buildProblem5RecordedRecheckCauseModel(expectedSourceCandidates, controlledRules, controlledSnapshots, successorRecordedID, matcherValue, activeSilence.SilenceID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	batchCount := 1
 	for {
@@ -376,6 +380,9 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 		t.Fatal(err)
 	}
 	if err = assertReplayPartition(db, sourceJobID, resolvedID, refiredID, expectedSourceCandidates, controlledSnapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err = assertProblem5RecordedRecheckCauseEvidence(db, sourceJobID, recordedRecheckCauseModel, replayWorkerNow); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1213,12 +1220,30 @@ func buildProblem5ReplayManifest(snapshots []alertlifecycle.LiveAlertSnapshot) [
 
 func replayInstanceMatcherValue(snapshots []alertlifecycle.LiveAlertSnapshot) string {
 	for _, snapshot := range snapshots {
+		if snapshot.State != alertlifecycle.StateActive || problem5HasRecordedSilence(snapshot.SilencedBySources) {
+			continue
+		}
+		var labels map[string]string
+		if json.Unmarshal([]byte(snapshot.LabelsJSON), &labels) == nil && labels["instance"] != "" {
+			return labels["instance"]
+		}
+	}
+	for _, snapshot := range snapshots {
 		var labels map[string]string
 		if json.Unmarshal([]byte(snapshot.LabelsJSON), &labels) == nil && labels["instance"] != "" {
 			return labels["instance"]
 		}
 	}
 	return "problem5-missing-instance"
+}
+
+func problem5HasRecordedSilence(refs []alertlifecycle.SourceSilenceRef) bool {
+	for _, ref := range refs {
+		if len(ref.SilenceIDs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func replayScopeInstance(scope problem5ReplayScope) string {
@@ -1430,6 +1455,468 @@ WHERE alert_id=? AND target=? AND old_state IS NULL AND new_state='suppressed'
 	}
 	if count != 1 {
 		return fmt.Errorf("recorded target suppression transition alert=%s target=%s rows=%d want=1", alertID, target, count)
+	}
+	return nil
+}
+
+type problem5RecordedRecheckCauseScope struct {
+	AlertID   string
+	Target    string
+	Rules     []problem5ControlledRule
+	Aggregate bool
+}
+
+func buildProblem5RecordedRecheckCauseModel(candidates []problem5IndependentCandidateInput, rules []problem5ControlledRule, snapshots []alertlifecycle.LiveAlertSnapshot, successorID, matcherValue, activeSilenceID string) ([]problem5RecordedRecheckCauseScope, error) {
+	snapshotByID := make(map[string]alertlifecycle.LiveAlertSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		snapshotByID[snapshot.AlertID] = snapshot
+	}
+	model := make([]problem5RecordedRecheckCauseScope, 0)
+	for _, candidate := range candidates {
+		if candidate.AlertID == successorID {
+			continue
+		}
+		snapshot, found := snapshotByID[candidate.AlertID]
+		if !found || snapshot.State != alertlifecycle.StateActive || problem5HasRecordedSilence(snapshot.SilencedBySources) {
+			continue
+		}
+		var labels map[string]string
+		if err := json.Unmarshal([]byte(snapshot.LabelsJSON), &labels); err != nil {
+			return nil, fmt.Errorf("recorded cause model alert=%s labels: %w", candidate.AlertID, err)
+		}
+		if labels["instance"] != matcherValue {
+			continue
+		}
+		var relevant []struct {
+			Name    string `json:"name"`
+			Cluster string `json:"cluster"`
+		}
+		if err := json.Unmarshal([]byte(candidate.RelevantSourcesJSON), &relevant); err != nil {
+			return nil, fmt.Errorf("recorded cause model alert=%s relevant sources: %w", candidate.AlertID, err)
+		}
+		relevantSources := make(map[string]struct{}, len(relevant))
+		for _, source := range relevant {
+			relevantSources[source.Name+"\x00"+source.Cluster] = struct{}{}
+		}
+		if candidate.TargetKey != "" {
+			if candidate.TargetSourceMembersJSON == nil {
+				continue
+			}
+			var memberNames []string
+			if err := json.Unmarshal([]byte(*candidate.TargetSourceMembersJSON), &memberNames); err != nil {
+				return nil, fmt.Errorf("recorded cause model alert=%s target=%s members: %w", candidate.AlertID, candidate.TargetKey, err)
+			}
+			memberSet := make(map[string]struct{}, len(memberNames))
+			for _, name := range memberNames {
+				memberSet[name] = struct{}{}
+			}
+			matched := make([]problem5ControlledRule, 0)
+			for _, rule := range rules {
+				if rule.SilenceID != activeSilenceID || rule.ObservedState != "active" || rule.ClusterID != candidate.TargetKey {
+					continue
+				}
+				if _, sourceFound := memberSet[rule.SourceName]; !sourceFound {
+					continue
+				}
+				matched = append(matched, rule)
+			}
+			if len(matched) > 0 {
+				model = append(model, problem5RecordedRecheckCauseScope{AlertID: candidate.AlertID, Target: candidate.TargetKey, Rules: matched})
+			}
+			continue
+		}
+		matched := make([]problem5ControlledRule, 0)
+		for _, rule := range rules {
+			if rule.SilenceID != activeSilenceID || rule.ObservedState != "active" {
+				continue
+			}
+			if _, sourceFound := relevantSources[rule.SourceName+"\x00"+rule.ClusterID]; !sourceFound {
+				continue
+			}
+			matched = append(matched, rule)
+		}
+		if len(matched) > 0 {
+			model = append(model, problem5RecordedRecheckCauseScope{AlertID: candidate.AlertID, Rules: matched})
+		}
+	}
+	if len(model) == 0 {
+		return nil, errors.New("recorded cause model has no promoted scopes")
+	}
+	// A target candidate can also complete the global promotion when it is the
+	// last remaining target. Keep that aggregate transition in the model even
+	// though the recheck job stores only the target candidate.
+	globalByAlert := make(map[string]problem5RecordedRecheckCauseScope)
+	for _, scope := range model {
+		if scope.Target == "" {
+			globalByAlert[scope.AlertID] = scope
+		}
+	}
+	for _, scope := range model {
+		if scope.Target == "" {
+			continue
+		}
+		if _, exists := globalByAlert[scope.AlertID]; exists {
+			continue
+		}
+		if snapshot, found := snapshotByID[scope.AlertID]; found && len(snapshot.Targets) == 1 {
+			globalByAlert[scope.AlertID] = problem5RecordedRecheckCauseScope{AlertID: scope.AlertID, Rules: scope.Rules, Aggregate: true}
+		}
+	}
+	for alertID, scope := range globalByAlert {
+		if scope.Target != "" {
+			continue
+		}
+		alreadyPresent := false
+		for _, existing := range model {
+			if existing.Target == "" && existing.AlertID == alertID {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
+			model = append(model, scope)
+		}
+	}
+	global, target, aggregate := 0, 0, 0
+	seen := make(map[string]struct{}, len(model))
+	for _, scope := range model {
+		key := scope.AlertID + "\x00" + scope.Target
+		if _, duplicate := seen[key]; duplicate {
+			return nil, fmt.Errorf("recorded cause model duplicate scope=%q", key)
+		}
+		seen[key] = struct{}{}
+		switch {
+		case scope.Target == "" && !scope.Aggregate:
+			global++
+		case scope.Aggregate:
+			aggregate++
+		default:
+			target++
+		}
+	}
+	if global != 0 || aggregate == 0 || target == 0 {
+		scopeKeys := make([]string, 0, len(model))
+		for _, scope := range model {
+			scopeKeys = append(scopeKeys, scope.AlertID+"/"+scope.Target)
+		}
+		return nil, fmt.Errorf("recorded cause model global=%d aggregate=%d target=%d want both non-empty scopes=%s", global, aggregate, target, strings.Join(scopeKeys, ","))
+	}
+	return model, nil
+}
+
+func problem5CauseFingerprintForRules(rules []problem5ControlledRule) string {
+	keys := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		keys = append(keys, fmt.Sprintf("%s:%d:%d", rule.SourceName, rule.RuleID, rule.RevisionID))
+	}
+	sort.Strings(keys)
+	raw, _ := json.Marshal(keys)
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%x", sum)
+}
+
+func assertProblem5RecordedRecheckCauseEvidence(db *sql.DB, jobID int, model []problem5RecordedRecheckCauseScope, observedAt time.Time) error {
+	wantGlobal := make(map[string]problem5RecordedRecheckCauseScope)
+	wantTarget := make(map[string]problem5RecordedRecheckCauseScope)
+	wantAggregate := make(map[string]problem5RecordedRecheckCauseScope)
+	for _, scope := range model {
+		switch {
+		case scope.Aggregate:
+			wantAggregate[scope.AlertID] = scope
+		case scope.Target == "":
+			wantGlobal[scope.AlertID] = scope
+		default:
+			wantTarget[scope.AlertID+"\x00"+scope.Target] = scope
+		}
+	}
+	globalTransitionIDs, err := assertProblem5RecordedRecheckGlobalRows(db, jobID, wantGlobal, observedAt)
+	if err != nil {
+		return err
+	}
+	targetHistoryIDs, targetTransitionIDs, err := assertProblem5RecordedRecheckTargetRows(db, jobID, wantTarget, observedAt)
+	if err != nil {
+		return err
+	}
+	aggregateTransitionIDs, err := assertProblem5RecordedRecheckAggregateRows(db, wantAggregate, targetHistoryIDs, observedAt)
+	if err != nil {
+		return err
+	}
+	expectedGlobalTransitions := make(map[int64]struct{}, len(globalTransitionIDs)+len(aggregateTransitionIDs))
+	for _, transitionID := range globalTransitionIDs {
+		expectedGlobalTransitions[transitionID] = struct{}{}
+	}
+	for transitionID := range aggregateTransitionIDs {
+		expectedGlobalTransitions[transitionID] = struct{}{}
+	}
+	if err = assertProblem5RecordedRecheckGlobalTransitionSet(db, expectedGlobalTransitions, observedAt); err != nil {
+		return err
+	}
+	return assertProblem5RecordedRecheckTargetTransitionSet(db, targetTransitionIDs, observedAt)
+}
+
+func assertProblem5RecordedRecheckGlobalRows(db *sql.DB, jobID int, expected map[string]problem5RecordedRecheckCauseScope, observedAt time.Time) (map[string]int64, error) {
+	rows, err := db.Query(`SELECT history_id,alert_id,transition_event_id,recheck_job_id,source,cause_status,cause_fingerprint,observed_at,last_confirmed_at FROM alert_suppression_cause_history WHERE recheck_job_id=? AND source='silence_recheck' ORDER BY alert_id`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(expected))
+	transitionIDs := make(map[string]int64, len(expected))
+	wantAt := observedAt.UTC().Format(time.RFC3339Nano)
+	for rows.Next() {
+		var historyID, transitionID, storedJobID int64
+		var alertID, source, status, fingerprint, observed, confirmed string
+		if err = rows.Scan(&historyID, &alertID, &transitionID, &storedJobID, &source, &status, &fingerprint, &observed, &confirmed); err != nil {
+			return nil, err
+		}
+		scope, found := expected[alertID]
+		if !found {
+			return nil, fmt.Errorf("recorded recheck global history unexpected alert=%s", alertID)
+		}
+		if _, duplicate := seen[alertID]; duplicate {
+			return nil, fmt.Errorf("recorded recheck global history duplicate alert=%s", alertID)
+		}
+		seen[alertID] = struct{}{}
+		transitionIDs[alertID] = transitionID
+		if historyID == 0 || transitionID == 0 || storedJobID != int64(jobID) || source != "silence_recheck" || status != "known" || fingerprint != problem5CauseFingerprintForRules(scope.Rules) || observed != wantAt || confirmed != wantAt {
+			return nil, fmt.Errorf("recorded recheck global history alert=%s history=%d transition=%d job=%d source=%q status=%q fingerprint=%q observed=%q confirmed=%q", alertID, historyID, transitionID, storedJobID, source, status, fingerprint, observed, confirmed)
+		}
+		members := make([]problem5RecordedLiveCauseMember, 0, len(scope.Rules))
+		for _, rule := range scope.Rules {
+			members = append(members, problem5RecordedLiveCauseMember{SourceName: rule.SourceName, ClusterID: rule.ClusterID, SilenceID: rule.SilenceID, RuleID: rule.RuleID, RevisionID: sql.NullInt64{Int64: rule.RevisionID, Valid: true}, Resolution: "known"})
+		}
+		if err = assertProblem5RecordedCauseMembers(db, "alert_suppression_cause_members", historyID, members); err != nil {
+			return nil, err
+		}
+		if err = assertProblem5RecordedRecheckGlobalTransition(db, alertID, transitionID, observedAt); err != nil {
+			return nil, err
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(seen) != len(expected) {
+		var details []string
+		for alertID := range expected {
+			var state string
+			var suppressed, live int
+			_ = db.QueryRow(`SELECT state,is_suppressed,is_live FROM alert_states WHERE alert_id=?`, alertID).Scan(&state, &suppressed, &live)
+			var targets int
+			_ = db.QueryRow(`SELECT COUNT(*) FROM alert_target_states WHERE alert_id=?`, alertID).Scan(&targets)
+			var histories string
+			_ = db.QueryRow(`SELECT COALESCE(GROUP_CONCAT(source || ':' || COALESCE(recheck_job_id, 0)), '') FROM alert_suppression_cause_history WHERE alert_id=?`, alertID).Scan(&histories)
+			details = append(details, fmt.Sprintf("%s state=%s suppressed=%d live=%d targets=%d histories=%s", alertID, state, suppressed, live, targets, histories))
+		}
+		return nil, fmt.Errorf("recorded recheck global histories=%d want=%d (%s)", len(seen), len(expected), strings.Join(details, "; "))
+	}
+	return transitionIDs, nil
+}
+
+func assertProblem5RecordedRecheckTargetRows(db *sql.DB, jobID int, expected map[string]problem5RecordedRecheckCauseScope, observedAt time.Time) (map[string]int64, map[string]int64, error) {
+	rows, err := db.Query(`SELECT history_id,alert_id,target,target_transition_event_id,recheck_job_id,source,cause_status,cause_fingerprint,observed_at,last_confirmed_at FROM alert_target_suppression_cause_history WHERE recheck_job_id=? AND source='silence_recheck' ORDER BY alert_id,target`, jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(expected))
+	historyIDs := make(map[string]int64, len(expected))
+	transitionIDs := make(map[string]int64, len(expected))
+	wantAt := observedAt.UTC().Format(time.RFC3339Nano)
+	for rows.Next() {
+		var historyID, transitionID, storedJobID int64
+		var alertID, target, source, status, fingerprint, observed, confirmed string
+		if err = rows.Scan(&historyID, &alertID, &target, &transitionID, &storedJobID, &source, &status, &fingerprint, &observed, &confirmed); err != nil {
+			return nil, nil, err
+		}
+		key := alertID + "\x00" + target
+		scope, found := expected[key]
+		if !found {
+			return nil, nil, fmt.Errorf("recorded recheck target history unexpected scope=%s", key)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return nil, nil, fmt.Errorf("recorded recheck target history duplicate scope=%s", key)
+		}
+		seen[key] = struct{}{}
+		historyIDs[key] = historyID
+		transitionIDs[key] = transitionID
+		if historyID == 0 || transitionID == 0 || storedJobID != int64(jobID) || source != "silence_recheck" || status != "known" || fingerprint != problem5CauseFingerprintForRules(scope.Rules) || observed != wantAt || confirmed != wantAt {
+			return nil, nil, fmt.Errorf("recorded recheck target history scope=%s history=%d transition=%d job=%d source=%q status=%q fingerprint=%q observed=%q confirmed=%q", key, historyID, transitionID, storedJobID, source, status, fingerprint, observed, confirmed)
+		}
+		members := make([]problem5RecordedLiveCauseMember, 0, len(scope.Rules))
+		for _, rule := range scope.Rules {
+			members = append(members, problem5RecordedLiveCauseMember{SourceName: rule.SourceName, ClusterID: rule.ClusterID, SilenceID: rule.SilenceID, RuleID: rule.RuleID, RevisionID: sql.NullInt64{Int64: rule.RevisionID, Valid: true}, Resolution: "known"})
+		}
+		if err = assertProblem5RecordedCauseMembers(db, "alert_target_suppression_cause_members", historyID, members); err != nil {
+			return nil, nil, err
+		}
+		if err = assertProblem5RecordedRecheckTargetTransition(db, alertID, target, transitionID, observedAt); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(seen) != len(expected) {
+		return nil, nil, fmt.Errorf("recorded recheck target histories=%d want=%d", len(seen), len(expected))
+	}
+	return historyIDs, transitionIDs, nil
+}
+
+func assertProblem5RecordedRecheckAggregateRows(db *sql.DB, expected map[string]problem5RecordedRecheckCauseScope, targetHistoryIDs map[string]int64, observedAt time.Time) (map[int64]struct{}, error) {
+	wantAt := observedAt.UTC().Format(time.RFC3339Nano)
+	rows, err := db.Query(`SELECT aggregate_id,alert_id,transition_event_id,cause_fingerprint,observed_at FROM alert_target_aggregate_suppression_history WHERE observed_at=? ORDER BY alert_id,aggregate_id`, wantAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(expected))
+	transitions := make(map[int64]struct{}, len(expected))
+	for rows.Next() {
+		var aggregateID, transitionID int64
+		var alertID, fingerprint, observed string
+		if err = rows.Scan(&aggregateID, &alertID, &transitionID, &fingerprint, &observed); err != nil {
+			return nil, err
+		}
+		if _, found := expected[alertID]; !found {
+			return nil, fmt.Errorf("recorded recheck aggregate unexpected alert=%s", alertID)
+		}
+		if _, duplicate := seen[alertID]; duplicate {
+			return nil, fmt.Errorf("recorded recheck aggregate duplicate alert=%s", alertID)
+		}
+		seen[alertID] = struct{}{}
+		if aggregateID == 0 || transitionID == 0 || observed != wantAt {
+			return nil, fmt.Errorf("recorded recheck aggregate alert=%s id=%d transition=%d observed=%q", alertID, aggregateID, transitionID, observed)
+		}
+		linkRows, queryErr := db.Query(`SELECT target_history_id FROM alert_target_aggregate_suppression_links WHERE aggregate_id=? ORDER BY target_history_id`, aggregateID)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		var links []int64
+		for linkRows.Next() {
+			var historyID int64
+			if err = linkRows.Scan(&historyID); err != nil {
+				linkRows.Close()
+				return nil, err
+			}
+			links = append(links, historyID)
+		}
+		if err = linkRows.Err(); err != nil {
+			linkRows.Close()
+			return nil, err
+		}
+		linkRows.Close()
+		expectedLinks := make([]int64, 0)
+		for key, historyID := range targetHistoryIDs {
+			if strings.HasPrefix(key, alertID+"\x00") {
+				expectedLinks = append(expectedLinks, historyID)
+			}
+		}
+		sort.Slice(expectedLinks, func(i, j int) bool { return expectedLinks[i] < expectedLinks[j] })
+		if !reflect.DeepEqual(links, expectedLinks) {
+			return nil, fmt.Errorf("recorded recheck aggregate alert=%s links=%v want=%v", alertID, links, expectedLinks)
+		}
+		raw, _ := json.Marshal(expectedLinks)
+		sum := sha256.Sum256(raw)
+		if fingerprint != fmt.Sprintf("sha256:%x", sum) {
+			return nil, fmt.Errorf("recorded recheck aggregate alert=%s id=%d transition=%d fingerprint=%q", alertID, aggregateID, transitionID, fingerprint)
+		}
+		transitions[transitionID] = struct{}{}
+		if err = assertProblem5RecordedRecheckGlobalTransition(db, alertID, transitionID, observedAt); err != nil {
+			return nil, err
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(seen) != len(expected) {
+		return nil, fmt.Errorf("recorded recheck aggregates=%d want=%d", len(seen), len(expected))
+	}
+	return transitions, nil
+}
+
+func assertProblem5RecordedRecheckGlobalTransition(db *sql.DB, alertID string, transitionID int64, observedAt time.Time) error {
+	var storedAlert, oldState, newState, oldRaw, newRaw, changedAt, source, changedBy, reason, reasonText sql.NullString
+	var oldLive, newLive, oldSuppressed, newSuppressed, oldResolved, newResolved sql.NullInt64
+	err := db.QueryRow(`SELECT alert_id,old_state,new_state,old_raw_state,new_raw_state,old_is_live,new_is_live,old_is_suppressed,new_is_suppressed,old_is_resolved,new_is_resolved,changed_at,change_source,changed_by,reason_code,reason_text FROM alert_events WHERE id=?`, transitionID).Scan(&storedAlert, &oldState, &newState, &oldRaw, &newRaw, &oldLive, &newLive, &oldSuppressed, &newSuppressed, &oldResolved, &newResolved, &changedAt, &source, &changedBy, &reason, &reasonText)
+	if err != nil {
+		return err
+	}
+	if storedAlert.String != alertID || oldState.String != "inactive" || newState.String != "suppressed" || oldRaw.String != "active" || newRaw.String != "active" || oldLive.Int64 != 0 || newLive.Int64 != 0 || oldSuppressed.Int64 != 0 || newSuppressed.Int64 != 1 || oldResolved.Int64 != 0 || newResolved.Int64 != 0 || changedAt.String != observedAt.UTC().Format(time.RFC3339Nano) || source.String != "silence" || changedBy.Valid || reason.String != "silence_match_promoted" || reasonText.Valid {
+		return fmt.Errorf("recorded recheck global transition alert=%s id=%d row=%q/%q/%q/%q live=%d/%d suppressed=%d/%d resolved=%d/%d at=%q source=%q changed_by=%v reason=%q reason_text=%v", alertID, transitionID, oldState.String, newState.String, oldRaw.String, newRaw.String, oldLive.Int64, newLive.Int64, oldSuppressed.Int64, newSuppressed.Int64, oldResolved.Int64, newResolved.Int64, changedAt.String, source.String, changedBy.Valid, reason.String, reasonText.Valid)
+	}
+	return nil
+}
+
+func assertProblem5RecordedRecheckTargetTransition(db *sql.DB, alertID, target string, transitionID int64, observedAt time.Time) error {
+	var storedAlert, storedTarget, oldState, newState, oldRaw, newRaw, oldRetiredAt, newRetiredAt, changedAt, reason sql.NullString
+	var oldLive, newLive, oldSuppressed, newSuppressed, oldResolved, newResolved sql.NullInt64
+	err := db.QueryRow(`SELECT alert_id,target,old_state,new_state,old_raw_state,new_raw_state,old_is_live,new_is_live,old_is_suppressed,new_is_suppressed,old_is_resolved,new_is_resolved,old_retired_at,new_retired_at,changed_at,reason_code FROM alert_target_events WHERE id=?`, transitionID).Scan(&storedAlert, &storedTarget, &oldState, &newState, &oldRaw, &newRaw, &oldLive, &newLive, &oldSuppressed, &newSuppressed, &oldResolved, &newResolved, &oldRetiredAt, &newRetiredAt, &changedAt, &reason)
+	if err != nil {
+		return err
+	}
+	if storedAlert.String != alertID || storedTarget.String != target || oldState.String != "inactive" || newState.String != "suppressed" || oldRaw.String != "active" || newRaw.String != "active" || oldLive.Int64 != 0 || newLive.Int64 != 0 || oldSuppressed.Int64 != 0 || newSuppressed.Int64 != 1 || oldResolved.Int64 != 0 || newResolved.Int64 != 0 || oldRetiredAt.Valid || newRetiredAt.Valid || changedAt.String != observedAt.UTC().Format(time.RFC3339Nano) || reason.String != "silence_match_promoted" {
+		return fmt.Errorf("recorded recheck target transition alert=%s target=%s id=%d row=%q/%q/%q/%q live=%d/%d suppressed=%d/%d resolved=%d/%d retired=%v/%v at=%q reason=%q", alertID, target, transitionID, oldState.String, newState.String, oldRaw.String, newRaw.String, oldLive.Int64, newLive.Int64, oldSuppressed.Int64, newSuppressed.Int64, oldResolved.Int64, newResolved.Int64, oldRetiredAt, newRetiredAt, changedAt.String, reason.String)
+	}
+	return nil
+}
+
+func assertProblem5RecordedRecheckGlobalTransitionSet(db *sql.DB, expected map[int64]struct{}, observedAt time.Time) error {
+	rows, err := db.Query(`SELECT id FROM alert_events WHERE changed_at=? AND reason_code='silence_match_promoted' ORDER BY id`, observedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	seen := make(map[int64]struct{}, len(expected))
+	for rows.Next() {
+		var transitionID int64
+		if err = rows.Scan(&transitionID); err != nil {
+			return err
+		}
+		if _, found := expected[transitionID]; !found {
+			return fmt.Errorf("recorded recheck global transition unexpected id=%d", transitionID)
+		}
+		if _, duplicate := seen[transitionID]; duplicate {
+			return fmt.Errorf("recorded recheck global transition duplicate id=%d", transitionID)
+		}
+		seen[transitionID] = struct{}{}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("recorded recheck global transitions=%d want=%d", len(seen), len(expected))
+	}
+	return nil
+}
+
+func assertProblem5RecordedRecheckTargetTransitionSet(db *sql.DB, expected map[string]int64, observedAt time.Time) error {
+	rows, err := db.Query(`SELECT id,alert_id,target FROM alert_target_events WHERE changed_at=? AND reason_code='silence_match_promoted' ORDER BY id`, observedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(expected))
+	for rows.Next() {
+		var transitionID int64
+		var alertID, target string
+		if err = rows.Scan(&transitionID, &alertID, &target); err != nil {
+			return err
+		}
+		key := alertID + "\x00" + target
+		wantID, found := expected[key]
+		if !found || wantID != transitionID {
+			return fmt.Errorf("recorded recheck target transition unexpected key=%s id=%d", key, transitionID)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("recorded recheck target transition duplicate key=%s", key)
+		}
+		seen[key] = struct{}{}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("recorded recheck target transitions=%d want=%d", len(seen), len(expected))
 	}
 	return nil
 }
@@ -1846,20 +2333,40 @@ func captureProblem5ControlledRules(db *sql.DB, activeSources []alertlifecycle.S
 	}
 	for index := range expected {
 		rule := &expected[index]
-		var sourceUpdatedAt sql.NullString
+		var actual problem5ControlledRule
+		var sourceUpdatedAt, createdBy, comment, annotations, ticketID, ticketURL sql.NullString
 		if err = db.QueryRow(`
-			SELECT r.rule_id, ass.revision_id, rev.episode_id, rev.revision_number, rev.source_updated_at
+			SELECT r.rule_id, r.cluster_id, r.silence_id, ass.revision_id, ass.observed_state,
+			       rev.episode_id, rev.revision_number, rev.content_fingerprint, rev.evaluation_fingerprint,
+			       rev.matchers_json, rev.starts_at, rev.ends_at, rev.source_updated_at,
+			       rev.created_by, rev.comment, rev.annotations_json, rev.ticket_id, rev.ticket_url
 			FROM silence_rules r
 			JOIN alertmanager_source_silences ass ON ass.rule_id=r.rule_id
 			JOIN silence_revisions rev ON rev.revision_id=ass.revision_id AND rev.rule_id=ass.rule_id
 			WHERE ass.source_name=? AND r.cluster_id=? AND r.silence_id=?
 			ORDER BY rev.revision_number DESC LIMIT 1`, rule.SourceName, rule.ClusterID, rule.SilenceID).Scan(
-			&rule.RuleID, &rule.RevisionID, &rule.EpisodeID, &rule.RevisionNumber, &sourceUpdatedAt); err != nil {
+			&actual.RuleID, &actual.ClusterID, &actual.SilenceID, &actual.RevisionID, &actual.ObservedState,
+			&actual.EpisodeID, &actual.RevisionNumber, &actual.ContentFingerprint, &actual.EvaluationFingerprint,
+			&actual.MatchersJSON, &actual.StartsAt, &actual.EndsAt, &sourceUpdatedAt,
+			&createdBy, &comment, &annotations, &ticketID, &ticketURL,
+		); err != nil {
 			return nil, fmt.Errorf("controlled source rule %s/%s: %w", rule.SourceName, rule.SilenceID, err)
 		}
-		if sourceUpdatedAt.Valid != (rule.SourceUpdatedAt != "") || sourceUpdatedAt.Valid && sourceUpdatedAt.String != rule.SourceUpdatedAt {
-			return nil, fmt.Errorf("controlled source rule %s/%s updated_at=%q want=%q", rule.SourceName, rule.SilenceID, sourceUpdatedAt.String, rule.SourceUpdatedAt)
+		actual.SourceName = rule.SourceName
+		actual.TargetKey = rule.TargetKey
+		actual.SourceUpdatedAt = sourceUpdatedAt.String
+		actual.CreatedBy = createdBy.String
+		actual.Comment = comment.String
+		actual.AnnotationsJSON = annotations.String
+		actual.TicketID = ticketID.String
+		actual.TicketURL = ticketURL.String
+		if actual.RuleID <= 0 || actual.RevisionID <= 0 || actual.EpisodeID <= 0 || actual.RevisionNumber != 1 || actual.ClusterID != rule.ClusterID || actual.SilenceID != rule.SilenceID || actual.TargetKey != rule.TargetKey || actual.ObservedState != rule.ObservedState || actual.ContentFingerprint != rule.ContentFingerprint || actual.EvaluationFingerprint != rule.EvaluationFingerprint || actual.MatchersJSON != rule.MatchersJSON || actual.StartsAt != rule.StartsAt || actual.EndsAt != rule.EndsAt || !replayNullStringEqual(sourceUpdatedAt, rule.SourceUpdatedAt) || !replayNullStringEqual(createdBy, rule.CreatedBy) || !replayNullStringEqual(comment, rule.Comment) || !replayNullStringEqual(annotations, rule.AnnotationsJSON) || !replayNullStringEqual(ticketID, rule.TicketID) || !replayNullStringEqual(ticketURL, rule.TicketURL) {
+			return nil, fmt.Errorf("controlled source rule %s/%s has incomplete semantic binding actual=%+v want=%+v", rule.SourceName, rule.SilenceID, actual, *rule)
 		}
+		rule.RuleID = actual.RuleID
+		rule.RevisionID = actual.RevisionID
+		rule.EpisodeID = actual.EpisodeID
+		rule.RevisionNumber = actual.RevisionNumber
 	}
 	return expected, nil
 }

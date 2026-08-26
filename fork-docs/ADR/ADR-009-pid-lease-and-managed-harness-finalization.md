@@ -24,10 +24,18 @@ observe a successful exit before a cleanup failure is recorded.
    primitives to the shared release state machine.
    Ownership loss is explicitly classified at the phase that proved it: retained
    identity capture, current-path open, or current-handle identity inspection.
+   A privileged replacement after the final current-handle identity comparison but
+   before path deletion is outside the local single-operator threat model.
 4. The managed wrapper performs process-group cleanup before publishing `exit`.
    Cleanup failures are atomically written to `harness-error` before `exit` is
    published. Exit-marker failures are persisted as harness failures and return
    the protocol failure code.
+   A process-group probe error other than confirmed `ESRCH` is a cleanup failure;
+   it must never be treated as proof that the group disappeared.
+   The force-kill verification fixture starts cleanup only after a causal readiness
+   handshake confirms both the TERM-resistant parent and descendant are installed;
+   it records TERM, SIGKILL, confirmed group disappearance, and exactly one primary
+   child reap.
 5. These rules are test-harness and process-ownership infrastructure only. They do
    not change lifecycle job state, retry policy, schema, or application APIs.
 
@@ -48,3 +56,5 @@ observe a successful exit before a cleanup failure is recorded.
 - `TestManagedFinalizeStatusFailsClosedWhenExitMarkerWriteFails`
 - `TestManagedKarmaStartupTimeoutReapsLiveChildWithoutPID`
 - Windows PID lease cross-compilation and native Windows filesystem tests
+- `TestManagedProcessGroupUnexpectedProbeErrorFailsCleanup`
+- `TestManagedProcessGroupMarkerFollowsConfirmedKillAndReap`

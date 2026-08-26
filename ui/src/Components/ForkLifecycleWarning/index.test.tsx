@@ -110,14 +110,19 @@ const renderWarning = () =>
   render(<ForkLifecycleWarning alertStore={alertStore} />);
 
 const setWarningResponse = (response: unknown) => {
-  setWarningState(response, null);
+  setWarningState(response, null, null);
 };
 
-const setWarningState = (response: unknown, error: string | null) => {
+const setWarningState = (
+  response: unknown,
+  error: string | null,
+  status: number | null = null,
+) => {
   useFetchGetMock.fetch.setMockedData({
     ...useFetchGetMock.fetch.mockedData,
     response: response as never,
     error,
+    status,
     isLoading: false,
   });
 };
@@ -207,6 +212,55 @@ describe("<ForkLifecycleWarning />", () => {
     expect(screen.getByText("Recheck queue is blocked")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
+  });
+
+  it("invalidates authentication and hides stale controls on a warning 401", async () => {
+    setWarningState(blockedWarning, null, 401);
+
+    renderWarning();
+    await act(async () => {});
+
+    expect(alertStore.info.authenticationReady).toBe(false);
+    expect(screen.getByText("Recheck queue is blocked")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Abandon" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["network", null],
+    ["server", 500],
+  ])("preserves authentication and controls for warning %s failures", async (_name, status) => {
+    setWarningState(blockedWarning, "request failed", status);
+
+    renderWarning();
+    await act(async () => {});
+
+    expect(alertStore.info.authenticationReady).toBe(true);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
+  });
+
+  it("restores controls only after an authenticated AlertStore response", async () => {
+    setWarningState(blockedWarning, null, 401);
+    renderWarning();
+    await act(async () => {});
+    expect(alertStore.info.authenticationReady).toBe(false);
+
+    setWarningState(blockedWarning, null, 200);
+    const recovery = EmptyAPIResponse();
+    recovery.filters = [];
+    recovery.authentication = {
+      enabled: true,
+      username: "recovered@example.com",
+    };
+    await act(async () => {
+      alertStore.parseAPIResponse(recovery);
+    });
+
+    await waitFor(() => {
+      expect(alertStore.info.authenticationReady).toBe(true);
+      expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    });
   });
 
   it("confirms abandonment, sends the reason, and refreshes after success", async () => {

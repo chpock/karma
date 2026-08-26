@@ -97,32 +97,92 @@ Resolved merge visibility:
 - `suppressedBreakdown` (`current`/`past`)
 - regroup status/progress and expected-state fields
 - DB size/page/freelist and housekeeping timestamps
-- silence-history TTL, HA-inconsistent targets, and the nested recheck snapshot:
-  `recheck.queueDepth` plus nullable `recheck.headJob`. The head contains only the
-  oldest nonterminal FIFO job and includes its immutable trigger, status/timestamps,
-  candidate totals/outcomes, attempt/retry/recovery counters, next-attempt time, and
-  first/last typed error snapshots.
+- silence-history TTL and HA-inconsistent targets
+
+The exact recheck projection is:
+
+```json
+{
+  "recheck": {
+    "queueDepth": 1,
+    "headJob": {
+      "jobId": 547,
+      "triggerType": "alert_became_eligible",
+      "status": "retry_wait",
+      "createdAt": "2026-08-16T12:00:00Z",
+      "startedAt": "2026-08-16T12:00:01Z",
+      "finishedAt": null,
+      "totalCandidates": 20,
+      "processedCandidates": 5,
+      "outcomeCounts": {
+        "promoted": 3,
+        "stale": 1,
+        "ineligible": 1,
+        "missingLabels": 0,
+        "incompleteSources": 0
+      },
+      "attemptCount": 2,
+      "retryCount": 1,
+      "consecutiveRetryCount": 1,
+      "nextAttemptAt": "2026-08-16T12:00:06Z",
+      "firstError": {
+        "class": "transient_infrastructure",
+        "stage": "persist_candidate",
+        "at": "2026-08-16T12:00:01Z",
+        "message": "sanitized error"
+      },
+      "lastError": {
+        "class": "transient_infrastructure",
+        "stage": "persist_candidate",
+        "at": "2026-08-16T12:00:01Z",
+        "message": "sanitized error"
+      },
+      "recoveryCount": 0
+    }
+  }
+}
+```
+
+`headJob` is either the oldest nonterminal FIFO job or `null`. Within a head job,
+`startedAt`, `finishedAt`, and `nextAttemptAt` are nullable; `firstError` and
+`lastError` are each either `null` or the complete four-string object shown above.
+All other fields are non-null, and timestamps are RFC3339Nano UTC strings. The
+`recheck` object is always present. With disabled storage it is exactly
+`{"queueDepth":0,"headJob":null}`.
 
 ## 5. Warning endpoint
 
 - `GET /alerts-history/warning`
 
 Returns persistent-warning status for the DB expected-state contract and all
-simultaneous lifecycle conditions. The exact top-level shape is:
+simultaneous lifecycle conditions. The exact top-level fields are:
 
 - `dbExpectedState`
-- `issues[]`, with each item containing `kind`, `severity`, `summary`, and strict
-  discriminated `metadata` for `regroup_out_of_date`, `regroup_in_progress`,
-  `regroup_failed`, `silence_ha_inconsistent`, `recheck_retrying`, or
-  `recheck_blocked`.
+- `issues`
 - `status` and `storageEnabled`
 
-Issues are returned in stable contract order and the UI renders every issue rather
-than selecting one reason. UI controls are available only for a failed recheck head
-and an authorized session; mutation results always trigger a fresh warning read. Stats
-and warning projections are read from one SQLite read transaction, so regroup and
-recheck fields cannot be mixed across commits. If a durable error tuple is incomplete,
-the endpoint fails closed instead of returning partial internals.
+Each issue contains exactly `kind`, `severity`, `summary`, and `metadata`. Metadata is
+a strict discriminated union:
+
+| Kind | Severity | Exact metadata fields |
+|---|---|---|
+| `regroup_out_of_date` | `warning` | `storedFingerprint:string`, `expectedFingerprint:string` |
+| `regroup_in_progress` | `warning` | `processed:number`, `total:number` |
+| `regroup_failed` | `error` | `error:string`, `processed:number`, `total:number` |
+| `silence_ha_inconsistent` | `warning` | `targetNames:string[]`, sorted lexically by logical target/cluster ID |
+| `recheck_retrying` | `warning` | `jobId:number`, `status:"retry_wait"`, `retryCount:number`, `nextAttemptAt:string`, `lastFailureStage:string` |
+| `recheck_blocked` | `error` | `jobId:number`, `status:"failed"`, `firstFailureStage:string`, `firstFailureAt:string` |
+
+`severity` is only `error` or `warning`. The endpoint returns every simultaneous
+issue, sorted by `error` before `warning` and then lexically by `kind`. It returns
+`issues: []`, never `null`, when expected state is healthy or storage is disabled.
+Warning metadata timestamps are RFC3339Nano UTC strings.
+The UI renders every issue rather than selecting one reason. UI controls are available
+only for a failed recheck head and an authorized session; mutation results always
+trigger a fresh warning read. Stats and warning projections are read from one SQLite
+read transaction, so regroup and recheck fields cannot be mixed across commits. If a
+durable error tuple is incomplete, the endpoint fails closed instead of returning
+partial internals.
 
 ## 6. Recheck operator recovery
 
@@ -137,7 +197,8 @@ Both accept one strict JSON object, limited to 4096 bytes:
 {"requestId":"opaque-client-id","reason":"optional retry reason"}
 ```
 
-Abandon requires a non-empty trimmed reason. `requestId` is 1-128 ASCII characters from
+Abandon requires a non-empty trimmed reason. `requestId` is an exact, non-normalized value
+of 1-128 ASCII characters from
 letters, digits, `.`, `_`, `:`, and `-`; reasons are trimmed UTF-8 strings at most 1024
 bytes. The object decoder is case-sensitive and rejects duplicate keys, case-variant
 keys, unknown fields, null/non-string values, invalid UTF-8, trailing JSON values, and
@@ -152,7 +213,9 @@ state/action/request-fingerprint conflict is HTTP 409. Every post-authentication
 4xx/5xx error uses a stable safe category and never echoes SQL, request bodies, tokens, or
 operator reasons.
 
-Successful first requests and exact replays return HTTP 200:
+A successfully applied operator action and its exact replay both return HTTP 200 with
+the originally recorded result. That result has `applied:true`; there is no successful
+`applied:false` branch:
 
 ```json
 {"status":"success","jobId":547,"action":"retry","requestId":"opaque-client-id","applied":true,"currentStatus":"queued"}

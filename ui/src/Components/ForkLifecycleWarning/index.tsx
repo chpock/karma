@@ -111,7 +111,7 @@ const operatorErrorMessage = async (response: Response): Promise<string> => {
 
 const ForkLifecycleWarning: FC<{ alertStore: AlertStore }> = observer(
   ({ alertStore }) => {
-    const { response, error, get } = useFetchGet<WarningResponseT>(
+    const { response, error, status, get } = useFetchGet<WarningResponseT>(
       FormatBackendURI("alerts-history/warning"),
       {
         deps: [alertStore.info.timestamp],
@@ -129,6 +129,12 @@ const ForkLifecycleWarning: FC<{ alertStore: AlertStore }> = observer(
         setConfirmedResponse(response);
       }
     }, [response]);
+
+    useEffect(() => {
+      if (status === 401) {
+        alertStore.info.invalidateAuthentication();
+      }
+    }, [alertStore, status]);
 
     if (!confirmedResponse) return null;
     if (!confirmedResponse.storageEnabled) return null;

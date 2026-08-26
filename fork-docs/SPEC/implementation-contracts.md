@@ -171,6 +171,36 @@ Required checks for this model:
   shutdown is carried as an explicit cancellation cause; external cancellation is
   warning-level and cannot be classified as normal shutdown by suffix matching.
 
+### 8.1 Recheck candidate classification
+
+The worker loads pending candidates only by immutable job membership and terminal
+outcome, never by current alert eligibility. Each candidate receives one terminal
+outcome and increments exactly one corresponding parent counter in the same
+transaction. Missing observation tokens are terminal and must never be promoted by an
+`IS NULL` CAS branch.
+
+Classification uses this exact priority:
+
+1. missing current global alert;
+2. missing required observation token;
+3. stale global observation token;
+4. missing current target for target-scoped work;
+5. retired target;
+6. stale target observation token;
+7. already resolved;
+8. already suppressed;
+9. other ineligible semantic state;
+10. missing or invalid pinned labels;
+11. incomplete pinned source coverage;
+12. no matching pinned rule;
+13. promotion CAS; and
+14. promoted.
+
+If the promotion CAS affects zero rows, the worker re-reads global and target semantic
+state in the same transaction and applies the same priority to classify the candidate
+as stale observation or ineligible state. The constrained terminal `outcome` is the
+complete machine-readable reason; free-form outcome reasons are not stored.
+
 ## 9. Docs and schema contract
 
 - Schema and API/UI contracts must be synced in `fork-docs/SPEC/`.

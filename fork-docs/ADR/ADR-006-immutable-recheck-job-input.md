@@ -52,6 +52,10 @@ after comparing the complete canonical parent, rule, and candidate input.
 The old `open_context_fingerprint` uniqueness rule is removed. Multiple open jobs with
 the same source context are valid when their trigger or candidate observation differs.
 
+Canonicalization and SHA-256 golden vectors must distinguish nil from empty values and
+global scope (an empty target key) from target scope (a non-empty target key). They must
+also cover reordered rules and candidates and RFC3339Nano UTC timestamp encoding.
+
 ### Immutable rules and candidates
 
 `silence_recheck_job_rules` remains immutable and stores the exact successful-source,
@@ -69,9 +73,23 @@ candidate stores:
 - nullable `processed_at`; and
 - constrained nullable terminal `outcome`.
 
+`target_key` is `TEXT NOT NULL`, and the empty string is the only global-scope value.
+For global scope, target-source-member snapshot fields must be null. For target scope,
+the exact target-source-member snapshot must be present. A target `last_seen_at` may
+legitimately be null, so timestamp nullability never distinguishes global from target
+scope.
+
 Candidate rows have no foreign keys to mutable global or target current-state tables.
 They survive alert TTL and max-alert eviction. They may reference the immutable job
 parent and, where required by existing history retention, the pinned silence revisions.
+
+An observation token is the pinned `last_seen_at` value together with the semantic-state
+predicates used by the promotion CAS, not a generic version column. A normal poll-created
+inactive global or target row has a non-null `last_seen_at`. A candidate whose
+compatibility or nonstandard source row lacks that value remains in immutable accounting
+and terminates as `missing_observation_token`; it is never promoted through an `IS NULL`
+CAS branch. Generic monotonically increasing global or target version fields are not
+part of this design.
 
 The candidate outcome values are exactly:
 
@@ -81,9 +99,17 @@ The candidate outcome values are exactly:
 `incomplete_source_coverage`, `retired_target`, `already_suppressed`, and
 `already_resolved`.
 
-The parent counters are `promoted_candidates`, `stale_conflicts`,
-`skipped_ineligible`, `skipped_missing_labels`, and `skipped_incomplete_sources`.
-Every terminal outcome maps to exactly one counter, and:
+Every terminal outcome maps to exactly one parent counter:
+
+| Parent counter | Candidate outcomes |
+|---|---|
+| `promoted_candidates` | `promoted` |
+| `stale_conflicts` | `stale_alert_observation`, `stale_target_observation` |
+| `skipped_ineligible` | `missing_observation_token`, `ineligible_state`, `missing_current_alert`, `missing_current_target`, `no_matching_rule`, `retired_target`, `already_suppressed`, `already_resolved` |
+| `skipped_missing_labels` | `missing_labels`, `invalid_labels` |
+| `skipped_incomplete_sources` | `incomplete_source_coverage` |
+
+The counters must satisfy:
 
 ```text
 processed_candidates = promoted_candidates

@@ -20,6 +20,7 @@ type responseT =
 interface mockedDataT {
   response: undefined | responseT;
   error: undefined | null | string;
+  status?: undefined | null | number;
   isLoading: undefined | boolean;
   isRetrying: undefined | boolean;
   retryCount: undefined | number;
@@ -52,6 +53,7 @@ const MockFetchStats: mockFetchStatsT = {
     this.mockedData = {
       response: undefined,
       error: undefined,
+      status: undefined,
       isLoading: undefined,
       isRetrying: undefined,
       retryCount: undefined,
@@ -62,6 +64,7 @@ const MockFetchStats: mockFetchStatsT = {
   mockedData: {
     response: undefined,
     error: undefined,
+    status: undefined,
     isLoading: undefined,
     isRetrying: undefined,
     retryCount: undefined,
@@ -79,6 +82,7 @@ const useFetchGetMock = (
 ): FetchGetResultT<responseT> => {
   const [response, setResponse] = useState(null as responseT);
   const [error] = useState(null);
+  const [status] = useState<null | number>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRetrying] = useState<boolean>(false);
 
@@ -247,6 +251,10 @@ const useFetchGetMock = (
       MockFetchStats.mockedData.error !== undefined
         ? MockFetchStats.mockedData.error
         : error,
+    status:
+      MockFetchStats.mockedData.status !== undefined
+        ? MockFetchStats.mockedData.status
+        : status,
     isLoading:
       MockFetchStats.mockedData.isLoading !== undefined
         ? MockFetchStats.mockedData.isLoading

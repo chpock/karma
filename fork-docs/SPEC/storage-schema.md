@@ -118,13 +118,26 @@ Current schema version:
 
 - `1`
 
-This preview project supports only schema v1. Startup creates schema v1 in an empty
-database and reopens an existing v1 database without changing its shape. Any other
-schema version, missing layout fingerprint, or layout fingerprint mismatch is
-rejected without modification. The application-owned `sqlite_schema` rows,
-including tables, indexes, triggers, and views, are canonicalized and hashed;
-fresh bootstrap stores the expected hash and existing
-databases must match both the stored and compile-time hash.
+This preview project supports only schema v1. The logical schema version remains `1`,
+and `schema_layout_fingerprint` stores the compile-time-checked SHA-256 layout value.
+The actual fingerprint is computed from sorted application-owned `sqlite_schema` rows
+represented as typed JSON records containing `type`, `name`, `tbl_name`, and non-null
+`sql`. Objects whose names start with `sqlite_` are excluded; every application table,
+explicit index, trigger, and view is included. SQL tokens and constraints are not
+normalized away.
+
+For an empty database, startup applies the complete DDL in one immediate transaction,
+computes the actual fingerprint, requires it to equal the compile-time expected value,
+and then writes `schema_version` and `schema_layout_fingerprint` in that transaction.
+For a non-empty database, startup computes the actual fingerprint and reads both
+metadata values before executing any DDL. The actual, stored, and compile-time
+fingerprints must be identical.
+
+Any other schema version is rejected without modification. An older v1 layout that
+lacks the fingerprint or differs in tables, columns, constraints, or indexes is also
+rejected. The error must clearly instruct the operator to stop Karma and recreate the
+disposable database. Startup must not run `CREATE TABLE IF NOT EXISTS` against an
+incompatible v1 layout, delete the database, migrate it, or partially repair it.
 
 Design references:
 

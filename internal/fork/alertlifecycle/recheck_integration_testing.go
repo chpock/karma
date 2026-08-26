@@ -22,6 +22,60 @@ type RecheckIntegrationTestHooks struct {
 	OperationToken           func() (string, error)
 }
 
+// RecheckPendingStateSnapshot is a test-only copy of process-local recheck handoff state.
+// It is intentionally not used by runtime code or exposed through an application API.
+type RecheckPendingStateSnapshot struct {
+	FailurePresent              bool
+	FailureJobID                int64
+	FailureAttemptToken         string
+	FailureAttemptNumber        int
+	FailureOperation            string
+	FailureResultReady          bool
+	FailureStatus               string
+	FailureDisposition          RecheckBatchDisposition
+	FailureCompletionCommitted  bool
+	FailureCompletionFinalized  bool
+	OperatorPresent             bool
+	OperatorJobID               int64
+	OperatorRequestID           string
+	OperatorCompletionCommitted bool
+	OperatorCompletionFinalized bool
+}
+
+// RecheckPendingStateSnapshot returns process-local state for no-effects integration tests.
+func (s *Store) RecheckPendingStateSnapshot() RecheckPendingStateSnapshot {
+	if s == nil {
+		return RecheckPendingStateSnapshot{}
+	}
+	s.recheckStateMu.Lock()
+	defer s.recheckStateMu.Unlock()
+	snapshot := RecheckPendingStateSnapshot{}
+	if pending := s.pendingRecheckFailure; pending != nil {
+		snapshot.FailurePresent = true
+		snapshot.FailureJobID = pending.Attempt.JobID
+		snapshot.FailureAttemptToken = pending.Attempt.Token
+		snapshot.FailureAttemptNumber = pending.Attempt.Number
+		snapshot.FailureOperation = pending.Operation
+		snapshot.FailureResultReady = pending.ResultReady
+		snapshot.FailureStatus = pending.Result.Status
+		snapshot.FailureDisposition = pending.Result.Disposition
+		if pending.Completion != nil {
+			snapshot.FailureCompletionCommitted = pending.Completion.isCommitted()
+			snapshot.FailureCompletionFinalized = pending.Completion.isFinalized()
+		}
+	}
+	if pending := s.pendingRecheckOperator; pending != nil {
+		snapshot.OperatorPresent = true
+		snapshot.OperatorJobID = pending.JobID
+		snapshot.OperatorRequestID = pending.RequestID
+		if pending.Completion != nil {
+			snapshot.OperatorCompletionCommitted = pending.Completion.isCommitted()
+			snapshot.OperatorCompletionFinalized = pending.Completion.isFinalized()
+		}
+	}
+	return snapshot
+}
+
 // SetRecheckIntegrationTestHooks installs or clears the narrow recheck integration-test
 // controls. Runtime construction never calls this method.
 func (s *Store) SetRecheckIntegrationTestHooks(hooks *RecheckIntegrationTestHooks) {

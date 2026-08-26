@@ -17,6 +17,14 @@ restart, schema-layout fingerprint validation, and the recorded traffic replay
 (`TestRecordedTrafficReplayThroughLifecycleStore`). Problems 1-10 are implemented and
 independently accepted.
 
+Historical capability labels retained in ADR prose and executable test names map as
+follows: Problem 1 is SQLite writer ownership; Problem 2 is immutable recheck input;
+Problem 3 is attempts, retry, and operator recovery; Problem 4 is observability and
+operator presentation; Problem 5 is end-to-end replay evidence; Problem 6 is PID lease
+and managed-harness finalization; Problem 7 is completed-job retention documentation;
+Problem 8 is selected-error versus shutdown precedence; Problem 9 is generic writer
+logging isolation; and Problem 10 is housekeeping ownership documentation.
+
 SQLite writer ownership is covered by:
 
 - `TestDeferredTransactionReturnsBusyCodeWhenWriterIsHeld` and
@@ -470,9 +478,9 @@ focused Problem 5 race 51.4s; full Go 38.1s; root lint 0 issues; lifecycle race 
 132.6s; patch-integrity clean. Both race suites remained under the mandatory 240s timeout and ran
 sequentially.
 
-**Integration final completion gate (2026-08-25)**
+**Historical integration completion gate (2026-08-25)**
 
-The accepted Problems 1-10 candidate passed:
+The then-current Problems 1-10 candidate passed:
 
 ```bash
 go test ./internal/fork/alertlifecycle ./cmd/karma -run 'TestProblem5CompleteDeterministicLifecycleSequence|TestRecordedTrafficReplayThroughLifecycleStore|TestProblem4|TestProblem9' -count=1 -timeout 240s
@@ -583,6 +591,130 @@ required by the shared testscript-resource contract. The Problem 4 authenticatio
 evidence is covered by the authoritative-401, non-authentication-failure,
 warning-preservation, hidden-control, and recovery tests. No integration-review finding
 remains; the final focused/UI gate is complete and independently accepted.
+
+## Silence recheck completion verification
+
+The accepted implementation is covered by these focused contracts:
+
+ - `TestProblem4SchedulerEventPanicsDoNotChangeControlState` compares control and
+  panicking-logger runs across retry scheduling, retry deferral, queue blocking, acquisition
+  backoff, and terminal infrastructure paths, including the complete process result,
+  timer/backoff/edge/runner snapshots. `TestProblem4RealRetrySchedulingSurvivesSchedulerEventPanic`
+  repeats the retry branch through a real Store and compares the durable retry-wait control
+  snapshot and exact persisted retry timer.
+ - `TestProblem4RegisteredRouterRejectsUnchangedRequestID` exercises the registered
+  application router and proves exact request IDs with leading/trailing whitespace and
+  forbidden characters are rejected before Store callbacks, events, pending completion, or
+  wakes.
+ - The `ForkLifecycleWarning` component matrix drives the generation-owned A/B sequence
+   through the component hook boundary: B succeeds with HTTP 200, stale A returns 401,
+   and the confirmed issue text, `AlertStore` authentication, and Retry/Abandon controls
+   remain governed by B. The test waits for A's fetch-mock pipeline to settle and flushes
+   a subsequent event-loop turn inside `act` before asserting, so the post-A assertions
+   cannot pass before the real stale response continuation runs; no mocked component
+   generation-arbitration test is used as the acceptance proof.
+ - `TestManagedProcessGroupUnexpectedProbeErrorFailsCleanup` and
+  `TestManagedProcessGroupMarkerFollowsConfirmedKillAndReap` cover unexpected probe
+  failure and real process-group cleanup/reap ordering. The latter waits for a readiness
+  handshake from both TERM-resistant parent and descendant, records both TERM and SIGKILL,
+  and counts the single primary `Wait`.
+ - `TestProblem3StateTransitions` executes the existing state cases and calls
+  `runCompleteRecheckStateEventMatrix`, which covers all 42 cells in the six-state/seven-event
+  reducer matrix with complete expected snapshots for accepted and rejected transitions.
+- `TestRecordedTrafficReplayThroughLifecycleStore` independently models promoted recorded
+  source and target causes before reading result history, validates the complete pinned
+  rule/revision semantics before binding IDs, enumerates exact direct-global, target, and
+  global-aggregate sets, and compares source/job, status, fingerprint, timestamp, member,
+  transition, nullable retirement, and target-aggregate rows. For the current all-target
+  corpus, the exact cause cardinality contract is direct-global `== 0`, target `> 0`, and
+  global-aggregate `> 0`; the test must not fabricate a target-less alert to produce a
+  direct-global cause. Exact empty and non-empty sets reject extra histories, members, and
+  transitions.
+
+The recorded replay sorts scopes by `(alert_id, target_key)`, selects at least 80 scopes
+with their original match labels, and uses batch size 20 so the source-triggered job spans
+at least three real batches. It partitions scopes before processing into `promoted`, stale
+observation, `already_resolved`, and `no_matching_rule` outcomes; runs one batch, restarts
+the Store, and completes the remaining batches; and requires both `source_context_changed`
+and disjoint `alert_became_eligible` jobs. A later promotion-capable successor job pins a
+relevant source failed and requires `incomplete_source_coverage` for the fixed recorded
+subset. The replay compares exact outcomes, counters, immutable membership, observation
+tokens, fingerprints, suppression events, and cause revisions across restart, then checks
+merge and preview output for both promoted and untouched recorded alerts.
+
+ The focused closure command includes every new regression through the existing capability
+ name prefixes:
+
+```sh
+go test ./internal/fork/alertlifecycle -run '^TestProblem3StateTransitions$' -count=20 -timeout 240s
+go test ./cmd/karma -run 'TestProblem4|TestRecordedTrafficReplayThroughLifecycleStore|TestManaged' -count=1 -timeout 240s
+npm --prefix ui test -- --runInBand \
+  src/Hooks/useFetchGet.test.tsx \
+  src/Components/ForkLifecycleWarning/index.test.tsx \
+  src/Stores/AlertStore.test.ts
+```
+
+The focused backend and UI regressions pass, including the completion tests. The complete
+repository candidate is independently accepted.
+
+After all edits except the final evidence record, run the complete gate in this exact order:
+
+```sh
+go test ./internal/fork/alertlifecycle -count=1
+go test ./cmd/karma -count=1
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 240s
+go test -race ./cmd/karma -count=1 -timeout 240s
+npm --prefix ui test -- --runInBand \
+  src/Components/ForkLifecycleWarning/index.test.tsx \
+  src/Components/MainModal/Configuration/ForkStorageStats.test.tsx
+npm --prefix ui run build
+npm --prefix ui run test:visual -- --grep 'Fork lifecycle warning'
+make lint
+go test ./... -count=1 -timeout 240s
+git diff --check
+```
+
+Run the race packages sequentially. Then run the complete UI suite and Windows
+cross-compilation gate:
+
+```sh
+npm --prefix ui test -- --runInBand
+GOOS=windows GOARCH=amd64 go test -c ./cmd/karma -o /tmp/karma-cmd-windows.test.exe
+rm -f /tmp/karma-cmd-windows.test.exe
+```
+
+Run this exact Cyrillic scan from the repository root after the file changes; any match is
+a failure:
+
+```sh
+if grep -RInP '[\x{0400}-\x{04FF}]' \
+  --include='*.go' --include='*.ts' --include='*.tsx' \
+  --include='*.js' --include='*.jsx' --include='*.md' \
+  --include='*.yml' --include='*.yaml' --include='*.json' \
+  --include='*.jsonc' --include='*.scss' --include='*.css' \
+  --include='*.html' --exclude-dir=.git --exclude-dir=node_modules \
+  --exclude-dir=dist .; then
+  exit 1
+fi
+git diff --check
+```
+
+After appending the final evidence record, rerun this same Cyrillic scan and
+`git diff --check`; the evidence record is the final documentation edit.
+
+**Final completion gate results (2026-08-26)**
+
+The independent final order passed: lifecycle package (`25.010s`), command package
+(`40.532s`), lifecycle race (`145.733s`), command race (`172.405s`), focused UI (`28
+passed`), production UI build, scoped warning visuals (`18 passed`), root lint (`0
+issues`), and the full Go suite. The
+additional complete UI suite passed (`1211 passed`, `2 skipped`, `78 snapshots`), and
+`GOOS=windows GOARCH=amd64 go test -c ./cmd/karma` passed. The exact focused
+commands also passed: the 42-cell state matrix ran with `-count=20`, the command matrix
+included the `TestProblem4` and `TestManaged` capability tests, and the UI matrix included
+the real `useFetchGet`/`ForkLifecycleWarning` boundary, fetch, warning, and AlertStore
+suites (`117 passed`). The final Cyrillic scan, conflict scan, and `git diff --check`
+passed. Problems 1-10 and the final stabilization findings are independently accepted.
 
 ## Runtime logging
 

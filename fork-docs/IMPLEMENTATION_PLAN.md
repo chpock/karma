@@ -40,8 +40,8 @@ Implemented in fork scope:
   membership, pinned observation input, and terminal outcomes are implemented and
   verified under Problem 2; Problem 3 adds durable attempts, bounded
   retry, token reconciliation, one scheduler owner, and audited operator recovery;
-  the Problem 3 implementation phase is complete; its post-acceptance
-  selected-error/shutdown precedence is implemented and independently accepted as Problem 8,
+  the Problem 3 implementation phase and selected-error/shutdown precedence are
+  implemented and independently accepted,
 - effective suppression evidence on retained past-alert cards using the ordinary
   silence-rule presentation and actions,
 - compact create/edit/recreate silence editor with automatic preview,
@@ -49,10 +49,9 @@ Implemented in fork scope:
   result projection, event ownership, strict APIs, and operator presentation include
   authoritative authentication-loss invalidation; its final focused/UI gate passed and the
   implementation is independently accepted. Problem 9 writer-operation registry/evidence
-  also passed its final focused/logging gate and is independently accepted;
+  also passed its focused/logging gate and is independently accepted;
 - Problem 5 end-to-end evidence passed its final integrated gate for its independent exact
   deterministic and recorded-replay models and is independently accepted.
-  Problem 8 remains independently accepted.
 - PID lease recovery and managed-harness finalization with deterministic retry,
   ownership-loss, close-error, cleanup-order, and marker-failure evidence are
   implemented and independently accepted under Problem 6.

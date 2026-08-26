@@ -1,13 +1,17 @@
 import { act } from "react";
 
-import { renderHook, render, waitFor } from "@testing-library/react";
+import { renderHook, render, screen, waitFor } from "@testing-library/react";
 
 import fetchMock from "@fetch-mock/jest";
 
 import { FetchRetryConfig } from "Common/Fetch";
+import { EmptyAPIResponse } from "__fixtures__/Fetch";
+import { AlertStore } from "Stores/AlertStore";
+import { ForkLifecycleWarning } from "Components/ForkLifecycleWarning";
 import { useFetchGet } from "./useFetchGet";
 
 jest.unmock("./useFetchGet");
+jest.unmock("Hooks/useFetchGet");
 
 const FetchGetTestComponent = ({
   url,
@@ -192,12 +196,73 @@ describe("useFetchGet", () => {
     });
     await act(async () => result.current.get());
     expect(result.current.response).toEqual({ generation: "new" });
-    expect(result.current).toMatchObject({ error: null, isLoading: false, isRetrying: false, retryCount: 0 });
+    expect(result.current).toMatchObject({ status: 200, error: null, isLoading: false, isRetrying: false, retryCount: 0 });
     await act(async () => {
       rejectOldJSON(new SyntaxError("stale malformed JSON"));
       await oldRequest;
     });
-    expect(result.current).toMatchObject({ response: { generation: "new" }, error: null, isLoading: false, isRetrying: false, retryCount: 0 });
+    expect(result.current).toMatchObject({ response: { generation: "new" }, status: 200, error: null, isLoading: false, isRetrying: false, retryCount: 0 });
+  });
+
+  it("keeps a newer success authoritative when an older generation returns 401", async () => {
+    let resolveOld!: (response: Response) => void;
+    let resolveNew!: (response: Response) => void;
+    const oldResponse = new Promise<Response>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newResponse = new Promise<Response>((resolve) => {
+      resolveNew = resolve;
+    });
+    let calls = 0;
+    const fetcher = jest.fn(() => {
+      calls += 1;
+      return calls === 1 ? oldResponse : newResponse;
+    });
+    const { result } = renderHook(() =>
+      useFetchGet<{ generation: string }>("http://localhost/generation-401", {
+        autorun: false,
+        fetcher,
+      }),
+    );
+
+    let oldRequest!: Promise<void>;
+    await act(async () => {
+      oldRequest = result.current.get();
+      await Promise.resolve();
+    });
+    let newRequest!: Promise<void>;
+    await act(async () => {
+      newRequest = result.current.get();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(calls).toBe(2));
+
+    await act(async () => {
+      resolveNew(new Response(JSON.stringify({ generation: "new" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }));
+      await newRequest;
+    });
+    expect(result.current).toMatchObject({
+      response: { generation: "new" },
+      status: 200,
+      error: null,
+      isLoading: false,
+    });
+
+    await act(async () => {
+      resolveOld(new Response("unauthorized", { status: 401 }));
+      await oldRequest;
+    });
+    expect(result.current).toMatchObject({
+      response: { generation: "new" },
+      status: 200,
+      error: null,
+      isLoading: false,
+      isRetrying: false,
+      retryCount: 0,
+    });
   });
 
   it("does not let a stale retry clear a newer pending generation", async () => {
@@ -336,6 +401,7 @@ describe("useFetchGet", () => {
 
     expect(result.current.response).toBe(null);
     expect(result.current.error).toBe("401 Unauthorized");
+    expect(result.current.status).toBe(401);
     expect(result.current.isLoading).toBe(false);
     expect(result.current.isRetrying).toBe(false);
   });
@@ -413,6 +479,7 @@ describe("useFetchGet", () => {
       );
     });
     await waitFor(() => expect(result.current.response).toBe("new"));
+    expect(result.current.status).toBe(200);
 
     await act(async () => {
       resolvers[0]?.(
@@ -644,5 +711,87 @@ describe("useFetchGet", () => {
       );
       unmountFn = unmount;
     });
+  });
+
+  it("keeps the real warning controls when stale request A returns 401 after B succeeds", async () => {
+    jest.useRealTimers();
+    let resolveA!: (response: Response) => void;
+    let resolveB!: (response: Response) => void;
+    let markASettled!: () => void;
+    const responseA = new Promise<Response>((resolve) => {
+      resolveA = resolve;
+    }).then((response) => {
+      markASettled();
+      return response;
+    });
+    const aSettled = new Promise<void>((resolve) => {
+      markASettled = resolve;
+    });
+    const responseB = new Promise<Response>((resolve) => {
+      resolveB = resolve;
+    });
+    let warningRequests = 0;
+    fetchMock.mockReset();
+    fetchMock.route(
+      /alerts-history\/warning/,
+      () => {
+        warningRequests += 1;
+        return warningRequests === 1 ? responseA : responseB;
+      },
+      { method: "GET" },
+    );
+
+    const alertStore = new AlertStore([]);
+    const initial = EmptyAPIResponse();
+    initial.filters = [];
+    initial.authentication = {
+      enabled: true,
+      username: "operator@example.com",
+    };
+    alertStore.parseAPIResponse(initial);
+    render(<ForkLifecycleWarning alertStore={alertStore} />);
+    await waitFor(() => expect(warningRequests).toBe(1));
+
+    const next = EmptyAPIResponse();
+    next.filters = [];
+    next.authentication = initial.authentication;
+    await act(async () => {
+      alertStore.parseAPIResponse(next);
+    });
+    await waitFor(() => expect(warningRequests).toBe(2));
+
+    resolveB(new Response(JSON.stringify({
+      status: "ok",
+      storageEnabled: true,
+      dbExpectedState: false,
+      issues: [{
+        kind: "recheck_blocked",
+        severity: "error",
+        summary: "Recheck queue is blocked",
+        metadata: {
+          jobId: 547,
+          status: "failed",
+          firstFailureStage: "persist_candidate",
+          firstFailureAt: "2026-08-19T12:00:00Z",
+        },
+      }],
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+    await waitFor(() => {
+      expect(alertStore.info.authenticationReady).toBe(true);
+      expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      resolveA(new Response("unauthorized", { status: 401 }));
+      await aSettled;
+      await fetchMock.callHistory.flush(true);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(alertStore.info.authenticationReady).toBe(true);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
   });
 });

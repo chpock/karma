@@ -3,8 +3,8 @@
 - Status: Accepted
 - Date: 2026-08-19
 
-Implementation status: Implemented and independently accepted, including selected-error/shutdown
-precedence from Problem 8.
+Implementation status: Implemented and independently accepted, including
+selected-error/shutdown precedence and the complete scheduler state/event matrix.
 The combined fresh
 schema-v1 shape was accepted by ADR-006; this ADR defines the runtime ownership and
 durability rules for the reserved attempt and operator-action tables.
@@ -171,3 +171,13 @@ tests, typed failure-boundary tests, full attempt-token reconciliation tests,
 deterministic scheduler owner/timer tests, strict application-router authentication and
 operator CAS tests, and behavioral schema tests. The implementation is covered by the
 capability matrix in `../SPEC/architecture-verification.md`.
+
+Final-closure verification additionally covers every scheduler event-emission branch under
+a panicking logger, exact operator request-ID rejection before Store access, and the complete
+six-state/seven-event reducer matrix. A logging failure is isolated after durable control
+state is established; it cannot alter a persisted retry timer, backoff owner, or terminal
+decision.
+
+The scheduler's fallback `observability_collection_failed` event remains a registered
+`warning` event. Both its primary and fallback emissions are panic-isolated, and a real
+Store retry-scheduling run compares durable retry state against the non-panicking control.

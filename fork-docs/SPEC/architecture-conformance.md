@@ -1,9 +1,8 @@
 # Architecture Conformance Matrix
 
 Status: Problems 1-10 are implemented and independently accepted.
-Problems 2, 3, 6, 7, 8, and 10 remain implemented and independently accepted.
-Remaining known violations are tracked by
-`silence-recheck-problems.md`.
+The completion runtime, UI, HTTP, and evidence checks are recorded below and in
+`architecture-verification.md`.
 
 This document is the finite traceability contract for the alert lifecycle and
 silence editor work. A decision is not implemented merely because a schema field
@@ -47,7 +46,7 @@ The executable test coverage for these contracts is summarized in
 | D7 | Preserve HA member disagreement including silence identity; persistent warning until convergence | identity-aware cluster fingerprint, Stats/warning | HA ID/payload/failure/convergence sequence | Implemented |
 | D8 | `is_suppression_retained` proposal is superseded | N/A | schema absence | Superseded by D13 |
 | D9 | Match only original raw labels; missing labels remain unknown | raw-label index, `match_labels_json` | raw-label exclusion tests | Implemented |
-| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats/scheduler/operator routes; Store owns durable events and cmd owns invocation/infrastructure telemetry | Problem 2 immutable-input matrix; Problem 3 state, attempt, scheduler, and operator matrix; Problem 4 observability/API/UI matrix; Problem 5 controlled provenance, exact durable/API, Problem 8 precedence, and Problem 9 writer diagnostics matrix | Implemented and independently accepted |
+| D10 | Required contract: persistent FIFO target-qualified jobs, immutable candidate membership, crash resume, failed predecessor block, complete observability | recheck queue/worker/Stats/scheduler/operator routes; Store owns durable events and cmd owns invocation/infrastructure telemetry | Problem 2 immutable-input matrix; Problem 3 state, attempt, scheduler, and operator matrix; Problem 4 observability/API/UI matrix; Problem 5 controlled provenance, exact durable/API, Problem 8 precedence, Problem 9 writer diagnostics, and completion matrices | Implemented and independently accepted |
 | D11 | Earlier many-to-many event linkage proposal is superseded | N/A | schema absence | Superseded by D15/D20 |
 | D12 | Revision only on normalized content/updatedAt/new episode; not repeated/status-only poll | latest-revision boundary and HA-wide episode closure | revision sequence and `TestSilenceEpisodeClosesOnlyAfterConfirmedHAWideAbsence` | Implemented; A→B→A appends and reappearance starts a new episode |
 | D13 | One normalized `is_suppressed` axis with strict live invariant | projection/live validation | projection tests | Implemented |
@@ -66,7 +65,7 @@ The executable test coverage for these contracts is summarized in
 | ID | Invariant | Runtime owner | Verification | Status / required action |
 |---|---|---|---|---|
 | P6-1 | PID ownership is an identity-checked lease. Transient identity failure preserves the open handle and permits a later release retry; replacement paths are never removed; relevant close errors are joined through one shared release state machine with phase-specific ownership classification. | `cmd/karma/pid_lease.go` and platform adapters | `TestPIDLeaseSharedReleasePrimitivesUsesPhaseSpecificOwnershipClassification`, `TestPIDLeaseSharedReleasePrimitivesOpenCurrentOwnershipLossClosesCurrentAndOwned`, complete snapshot assertions with non-zero identities, Windows cross-compilation, optional native Windows filesystem tests | Implemented and independently accepted |
-| P6-2 | Managed final exit is published only after process cleanup. Cleanup and marker failures are persisted as harness failure before a waiter can report success; marker publication failure is fail-closed. | `cmd/karma/managed_process_test.go` | `TestManagedFinalizeStatusPublishesExitAfterCleanup`, `TestManagedFinalizeStatusPersistsCleanupFailureBeforeExit`, `TestManagedFinalizeStatusFailsClosedWhenExitMarkerWriteFails` | Implemented and independently accepted |
+| P6-2 | Managed final exit is published only after process cleanup. Cleanup and marker failures are persisted as harness failure before a waiter can report success; marker publication failure is fail-closed. An unexpected process-group identity/probe error is a cleanup failure, not successful disappearance. | `cmd/karma/managed_process_test.go` | `TestManagedFinalizeStatusPublishesExitAfterCleanup`, `TestManagedFinalizeStatusPersistsCleanupFailureBeforeExit`, `TestManagedFinalizeStatusFailsClosedWhenExitMarkerWriteFails`, `TestManagedProcessGroupUnexpectedProbeErrorFailsCleanup`, `TestManagedProcessGroupMarkerFollowsConfirmedKillAndReap` | Implemented and independently accepted |
 
 ## 3. Silence Editor Decisions Q1-Q25
 
@@ -165,8 +164,7 @@ adding its invariant/test mapping.
   recorded development CPU (one benchmark iteration, informational budget check);
 - replay: committed 1043-group HA traffic artifact passes poll, SQLite target
   projection and label-index verification;
-All rows above are implemented or explicitly superseded. Problems 4, 5, 8, and 9 are
-independently accepted.
+All rows above are implemented and independently accepted or explicitly superseded.
 Reproducible test,
 restart, replay, parser, timezone,
 performance, build, and browser commands are recorded in

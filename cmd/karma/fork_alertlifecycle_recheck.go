@@ -135,7 +135,6 @@ func parseRecheckOperatorRequest(w http.ResponseWriter, r *http.Request) (rechec
 			request.Reason = field
 		}
 	}
-	request.RequestID = strings.TrimSpace(request.RequestID)
 	request.Reason = strings.TrimSpace(request.Reason)
 	if !validRecheckRequestIDForHTTP(request.RequestID) {
 		return recheckOperatorRequest{}, errors.New("invalid request id")

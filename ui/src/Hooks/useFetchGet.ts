@@ -18,6 +18,7 @@ export interface FetchGetOptionsT {
 interface ResponseState<T> {
   response: null | T;
   error: null | string;
+  status: null | number;
   isLoading: boolean;
   isRetrying: boolean;
   retryCount: number;
@@ -26,6 +27,7 @@ interface ResponseState<T> {
 export interface FetchGetResultT<T> {
   response: null | T;
   error: null | string;
+  status: null | number;
   isLoading: boolean;
   isRetrying: boolean;
   retryCount: number;
@@ -40,6 +42,7 @@ const useFetchGet = <T>(
   const [response, setResponse] = useState<ResponseState<T>>({
     response: null,
     error: null,
+    status: null,
     isLoading: autorun,
     isRetrying: false,
     retryCount: 0,
@@ -55,6 +58,7 @@ const useFetchGet = <T>(
       ...r,
       isLoading: false,
       isRetrying: false,
+      status: null,
     }));
   }, []);
 
@@ -73,6 +77,7 @@ const useFetchGet = <T>(
           isLoading: true,
           isRetrying: false,
           retryCount: 0,
+          status: null,
         }));
       }
 
@@ -114,6 +119,7 @@ const useFetchGet = <T>(
               error: res.ok
                 ? "invalid response body"
                 : `${res.status} ${res.statusText || "request failed"}`,
+              status: res.status,
               isLoading: false,
               isRetrying: false,
             }));
@@ -126,6 +132,7 @@ const useFetchGet = <T>(
             setResponse({
               response: body,
               error: null,
+              status: res.status,
               isLoading: false,
               isRetrying: false,
               retryCount: 0,
@@ -134,6 +141,7 @@ const useFetchGet = <T>(
             setResponse({
               response: null,
               error: `${res.status} ${res.statusText || "request failed"}`,
+              status: res.status,
               isLoading: false,
               isRetrying: false,
               retryCount: 0,
@@ -147,6 +155,7 @@ const useFetchGet = <T>(
           ...r,
           error:
             error instanceof Error ? error.message : "unknown request error",
+          status: null,
           isLoading: false,
           isRetrying: false,
         }));
