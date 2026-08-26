@@ -14,8 +14,8 @@ go test ./cmd/karma -count=1 -timeout 180s
 Coverage includes pure/fuzz lifecycle invariants, target topology, sticky multi-job
 causes, FIFO failure blocking, HA inconsistency, fresh schema v1 bootstrap/reopen,
 restart, schema-layout fingerprint validation, and the recorded traffic replay
-(`TestRecordedTrafficReplayThroughLifecycleStore`). Problems 5/8/9 have no remaining independent-
-review findings; their final completion gate is recorded below.
+(`TestRecordedTrafficReplayThroughLifecycleStore`). Problems 1-10 are implemented and
+independently accepted.
 
 SQLite writer ownership is covered by:
 
@@ -116,10 +116,7 @@ Delayed-reconciliation and shutdown coverage additionally includes:
 
 Problem 1 is implemented. The verification below
 names PID ownership, exact regroup severity, deterministic ordering, and real-component
-coverage. Problems 2, 3, and 6 are implemented and independently accepted. Problem 7
-has no remaining independent-review findings; its final completion gate is pending.
-Problem 10 has no remaining independent-review findings; its final documentation gate
-is pending.
+coverage. Problems 1-10 are implemented and independently accepted.
 
 Additional writer/shutdown evidence includes:
 
@@ -432,31 +429,29 @@ retryable/terminal selected failures, confirmed-not-committed, unknown Commit, a
 phases; only operational timestamps and tokens are normalized. No independent-review finding
 remains; the final completion gate passed.
 
-Problem 9 production logging is panic-isolated and the registry is synchronized. `assertProblem9WriterEvent`
-counts the complete registered `writer_observability_failed` records, requires exactly one, and
-rejects additional lifecycle-writer or poll/recheck writer events while retaining whole-output
-redaction assertions. No independent-review finding remains; the final completion gate passed.
+Problem 9 production logging is panic-isolated. The registered writer-operation vocabulary and
+focused evidence now include `recheck_operator_action`; `assertProblem9WriterEvent` counts the
+complete registered `writer_observability_failed` records, requires exactly one, and rejects
+additional lifecycle-writer or poll/recheck writer events while retaining whole-output redaction
+assertions for its existing branches.
 
-Problem 4 verification is organized by presentation capability. It is implemented and
-independently accepted. Operator replay-ledger semantics are defined by ADR-005, ADR-007,
-`storage-schema.md`, and `implementation-contracts.md`.
+Problem 4 verification is organized by presentation capability. Authoritative 401 responses
+invalidate the `AlertStore` authentication state, hide failed-head controls, and allow recovery
+on a later successful response; network and 5xx failures do not log the operator out. Operator
+replay-ledger semantics remain defined by ADR-005, ADR-007, `storage-schema.md`, and
+`implementation-contracts.md`.
 
 **Problem 5 end-to-end verification (implemented and independently accepted)**
 
-The deterministic lifecycle sequence now has the required production-created head/follower lineage,
-cross-restart failure scripts, exact fault counts, and causal phase checks. Recorded replay keeps the
-independent manifest and production failed-source setup. The immutable model now covers every persisted
-job-rule, candidate, rule, episode, revision, and source-provenance column from controlled input and
-returned setup identities. The final source-job model is independently constructed from that input and
-controlled transitions, including complete parent/candidate rows and deterministic timestamps; stats and
-warning expectations are built from the independent durable model. The recorded-traffic test executes
-all successor, immutable-input, final-row, and stats/warning
-capabilities in one replay so the race gate stays inside the mandatory timeout without duplicating
-the 1100-scope fixture.
+The deterministic lifecycle sequence retains the required source-job → partial-batch →
+later-successor order, stop/reopen barrier, registered-router phases, and integrated failed
+recorded subset. Recorded-traffic cause evidence computes status and fingerprints from a
+test-owned source/member template before any global or target history rows are read, and
+both graphs are compared against that same independent expectation.
 
-**Problems 5/8/9 final completion gate**
+**Problems 5/8/9 historical completion gate**
 
-The accepted candidate passed from the repository root:
+The historical candidate passed from the repository root:
 
 ```bash
 go test ./cmd/karma -run 'TestProblem5|TestRecordedTrafficReplayThroughLifecycleStore' -count=1 -timeout 180s
@@ -474,6 +469,31 @@ Final results: focused Problem 5 3.1s; focused Problems 8/9 0.57s; deterministic
 focused Problem 5 race 51.4s; full Go 38.1s; root lint 0 issues; lifecycle race 134.9s; cmd race
 132.6s; patch-integrity clean. Both race suites remained under the mandatory 180s timeout and ran
 sequentially.
+
+**Integration final completion gate (2026-08-25)**
+
+The accepted Problems 1-10 candidate passed:
+
+```bash
+go test ./internal/fork/alertlifecycle ./cmd/karma -run 'TestProblem5CompleteDeterministicLifecycleSequence|TestRecordedTrafficReplayThroughLifecycleStore|TestProblem4|TestProblem9' -count=1 -timeout 180s
+npm --prefix ui test -- src/Components/ForkLifecycleWarning/index.test.tsx src/Hooks/useFetchGet.test.tsx src/Stores/AlertStore.test.ts
+go test ./... -count=1 -timeout 180s
+npm --prefix ui test -- --runInBand
+npm --prefix ui run build
+make lint
+npm --prefix ui run test:visual -- --grep "Fork lifecycle warning"
+go test -race ./internal/fork/alertlifecycle -count=1 -timeout 180s
+go test -race ./cmd/karma -count=1 -timeout 180s
+```
+
+Results: focused Go passed; focused UI 111/111; full Go passed; UI 1205 passed
+with 2 skipped; production build passed; lint reported 0 issues; approved Problem 4
+browser matrix passed 18/18 on Chromium/Firefox/Android; lifecycle race 139.0s and cmd
+race 175.0s, run strictly sequentially under the unchanged 180s timeout.
+
+The repository-wide full visual corpus is not this approved silence-recheck gate. A
+diagnostic run found unrelated legacy snapshot drift (for example `Grid.png` expected
+4204px height and rendered 4196px); the scoped lifecycle-warning matrix remained green.
 
 **Typed worker result and event ownership**
 
@@ -559,8 +579,10 @@ git diff --check
 All commands passed. The focused UI matrix ran 108 tests; the scoped Chromium, Firefox,
 and Android visual matrix ran 18 tests; the full UI matrix ran 1200 tests with two intentional
 skips and 78 snapshots; lint reported zero issues. The two race packages ran sequentially as
-required by the shared testscript-resource contract. Problem 4 is implemented and
-independently accepted.
+required by the shared testscript-resource contract. The Problem 4 authentication-retention
+evidence is covered by the authoritative-401, non-authentication-failure,
+warning-preservation, hidden-control, and recovery tests. No integration-review finding
+remains; the final focused/UI gate is complete and independently accepted.
 
 ## Runtime logging
 

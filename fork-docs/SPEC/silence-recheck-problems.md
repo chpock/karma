@@ -56,10 +56,9 @@ disposable database. It must not silently run `CREATE TABLE IF NOT EXISTS` again
 incompatible v1 layout, auto-delete the database, migrate it, or partially repair it.
 
 Step 0 was applied before implementing Problem 1: currently false conformance claims were marked
-`Known violation; tracked by silence-recheck-problems.md`. Problem 2 and D14 are implemented
-and independently accepted. Problem 4 is also implemented and independently accepted. The combined
-Problems 5, 8, and 9 are implemented and independently accepted. The Problem 3 implementation phase
-is complete.
+`Known violation; tracked by silence-recheck-problems.md`. Problems 1-10 and the associated
+conformance decisions are implemented and independently accepted; all owning focused,
+integration, documentation, and completion gates passed.
 The operator
 replay-ledger contract is normative in ADR-005, ADR-007, `storage-schema.md`, and
 `implementation-contracts.md`.
@@ -78,16 +77,17 @@ change:
 
 ### 1. Establish the Root Cause of the Original SQLite Busy Error
 
-**Status: Problems 1-6 and 8/9 implemented and independently accepted; Problem 7 final completion gate pending**
+**Status: Problems 1-10 implemented and independently accepted.**
 
 The writer-ownership implementation, fail-fast PID test infrastructure, typed
 acquisition and cancellation handling, domain-state regressions, writer/shutdown
 evidence, and final verification are complete for Problem 1. Problems 2 and 3 are
 implemented.
-Problem 4 is implemented and independently accepted.
-Problems 5/8/9 are implemented and independently accepted. Problem 6 is implemented and
-independently accepted. Problem 7 has no remaining independent-review findings; its
-final completion gate is pending.
+Problems 4, 5, and 9 passed their final focused/integration gates and are independently
+accepted.
+Problem 8 is implemented and independently accepted. Problem 6 is implemented and
+independently accepted. Problems 7 and 10 have no remaining problem-specific findings and
+passed their final integrated documentation gates.
 
 The remediation includes the durable `lifecycle_writer_commits` ledger, typed
 `committed`/`not_committed`/`unknown` outcomes, bounded internal recovery contexts,
@@ -381,8 +381,7 @@ was identified only by its source context, while candidates could be attached la
 the worker, by an alert transition, or by `UpsertCurrentAlert`. This mixed historical
 rules with alerts from a later lifecycle episode and made trigger and counter data
 incorrect. The current implementation creates the immutable parent, rules, candidates,
-and provenance in one creator transaction; independent acceptance of the remediation is
-still pending.
+and provenance in one creator transaction; the remediation is independently accepted.
 
 Immutable membership alone was not sufficient. Before remediation, a candidate row
 stored only `job_id`, `alert_id`, and `processed_at`; the worker read fresh labels,
@@ -1153,7 +1152,7 @@ and implementation plan with the implemented state/scheduler/operator contract.
 
 ### 4. Correct Recheck Observability and Operator Presentation
 
-**Status: Implemented and independently accepted**
+**Status: Implemented and independently accepted.**
 
 **Dependency**
 
@@ -1446,6 +1445,8 @@ implemented presentation contract.
 
 ### 5. End-to-End Verification and Documentation Gate
 
+**Status: Implemented and independently accepted.**
+
 **Purpose**
 
 This is a final integration and traceability gate. It introduces no new job states,
@@ -1633,7 +1634,7 @@ verification matrix and completion commands are recorded in
 
 ### 7. Reconcile the Completed Recheck-Job Retention Documentation
 
-**Status: No remaining independent-review findings; final completion gate pending.**
+**Status: Implemented and independently accepted.**
 
 **Dependency and scope**
 
@@ -1689,18 +1690,18 @@ recheck-executor documentation issue.
 
 ### 8. Preserve Selected-Error Precedence During Shutdown
 
-**Status: No remaining independent-review findings; final end-to-end gate pending**
+**Status: Implemented and independently accepted.**
 
 This problem is independent from Problem 4 presentation. It covers ordinary retryable or
 terminal job failures that belong to durable failure bookkeeping. Typed writer
 lifecycle, rollback, and invariant infrastructure remain non-durable Problem 4 result
 classification and are explicitly excluded here.
 
-The recheck worker currently checks `ctx.Err()` after an ordinary selected-operation
-error and can relabel that earlier error as normal shutdown cancellation if shutdown wins
-the small classification race. The batch transaction has already rolled back, but the
-real retryable or terminal failure is not persisted and the attempt is repeated after
-restart without its required durable history.
+The pre-remediation recheck worker checked `ctx.Err()` after an ordinary
+selected-operation error and could relabel that earlier error as normal shutdown
+cancellation if shutdown won the small classification race. The batch transaction had
+already rolled back, but the real retryable or terminal failure was not persisted and
+the attempt was repeated after restart without its required durable history.
 
 The controlling Problem 3 rule needs an explicit causal precedence:
 
@@ -1726,7 +1727,7 @@ presentation, but it must close before Problem 5 signs off end-to-end recheck be
 
 ### 9. Complete Generic Writer Diagnostic Redaction and Event Registration
 
-**Status: No remaining independent-review findings; final end-to-end gate pending**
+**Status: Implemented and independently accepted.**
 
 This problem is independent from Problem 4 recheck/regroup presentation. The generic writer
 now uses a dedicated registered `lifecycle_writer/writer_observability_failed` event for
@@ -1742,12 +1743,12 @@ Implemented work:
 3. Writer ownership, Commit reconciliation, retry policy, Problem 4 API/UI, and schema
    remain unchanged.
 
-Problem 9 does not block Problem 4 acceptance, but its local remediation must pass independent
-acceptance before the final runtime-logging and end-to-end gate.
+Problem 9 does not change Problem 4 semantics; its local remediation is implemented and
+independently accepted under the final runtime-logging and end-to-end gate.
 
 ### 10. Remove the False Housekeeping-Owned Recheck Batch Documentation
 
-**Status: No remaining independent-review findings; final documentation gate pending.**
+**Status: Implemented and independently accepted.**
 
 This problem is independent from Problem 7 retention. The corrected
 `CONFIGURATION.md` describes housekeeping as retention/vacuum work only; runtime
@@ -1771,15 +1772,13 @@ Execute the work in this exact order:
    (completed);
 2. Problem 2 immutable job creation and provenance;
 3. Problem 3 attempts, retry, failure, and operator recovery;
-4. Problem 4 observability and operator presentation;
-5. Problem 8 selected-error/shutdown precedence;
-6. Problem 9 generic writer diagnostic redaction/registration;
+4. Problem 4 observability and operator presentation (implemented and independently accepted);
+5. Problem 8 selected-error/shutdown precedence (implemented and independently accepted);
+6. Problem 9 generic writer diagnostic redaction/registration (implemented and independently accepted);
 7. Problem 5 end-to-end verification and documentation (implemented and independently accepted);
 8. Problem 6 PID lease/harness hardening (completed); and
-9. Problem 7 completed-job retention documentation reconciliation (no remaining
-   independent-review findings; final completion gate pending); and
-10. Problem 10 housekeeping/recheck ownership documentation correction (no remaining
-    independent-review findings; final documentation gate pending).
+9. Problem 7 completed-job retention documentation reconciliation (completed); and
+10. Problem 10 housekeeping/recheck ownership documentation correction (completed).
 
 Finish the production code, focused regressions, and required documentation for one
 problem before implementing the next. Problems 2 and 3 must share one approved

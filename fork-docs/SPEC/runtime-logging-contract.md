@@ -1,9 +1,10 @@
 # Runtime Logging Contract
 
-Status: Problem 4 event ownership, fields, levels, redaction, APIs, and UI presentation are
-implemented and independently accepted. Operator replay-ledger semantics are defined by
-ADR-005 and ADR-007. Generic writer registration/redaction and exact one-event ownership are
-implemented and independently accepted under Problem 9.
+Status: Problem 4 production event ownership, fields, levels, redaction, APIs, UI
+presentation, and integration evidence are implemented and independently accepted.
+Operator replay-ledger semantics are defined by ADR-005 and ADR-007. Generic writer
+registration/redaction and exact operator-path evidence are implemented and independently
+accepted under Problem 9.
 
 ## 1. Purpose
 
@@ -104,7 +105,7 @@ Common fields, when available:
 
 - `alert_id`, `silence_id`, `job_id`, `target`, `member`, `source`;
 - `operation` (`create|edit|recreate|resolve`);
-- `writer_operation` for lifecycle-writer operations (`schema_bootstrap|upsert_current_alert|insert_state_transition|housekeeping_cleanup|housekeeping_vacuum|resolve_alert|apply_poll_cycle|regroup_begin|regroup_batch|regroup_failure|recheck_batch|recheck_failure`);
+- `writer_operation` for lifecycle-writer operations (`schema_bootstrap|upsert_current_alert|insert_state_transition|housekeeping_cleanup|housekeeping_vacuum|resolve_alert|apply_poll_cycle|regroup_begin|regroup_batch|regroup_failure|recheck_batch|recheck_failure|recheck_operator_action`);
 - `operator` for authenticated operator identity;
 - `mode` (`server_routed|browser_routed`);
 - `http_status`, `reason_code`, `count`, `duration`;

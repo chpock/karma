@@ -266,6 +266,8 @@ describe("<ForkLifecycleWarning />", () => {
     ).toBeInTheDocument();
     expect(fetchMock.callHistory.calls()).toHaveLength(1);
     expect(useFetchGetMock.fetch.calls.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
   });
 
   it("replaces the warning with the authoritative response after a successful retry", async () => {
@@ -354,6 +356,8 @@ describe("<ForkLifecycleWarning />", () => {
     expect(
       screen.getByText("Warning refresh failed: warning refresh failed"),
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
   });
 
   it("uses a stable status fallback for malformed operator JSON errors", async () => {
@@ -376,6 +380,8 @@ describe("<ForkLifecycleWarning />", () => {
 
     expect(screen.getByText("500 Internal Server Error")).toBeInTheDocument();
     expect(screen.queryByText("{malformed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
   });
 
   it("keeps the confirmed warning and shows action and refresh errors after a network failure", async () => {
@@ -397,6 +403,8 @@ describe("<ForkLifecycleWarning />", () => {
     expect(
       screen.getByText("Warning refresh failed: warning refresh failed"),
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
   });
 
   it("preserves the confirmed warning after a failed conflict refresh and recovers later", async () => {
@@ -571,6 +579,8 @@ describe("<ForkLifecycleWarning />", () => {
     expect(screen.getByText("Recheck queue is blocked")).toBeInTheDocument();
     expect(screen.getByText(/Warning refresh failed: 500/)).toBeInTheDocument();
     expect(screen.queryByText(/database internals/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
     await act(async () => {
       alertStore.info.setTimestamp("2026-08-19T13:01:00Z");
     });
@@ -624,6 +634,45 @@ describe("<ForkLifecycleWarning />", () => {
     expect(
       screen.queryByRole("button", { name: "Abandon" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("hides controls immediately after operator 401 and re-enables them after auth recovery", async () => {
+    setWarningResponse(blockedWarning);
+    fetchMock.route(
+      /alerts-history\/recheck/,
+      {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "authentication required" }),
+      },
+      { method: "POST" },
+    );
+
+    renderWarning();
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await flushFetches();
+
+    expect(screen.getByText("Recheck queue is blocked")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Abandon" }),
+    ).not.toBeInTheDocument();
+
+    const authRecovery = EmptyAPIResponse();
+    authRecovery.filters = [];
+    authRecovery.authentication = {
+      enabled: true,
+      username: "operator@example.com",
+    };
+    await act(async () => {
+      alertStore.parseAPIResponse(authRecovery);
+    });
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Abandon" })).toBeInTheDocument();
   });
 
   it("exposes operator controls when authoritative authentication is disabled", async () => {

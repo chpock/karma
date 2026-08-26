@@ -170,6 +170,7 @@ interface AlertStoreInfoT {
   setReloadNeeded: (v: boolean) => void;
   setTotalAlerts: (n: number) => void;
   setAuthentication: (enabled: boolean, username: string) => void;
+  invalidateAuthentication: () => void;
   setVersion: (v: string) => void;
   setTimestamp: (v: string) => void;
 }
@@ -443,6 +444,10 @@ class AlertStore {
           this.authentication.enabled = enabled;
           this.authentication.username = username;
         },
+        invalidateAuthentication() {
+          this.authentication.username = "";
+          this.authenticationReady = false;
+        },
         setVersion(v: string) {
           this.version = v;
         },
@@ -457,6 +462,7 @@ class AlertStore {
         setUpgradeNeeded: action.bound,
         setTotalAlerts: action.bound,
         setAuthentication: action.bound,
+        invalidateAuthentication: action.bound,
         setVersion: action.bound,
         setTimestamp: action.bound,
       },
@@ -640,6 +646,9 @@ class AlertStore {
           // redirected by an auth proxy
           if (result.type === "opaque") {
             this.info.setReloadNeeded(true);
+          }
+          if (result.status === 401) {
+            this.info.invalidateAuthentication();
           }
           this.info.clearIsRetrying();
           this.status.setProcessing();

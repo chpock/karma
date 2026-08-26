@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -91,7 +93,80 @@ func TestProblem9GenericWriterObservabilityFailureIsSafeAndRegistered(t *testing
 	})
 }
 
+func TestProblem9OperatorFinalizerObservabilityFailureIsRegistered(t *testing.T) {
+	previousLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+	baseline, _, now := seedProblem2OpenJob(t)
+	baseline.lifecycleTestHooks = &storeLifecycleTestHooks{recheckFault: func(stage string) error {
+		if stage == recheckStagePersistCandidate {
+			return errors.New("operator observability candidate failure")
+		}
+		return nil
+	}}
+	if result, err := baseline.RunSilenceRecheckBatchContext(context.Background(), 100); !IsRecheckDurableFailure(err) || result.Status != "failed" {
+		t.Fatalf("failed-head seed=%+v err=%v", result, err)
+	}
+	baseline.lifecycleTestHooks = nil
+	if _, err := baseline.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	baselinePath := baseline.path
+	if err := baseline.Close(); err != nil {
+		t.Fatal(err)
+	}
+	baselineBytes, err := os.ReadFile(baselinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(fault bool) (RecheckOperatorActionResult, string, int, string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "problem9-operator.sqlite")
+		if err := os.WriteFile(path, baselineBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		store, err := OpenStore(StoreOptions{Path: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		wakes := 0
+		store.SetRecheckCommitWake(func() { wakes++ })
+		var logs bytes.Buffer
+		handler := slog.Handler(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		if fault {
+			handler = problem4PanicEventHandler{base: handler, event: "operator_action_applied"}
+		}
+		slog.SetDefault(slog.New(handler))
+		actor := "operator"
+		result, err := store.RetryRecheckJobContext(context.Background(), 1, "problem9-operator", "recover", &actor, now)
+		if err != nil || !result.Applied || result.CurrentStatus != "queued" || wakes != 1 || store.pendingRecheckOperatorCompletion() != nil {
+			t.Fatalf("operator result=%+v err=%v wakes=%d", result, err, wakes)
+		}
+		return result, captureProblem4RecheckWriteSet(t, store.db), wakes, logs.String()
+	}
+
+	controlResult, controlState, controlWakes, _ := run(false)
+	faultResult, faultState, faultWakes, faultLogs := run(true)
+	if !reflect.DeepEqual(faultResult, controlResult) || faultState != controlState || faultWakes != controlWakes {
+		t.Fatalf("operator observability failure changed result/state/wake: result=%+v/%+v wakes=%d/%d", faultResult, controlResult, faultWakes, controlWakes)
+	}
+	assertProblem9WriterEventForOperation(t, faultLogs, "after_commit_run", "panic", "operator finalizer", writerOperationRecheckOperator)
+	for _, secret := range []string{
+		"controlled operator event failure",
+		"operator observability candidate failure",
+	} {
+		if strings.Contains(faultLogs, secret) {
+			t.Fatalf("operator observability leaked sensitive value %q: %s", secret, faultLogs)
+		}
+	}
+}
+
 func assertProblem9WriterEvent(t *testing.T, raw, wantStage, wantSafeError, branch string) {
+	assertProblem9WriterEventForOperation(t, raw, wantStage, wantSafeError, branch, writerOperationPoll)
+}
+
+func assertProblem9WriterEventForOperation(t *testing.T, raw, wantStage, wantSafeError, branch, wantOperation string) {
 	t.Helper()
 	if strings.Contains(raw, "raw ") || strings.Contains(raw, "SQL secret") || strings.Contains(raw, "token") {
 		t.Fatalf("%s leaked raw writer diagnostic: %s", branch, raw)
@@ -117,7 +192,19 @@ func assertProblem9WriterEvent(t *testing.T, raw, wantStage, wantSafeError, bran
 			continue
 		}
 		matchingEvents++
-		if record["component"] != "lifecycle_writer" || record["level"] != "ERROR" || record["writer_operation"] != writerOperationPoll || record["stage"] != wantStage || record["safe_error"] != wantSafeError {
+		wantFields := map[string]struct{}{
+			"time": {}, "level": {}, "msg": {}, "component": {}, "event": {},
+			"writer_operation": {}, "stage": {}, "safe_error": {},
+		}
+		if len(record) != len(wantFields) {
+			t.Fatalf("%s writer event has unexpected field count: %v", branch, record)
+		}
+		for field := range record {
+			if _, expected := wantFields[field]; !expected {
+				t.Fatalf("%s writer event has unexpected field %q: %v", branch, field, record)
+			}
+		}
+		if record["component"] != "lifecycle_writer" || record["level"] != "ERROR" || record["writer_operation"] != wantOperation || record["stage"] != wantStage || record["safe_error"] != wantSafeError {
 			t.Fatalf("%s writer event=%v", branch, record)
 		}
 	}

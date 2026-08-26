@@ -119,6 +119,10 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 	if len(groups) < 1000 || len(snapshots) == 0 {
 		t.Fatalf("recorded replay did not load expected traffic: groups=%d snapshots=%d", len(groups), len(snapshots))
 	}
+	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	for index := range snapshots {
+		snapshots[index].LastSeenAt = now
+	}
 	matcherValue := replayInstanceMatcherValue(snapshots)
 	allManifest := buildProblem5ReplayManifest(snapshots)
 	manifest := make([]problem5ReplayScope, 0, len(allManifest))
@@ -143,14 +147,21 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 	if len(sources) == 0 {
 		t.Fatal("recorded replay has no configured source")
 	}
-	failedSourceName := "problem5-recorded-failed-source"
-	failedSourceCluster := "problem5-recorded-failed-cluster"
-	sources = append(sources, alertlifecycle.SourceSilenceState{SourceName: failedSourceName, ClusterID: failedSourceCluster, SyncStatus: "failed", LastError: "recorded source failure"})
+	failedSource, failedRecordedSnapshots := selectProblem5RecordedFailedSubset(t, manifest, snapshots, sources)
+	controlledSnapshots := append([]alertlifecycle.LiveAlertSnapshot(nil), snapshots...)
+	resolvedID, refiredID := manifest[0].AlertID, manifest[1].AlertID
+	recordedCauseSnapshots := problem5RecordedCauseSubset(controlledSnapshots, 3, resolvedID)
+	if len(recordedCauseSnapshots) == 0 {
+		t.Fatal("recorded replay has no independently selected suppressed source-linked subset")
+	}
 	path := filepath.Join(t.TempDir(), "replay.sqlite")
 	store, err := alertlifecycle.OpenStore(alertlifecycle.StoreOptions{Path: path})
 	if err != nil {
 		t.Fatalf("open replay store: %v", err)
 	}
+	wakeCount := 0
+	store.SetRecheckCommitWake(func() { wakeCount++ })
+	store.SetRecheckReconciledWake(func() { wakeCount++ })
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		_ = store.Close()
@@ -160,27 +171,22 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 		_ = db.Close()
 		_ = store.Close()
 	})
-	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	activeSilence := alertlifecycle.SourceSilenceSnapshot{
+		SilenceID: "problem5-recorded-active-silence", Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
+		Matchers: []alertlifecycle.SilenceMatcherSnapshot{{Name: "instance", Value: matcherValue, IsEqual: true}},
+	}
 	if _, err = store.ApplyPollCycle(alertlifecycle.PollCycleInput{
 		LiveAlerts: snapshots, SuccessfulUpstreams: successful, SilenceSources: sources,
 		Timestamp: now,
 	}); err != nil {
 		t.Fatalf("apply recorded traffic replay: %v", err)
 	}
+	if err = assertProblem5RecordedLiveCauseEvidence(db, recordedCauseSnapshots, now); err != nil {
+		t.Fatal(err)
+	}
 	if bootstrap, bootstrapErr := store.RunSilenceRecheckBatchContext(context.Background(), 20); bootstrapErr != nil || bootstrap.Status != "completed" {
 		t.Fatalf("complete bootstrap replay job: result=%+v err=%v", bootstrap, bootstrapErr)
 	}
-	failedLabels := `{"instance":"problem5-failed-context"}`
-	failedAt := now.Add(-time.Minute)
-	if err = store.UpsertCurrentAlert(alertlifecycle.AlertCurrent{
-		AlertID: "problem5-failed-context", State: alertlifecycle.StateInactive, RawState: alertlifecycle.StateActive,
-		Receiver: "problem5", GroupID: "problem5-failed", GroupLabelsJSON: `{}`, LabelsJSON: failedLabels,
-		MatchLabelsJSON: &failedLabels, AnnotationsJSON: `{}`, StartsAt: now.Add(-2 * time.Hour), LastSeenAt: &failedAt,
-		RelevantUpstreams: fmt.Sprintf(`[%q]`, failedSourceName), RelevantSources: fmt.Sprintf(`[{"name":%q,"cluster":%q}]`, failedSourceName, failedSourceCluster), UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("seed pinned-failed replay scope: %v", err)
-	}
-
 	var target string
 	for _, source := range sources {
 		if source.ClusterID != "" {
@@ -203,31 +209,47 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 		t.Fatalf("unexpected replay label index: total=%d labels=%+v", total, labelNames)
 	}
 
-	activeSources := replaySourcesWithSilence(sources, alertlifecycle.SourceSilenceSnapshot{
-		SilenceID: "problem5-recorded-active-silence", Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
-		Matchers: []alertlifecycle.SilenceMatcherSnapshot{{Name: "instance", Value: matcherValue, IsEqual: true}},
-	})
+	activeSources := replaySourcesWithSilence(sources, activeSilence)
 	creation, err := store.ApplyPollCycle(alertlifecycle.PollCycleInput{
 		LiveAlerts: []alertlifecycle.LiveAlertSnapshot{*successorRecorded}, SuccessfulUpstreams: successful, SilenceSources: activeSources, Timestamp: now.Add(time.Minute),
 	})
 	if err != nil {
-		t.Fatalf("apply recorded disappearance: %v", err)
+		t.Fatalf("apply recorded failed source context: %v", err)
 	}
 	if creation.RecheckJobsQueued != 1 || creation.RecheckJobsSourceContextChanged != 1 || creation.RecheckJobsAlertBecameEligible != 0 {
 		t.Fatalf("recorded source-context creation=%+v", creation)
 	}
 	var sourceJobID, totalCandidates int
-	if err = db.QueryRow(`SELECT job_id,total_candidates FROM silence_recheck_jobs WHERE total_candidates>0 ORDER BY job_id DESC LIMIT 1`).Scan(&sourceJobID, &totalCandidates); err != nil {
+	if err = db.QueryRow(`SELECT job_id,total_candidates FROM silence_recheck_jobs WHERE trigger_type='source_context_changed' AND total_candidates>0 ORDER BY job_id DESC LIMIT 1`).Scan(&sourceJobID, &totalCandidates); err != nil {
 		t.Fatal(err)
 	}
 	if totalCandidates < 80 {
 		t.Fatalf("recorded source-context job candidates=%d want at least 80", totalCandidates)
 	}
+	for priorBatches := 0; ; priorBatches++ {
+		head, headErr := store.RecheckQueueHead(context.Background())
+		if headErr != nil {
+			t.Fatal(headErr)
+		}
+		if head.JobID == int64(sourceJobID) {
+			break
+		}
+		if head.JobID == 0 || priorBatches > 100 {
+			t.Fatalf("recorded source-context job=%d is not the next FIFO head: %+v", sourceJobID, head)
+		}
+		if _, runErr := store.RunSilenceRecheckBatchContext(context.Background(), 20); runErr != nil {
+			t.Fatalf("finish prior replay job before source-context job=%d: %v", sourceJobID, runErr)
+		}
+	}
 	controlledRules, err := captureProblem5ControlledRules(db, activeSources)
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectedRelevantSources, expectedTargetMembers, err := buildProblem5ControlledCandidateRefs(snapshots, failedSourceName, failedSourceCluster)
+	expectedRelevantSources, expectedTargetMembers, err := buildProblem5ControlledCandidateRefs(controlledSnapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedSourceCandidates, err := problem5ExpectedCandidateInputs(controlledSnapshots, manifest, successorRecordedID, matcherValue, expectedRelevantSources, expectedTargetMembers, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,14 +257,6 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 		t.Fatalf("retained=%s first=%s last=%s: %v", successorRecordedID, manifest[0].AlertID, manifest[len(manifest)-1].AlertID, err)
 	}
 
-	candidateIDs, err := replayCandidateIDs(db, sourceJobID, 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidateIDs) < 3 {
-		t.Fatalf("recorded candidate partition fixture=%d want at least 3", len(candidateIDs))
-	}
-	resolvedID, refiredID := candidateIDs[0], candidateIDs[1]
 	if _, err = store.ResolveAlertContext(context.Background(), resolvedID, replayStringPtr("problem5-operator"), replayStringPtr("recorded resolved"), now.Add(2*time.Minute)); err != nil {
 		t.Fatalf("resolve recorded scope: %v", err)
 	}
@@ -276,7 +290,7 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 	if sourceSuccessorCount != 0 || disjointSuccessorCount == 0 {
 		t.Fatalf("recorded successor is not disjoint: source=%d successor=%d alert=%s", sourceSuccessorCount, disjointSuccessorCount, successorRecordedID)
 	}
-	eligibilityJobIDs, err := replayEligibilityJobIDs(db)
+	eligibilityJobIDs, err := replayEligibilityJobIDs(db, sourceJobID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,13 +345,13 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 	if inputAfterRestart != inputBeforeRestart {
 		t.Fatal("recorded immutable job input changed across Store restart")
 	}
-	if err = assertProblem5IndependentInputContract(db, sourceJobID, len(manifest)+1, len(sources), 2); err != nil {
+	if err = assertProblem5IndependentInputContract(db, sourceJobID, len(manifest), len(sources), 2); err != nil {
 		t.Fatal(err)
 	}
 	if err = assertProblem5ControlledInput(db, sourceJobID, sources, controlledRules, expectedRelevantSources, expectedTargetMembers); err != nil {
 		t.Fatal(err)
 	}
-	if err = assertProblem5IndependentImmutableModel(db, sourceJobID, activeSources, sources, controlledRules, expectedRelevantSources, expectedTargetMembers, snapshots, manifest, successorRecordedID, matcherValue, now); err != nil {
+	if err = assertProblem5IndependentImmutableModel(db, sourceJobID, activeSources, sources, controlledRules, expectedRelevantSources, expectedTargetMembers, controlledSnapshots, manifest, successorRecordedID, matcherValue, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -361,17 +375,7 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 	if err = assertReplayJobAccounting(db, sourceJobID); err != nil {
 		t.Fatal(err)
 	}
-	if err = assertReplayPinnedSourceFailure(db, sourceJobID, failedSourceName); err != nil {
-		t.Fatal(err)
-	}
-	var incompleteCount int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=? AND outcome='incomplete_source_coverage'`, sourceJobID).Scan(&incompleteCount); err != nil {
-		t.Fatal(err)
-	}
-	if incompleteCount == 0 {
-		t.Fatalf("recorded pinned-failed source job=%d produced no incomplete_source_coverage outcomes", sourceJobID)
-	}
-	if err = assertReplayPartition(db, sourceJobID, resolvedID, refiredID, "problem5-failed-context"); err != nil {
+	if err = assertReplayPartition(db, sourceJobID, resolvedID, refiredID, expectedSourceCandidates, controlledSnapshots); err != nil {
 		t.Fatal(err)
 	}
 
@@ -390,7 +394,6 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 			t.Fatal(err)
 		}
 	}
-
 	operatorSources := replaySourcesWithSilence(replaySourcesWithStatus(activeSources, "success"), alertlifecycle.SourceSilenceSnapshot{
 		SilenceID: "problem5-recorded-retry-silence", Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour),
 		Matchers: []alertlifecycle.SilenceMatcherSnapshot{{Name: "instance", Value: ".*", IsRegex: true}},
@@ -448,51 +451,331 @@ func runProblem5RecordedTraffic(t *testing.T, capability problem5ReplayCapabilit
 		t.Fatalf("recorded abandon action=%+v err=%v", abandonAction, abandonActionErr)
 	}
 
-	if err = assertReplaySuppressionRows(db); err != nil {
-		t.Fatal(err)
-	}
 	previousStore, previousEnabled := lifecycleStore, config.Config.AlertLifecycle.Enabled
 	lifecycleStore, config.Config.AlertLifecycle.Enabled = store, true
 	t.Cleanup(func() { lifecycleStore, config.Config.AlertLifecycle.Enabled = previousStore, previousEnabled })
+	expectedFinalCandidates, expectedFinalErr := problem5ExpectedCandidateInputs(controlledSnapshots, manifest, successorRecordedID, matcherValue, expectedRelevantSources, expectedTargetMembers, now)
+	if expectedFinalErr != nil {
+		t.Fatal(expectedFinalErr)
+	}
+	expectedStats, expectedStatsErr := problem5IndependentLifecycleStats(db, path, expectedFinalCandidates, snapshots, resolvedID, refiredID, matcherValue, successorRecordedID)
+	if expectedStatsErr != nil {
+		t.Fatal(expectedStatsErr)
+	}
 	merged := mergeLifecycleStoredAlertsContext(context.Background(), nil, true)
 	if len(merged) == 0 || len(merged[0].Alerts) == 0 {
 		t.Fatal("recorded replay merge returned no lifecycle alerts")
 	}
 	statsRecorder := httptest.NewRecorder()
+	beforeReadOnly, snapshotErr := captureProblem5OperatorSnapshot(db)
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
+	wakesBeforeStats := wakeCount
 	alertLifecycleStats(statsRecorder, httptest.NewRequest(http.MethodGet, "/alerts-history/stats", http.NoBody))
 	if statsRecorder.Code != http.StatusOK {
 		t.Fatalf("recorded stats HTTP status=%d body=%s", statsRecorder.Code, statsRecorder.Body.String())
 	}
+	if wakeCount != wakesBeforeStats {
+		t.Fatalf("recorded stats wake delta=%d want=0", wakeCount-wakesBeforeStats)
+	}
 	warningRecorder := httptest.NewRecorder()
+	wakesBeforeWarning := wakeCount
 	alertLifecycleWarning(warningRecorder, httptest.NewRequest(http.MethodGet, "/alerts-history/warning", http.NoBody))
 	if warningRecorder.Code != http.StatusOK {
 		t.Fatalf("recorded warning HTTP status=%d body=%s", warningRecorder.Code, warningRecorder.Body.String())
 	}
-	if err = assertProblem5ExactStatsWarningResponses(db, path, statsRecorder.Body.Bytes(), warningRecorder.Body.Bytes()); err != nil {
+	if wakeCount != wakesBeforeWarning {
+		t.Fatalf("recorded warning wake delta=%d want=0", wakeCount-wakesBeforeWarning)
+	}
+	afterReadOnly, snapshotErr := captureProblem5OperatorSnapshot(db)
+	if snapshotErr != nil {
+		t.Fatal(snapshotErr)
+	}
+	if beforeReadOnly != afterReadOnly {
+		t.Fatal("recorded stats/warning reads changed durable lifecycle rows or writer ledger")
+	}
+	if err = assertProblem5ExactStatsWarningResponses(statsRecorder.Body.Bytes(), warningRecorder.Body.Bytes(), expectedStats); err != nil {
 		t.Fatal(err)
 	}
-	if err = assertProblem5ReplayFinalState(db, sourceJobID, successorJobID, retryJobID, abandonJobID, len(manifest)+1); err != nil {
+	if err = assertProblem5ReplayFinalState(db, sourceJobID, successorJobID, retryJobID, abandonJobID, totalCandidates); err != nil {
 		t.Fatal(err)
 	}
-	if err = assertProblem5IndependentFinalModel(db, snapshots, resolvedID, matcherValue, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
+	if err = assertProblem5IndependentFinalModel(db, controlledSnapshots, resolvedID, matcherValue, sources[0].ClusterID, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
 		t.Fatal(err)
 	}
-	expectedFinalCandidates, expectedFinalErr := problem5ExpectedCandidateInputs(snapshots, manifest, successorRecordedID, matcherValue, expectedRelevantSources, expectedTargetMembers, now)
-	if expectedFinalErr != nil {
-		t.Fatal(expectedFinalErr)
-	}
-	if err = assertProblem5IndependentFinalSourceJob(db, sourceJobID, activeSources, controlledRules, expectedFinalCandidates, snapshots, now); err != nil {
+	if err = assertProblem5IndependentFinalSourceJob(db, sourceJobID, activeSources, expectedFinalCandidates, controlledSnapshots, resolvedID, refiredID, now); err != nil {
 		t.Fatal(err)
 	}
-	if err = assertProblem5IndependentFullAlertModel(db, snapshots, resolvedID, matcherValue, now); err != nil {
+	if err = assertProblem5IndependentFullAlertModel(db, snapshots, resolvedID, matcherValue, sources[0].ClusterID, now); err != nil {
 		t.Fatal(err)
 	}
-	if err = assertProblem5ReplayCapability(capability, db, path, sourceJobID, successorJobID, eligibilityJobIDs, expectedSuccessorSnapshots, manifest, inputBeforeRestart, inputAfterRestart, sources, controlledRules, expectedRelevantSources, expectedTargetMembers, statsRecorder.Body.Bytes(), warningRecorder.Body.Bytes(), snapshots, resolvedID, matcherValue, retryJobID, abandonJobID); err != nil {
+	if err = assertProblem5ReplayCapability(capability, db, sourceJobID, successorJobID, eligibilityJobIDs, expectedSuccessorSnapshots, manifest, inputBeforeRestart, inputAfterRestart, sources, statsRecorder.Body.Bytes(), warningRecorder.Body.Bytes(), expectedStats, controlledSnapshots, resolvedID, matcherValue, retryJobID, abandonJobID); err != nil {
 		t.Fatalf("capability %s: %v", capability, err)
+	}
+	assertProblem5RecordedFailedSubsetInContext(t, store, db, snapshots, failedRecordedSnapshots, failedSource, successful, sources, now)
+}
+
+func selectProblem5RecordedFailedSubset(t *testing.T, manifest []problem5ReplayScope, snapshots []alertlifecycle.LiveAlertSnapshot, sources []alertlifecycle.SourceSilenceState) (alertlifecycle.SourceSilenceState, []alertlifecycle.LiveAlertSnapshot) {
+	t.Helper()
+	if len(sources) == 0 {
+		t.Fatal("recorded replay has no source for failed partition")
+	}
+	source := sources[0]
+	selected := make([]alertlifecycle.LiveAlertSnapshot, 0, 3)
+	for _, scope := range manifest {
+		snapshot := replaySnapshotByID(snapshots, scope.AlertID)
+		if snapshot == nil {
+			t.Fatalf("missing recorded failed subset scope %q", scope.AlertID)
+		}
+		if snapshot.State != alertlifecycle.StateActive {
+			continue
+		}
+		for _, relevant := range snapshot.RelevantSources {
+			if relevant.Name == source.SourceName && relevant.Cluster == source.ClusterID {
+				selected = append(selected, *snapshot)
+				break
+			}
+		}
+		if len(selected) == 3 {
+			return source, selected
+		}
+	}
+	t.Fatalf("recorded failed-source partition has fewer than three scopes for %s/%s", source.SourceName, source.ClusterID)
+	return alertlifecycle.SourceSilenceState{}, nil
+}
+
+func assertProblem5RecordedFailedSubsetInContext(t *testing.T, store *alertlifecycle.Store, db *sql.DB, snapshots, failedSnapshots []alertlifecycle.LiveAlertSnapshot, source alertlifecycle.SourceSilenceState, successful map[string]bool, sources []alertlifecycle.SourceSilenceState, now time.Time) {
+	t.Helper()
+	failedIDs := make(map[string]struct{}, len(failedSnapshots))
+	for _, snapshot := range failedSnapshots {
+		failedIDs[snapshot.AlertID] = struct{}{}
+	}
+	if len(failedIDs) != len(failedSnapshots) {
+		t.Fatal("recorded failed-source partition contains duplicate alert IDs")
+	}
+	withoutFailed := make([]alertlifecycle.LiveAlertSnapshot, 0, len(snapshots)-len(failedSnapshots))
+	for _, snapshot := range snapshots {
+		if _, failed := failedIDs[snapshot.AlertID]; !failed {
+			withoutFailed = append(withoutFailed, snapshot)
+		}
+	}
+	if len(withoutFailed) != len(snapshots)-len(failedSnapshots) {
+		t.Fatalf("recorded failed-source partition overlap: full=%d failed=%d unaffected=%d", len(snapshots), len(failedSnapshots), len(withoutFailed))
+	}
+	for _, alertID := range []string{"problem5-recorded-retry-alert", "problem5-recorded-abandon-alert"} {
+		if _, err := store.ResolveAlertContext(context.Background(), alertID, replayStringPtr("problem5-evidence"), replayStringPtr("exclude operator fixture"), now); err != nil {
+			t.Fatalf("exclude operator fixture %s from failed-source partition: %v", alertID, err)
+		}
+	}
+	if _, err := store.ApplyPollCycle(alertlifecycle.PollCycleInput{LiveAlerts: snapshots, SuccessfulUpstreams: successful, SilenceSources: sources, Timestamp: now}); err != nil {
+		t.Fatalf("same-context failed-source reset poll: %v", err)
+	}
+	for {
+		head, headErr := store.RecheckQueueHead(context.Background())
+		if headErr != nil {
+			t.Fatal(headErr)
+		}
+		if head.JobID == 0 {
+			break
+		}
+		if _, runErr := store.RunSilenceRecheckBatchContext(context.Background(), 20); runErr != nil {
+			t.Fatalf("same-context failed-source reset worker: %v", runErr)
+		}
+	}
+	if _, err := store.ApplyPollCycle(alertlifecycle.PollCycleInput{LiveAlerts: withoutFailed, SuccessfulUpstreams: successful, Timestamp: now}); err != nil {
+		t.Fatalf("same-context failed-source disappearance poll: %v", err)
+	}
+	for {
+		head, headErr := store.RecheckQueueHead(context.Background())
+		if headErr != nil {
+			t.Fatal(headErr)
+		}
+		if head.JobID == 0 {
+			break
+		}
+		if _, runErr := store.RunSilenceRecheckBatchContext(context.Background(), 20); runErr != nil {
+			t.Fatalf("same-context failed-source predecessor worker: %v", runErr)
+		}
+	}
+	beforeStates, err := captureReplayRows(db, `SELECT * FROM alert_states WHERE alert_id NOT IN (?,?,?) ORDER BY alert_id`, failedSnapshots[0].AlertID, failedSnapshots[1].AlertID, failedSnapshots[2].AlertID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeTargetStates, err := captureReplayRows(db, `SELECT * FROM alert_target_states WHERE alert_id NOT IN (?,?,?) ORDER BY alert_id,target`, failedSnapshots[0].AlertID, failedSnapshots[1].AlertID, failedSnapshots[2].AlertID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeEvents, err := captureReplayRows(db, `SELECT * FROM alert_events WHERE alert_id NOT IN (?,?,?) ORDER BY id`, failedSnapshots[0].AlertID, failedSnapshots[1].AlertID, failedSnapshots[2].AlertID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedSources := append([]alertlifecycle.SourceSilenceState(nil), sources...)
+	failedSuccessful := make(map[string]bool, len(successful))
+	for name, ok := range successful {
+		failedSuccessful[name] = ok
+	}
+	var sourceFound bool
+	for sourceIndex := range failedSources {
+		if failedSources[sourceIndex].SourceName == source.SourceName && failedSources[sourceIndex].ClusterID == source.ClusterID {
+			failedSources[sourceIndex].SyncStatus = "failed"
+			failedSources[sourceIndex].LastError = "recorded source failure"
+			delete(failedSuccessful, source.SourceName)
+		} else {
+			for snapshotIndex, snapshot := range failedSnapshots {
+				var labels map[string]string
+				if unmarshalErr := json.Unmarshal([]byte(snapshot.LabelsJSON), &labels); unmarshalErr != nil {
+					t.Fatalf("failed subset labels %q: %v", snapshot.AlertID, unmarshalErr)
+				}
+				matchers := []alertlifecycle.SilenceMatcherSnapshot{{Name: "alertname", Value: labels["alertname"], IsEqual: true}}
+				if labels["instance"] != "" {
+					matchers = append(matchers, alertlifecycle.SilenceMatcherSnapshot{Name: "instance", Value: labels["instance"], IsEqual: true})
+				}
+				failedSources[sourceIndex].Silences = append(failedSources[sourceIndex].Silences, alertlifecycle.SourceSilenceSnapshot{
+					SilenceID: fmt.Sprintf("problem5-recorded-failed-%d", snapshotIndex), Status: "active", StartsAt: now.Add(-time.Hour), EndsAt: now.Add(time.Hour), Matchers: matchers,
+				})
+			}
+			delete(failedSuccessful, source.SourceName)
+			sourceFound = true
+		}
+	}
+	if !sourceFound {
+		t.Fatalf("failed source %s/%s is not in replay input", source.SourceName, source.ClusterID)
+	}
+	creation, err := store.ApplyPollCycle(alertlifecycle.PollCycleInput{LiveAlerts: withoutFailed, SuccessfulUpstreams: failedSuccessful, SilenceSources: failedSources, Timestamp: now})
+	if err != nil || creation.RecheckJobsQueued != 1 || creation.RecheckJobsSourceContextChanged != 1 || creation.RecheckJobsAlertBecameEligible != 0 {
+		var stateDetails string
+		if diagnosticErr := db.QueryRow(`SELECT COALESCE(GROUP_CONCAT(alert_id || ':' || state || ':' || is_live || ':' || is_suppressed), '') FROM alert_states WHERE alert_id IN (?,?,?)`, failedSnapshots[0].AlertID, failedSnapshots[1].AlertID, failedSnapshots[2].AlertID).Scan(&stateDetails); diagnosticErr != nil {
+			t.Fatalf("same-context failed-source poll creation=%+v err=%v diagnostic=%v", creation, err, diagnosticErr)
+		}
+		t.Fatalf("same-context failed-source poll creation=%+v err=%v states=%s", creation, err, stateDetails)
+	}
+	var jobID, total, processed int
+	var trigger, status, contextJSON string
+	if err = db.QueryRow(`SELECT job_id,total_candidates,processed_candidates,trigger_type,status,source_context_json FROM silence_recheck_jobs ORDER BY job_id DESC LIMIT 1`).Scan(&jobID, &total, &processed, &trigger, &status, &contextJSON); err != nil {
+		t.Fatal(err)
+	}
+	if trigger != "source_context_changed" || status != "queued" || total != len(failedSnapshots) || processed != 0 || !strings.Contains(contextJSON, source.SourceName) || !strings.Contains(contextJSON, `"syncStatus":"failed"`) {
+		t.Fatalf("same-context failed-source job=%d trigger=%q status=%q total=%d processed=%d context=%s", jobID, trigger, status, total, processed, contextJSON)
+	}
+	for {
+		head, headErr := store.RecheckQueueHead(context.Background())
+		if headErr != nil {
+			t.Fatal(headErr)
+		}
+		if head.JobID == 0 {
+			break
+		}
+		if _, runErr := store.RunSilenceRecheckBatchContext(context.Background(), 20); runErr != nil {
+			t.Fatalf("same-context failed-source worker: %v", runErr)
+		}
+	}
+	if err = assertReplayPinnedSourceFailure(db, jobID, source.SourceName, failedSources); err != nil {
+		t.Fatal(err)
+	}
+	if err = assertProblem5IndependentFailedSourceJob(db, jobID, failedSnapshots, failedSources, now); err != nil {
+		t.Fatal(err)
+	}
+	failedRelevant, failedMembers, err := buildProblem5ControlledCandidateRefs(failedSnapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedExpectedCandidates, err := problem5ExpectedCandidateInputs(failedSnapshots, buildProblem5ReplayManifest(failedSnapshots), "", "", failedRelevant, failedMembers, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = assertProblem5FailedRecordedSubset(db, jobID, failedExpectedCandidates, now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	afterStates, err := captureReplayRows(db, `SELECT * FROM alert_states WHERE alert_id NOT IN (?,?,?) ORDER BY alert_id`, failedSnapshots[0].AlertID, failedSnapshots[1].AlertID, failedSnapshots[2].AlertID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterTargetStates, err := captureReplayRows(db, `SELECT * FROM alert_target_states WHERE alert_id NOT IN (?,?,?) ORDER BY alert_id,target`, failedSnapshots[0].AlertID, failedSnapshots[1].AlertID, failedSnapshots[2].AlertID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterEvents, err := captureReplayRows(db, `SELECT * FROM alert_events WHERE alert_id NOT IN (?,?,?) ORDER BY id`, failedSnapshots[0].AlertID, failedSnapshots[1].AlertID, failedSnapshots[2].AlertID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeStates != afterStates || beforeTargetStates != afterTargetStates || beforeEvents != afterEvents {
+		t.Fatal("same-context failed-source partition changed unaffected alert state or events")
+	}
+	if _, err = store.ApplyPollCycle(alertlifecycle.PollCycleInput{LiveAlerts: withoutFailed, SuccessfulUpstreams: successful, SilenceSources: sources, Timestamp: now.Add(2 * time.Minute)}); err != nil {
+		t.Fatalf("same-context failed-source recovery poll: %v", err)
+	}
+	for {
+		head, headErr := store.RecheckQueueHead(context.Background())
+		if headErr != nil {
+			t.Fatal(headErr)
+		}
+		if head.JobID == 0 {
+			break
+		}
+		if _, runErr := store.RunSilenceRecheckBatchContext(context.Background(), 20); runErr != nil {
+			t.Fatalf("same-context failed-source recovery worker: %v", runErr)
+		}
 	}
 }
 
-func assertProblem5ReplayCapability(capability problem5ReplayCapability, db *sql.DB, sqlitePath string, sourceJobID, successorJobID int, eligibilityJobIDs []int, expectedSuccessors map[string]alertlifecycle.LiveAlertSnapshot, manifest []problem5ReplayScope, inputBefore, inputAfter string, sources []alertlifecycle.SourceSilenceState, rules []problem5ControlledRule, expectedRelevant, expectedMembers map[string]string, statsBody, warningBody []byte, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, matcherValue string, retryJobID, abandonJobID int) error {
+func assertProblem5IndependentFailedSourceJob(db *sql.DB, jobID int, snapshots []alertlifecycle.LiveAlertSnapshot, sources []alertlifecycle.SourceSilenceState, now time.Time) error {
+	rules, err := captureProblem5ControlledRules(db, sources)
+	if err != nil {
+		return err
+	}
+	expectedRules, err := problem5ExpectedControlledRulesFromInput(sources)
+	if err != nil {
+		return err
+	}
+	relevant, members, err := buildProblem5ControlledCandidateRefs(snapshots)
+	if err != nil {
+		return err
+	}
+	manifest := buildProblem5ReplayManifest(snapshots)
+	expectedCandidates, err := problem5ExpectedCandidateInputs(snapshots, manifest, "", "", relevant, members, now)
+	if err != nil {
+		return err
+	}
+	contextJSON, _, err := problem5ExpectedSourceContext(sources, 5)
+	if err != nil {
+		return err
+	}
+	var expectedContext problem5IndependentSourceContext
+	if err = json.Unmarshal([]byte(contextJSON), &expectedContext); err != nil {
+		return err
+	}
+	for index := range expectedContext.Clusters {
+		expectedContext.Clusters[index].Status = "consistent"
+	}
+	canonicalContext, err := json.Marshal(expectedContext)
+	if err != nil {
+		return err
+	}
+	contextJSON = string(canonicalContext)
+	sourceFingerprint := problem5Fingerprint(canonicalContext)
+	expectedJobFingerprint, err := problem5ExpectedJobFingerprint(contextJSON, sourceFingerprint, expectedRules, expectedCandidates)
+	if err != nil {
+		return err
+	}
+	if err = assertProblem5ControlledInput(db, jobID, sources, rules, relevant, members); err != nil {
+		return err
+	}
+	var actualSourceFingerprint, actualJobFingerprint, actualContext, trigger, status, createdAt, startedAt, finishedAt string
+	var cursor, nextAttempt, firstMessage, firstClass, firstStage, firstAt, lastMessage, lastClass, lastStage, lastAt, abandonedAt, abandonedBy, abandonReason sql.NullString
+	var total, processed, promoted, ineligible, missingLabels, incomplete, stale, attempts, retries, consecutive, recovery int
+	if err = db.QueryRow(`SELECT source_context_fingerprint,job_fingerprint,source_context_json,trigger_type,status,created_at,started_at,finished_at,cursor_alert_id,next_attempt_at,first_error_message,first_error_class,first_error_stage,first_error_at,last_error_message,last_error_class,last_error_stage,last_error_at,abandoned_at,abandoned_by,abandon_reason,total_candidates,processed_candidates,promoted_candidates,skipped_ineligible,skipped_missing_labels,skipped_incomplete_sources,stale_conflicts,attempt_count,retry_count,consecutive_retry_count,recovery_count FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&actualSourceFingerprint, &actualJobFingerprint, &actualContext, &trigger, &status, &createdAt, &startedAt, &finishedAt, &cursor, &nextAttempt, &firstMessage, &firstClass, &firstStage, &firstAt, &lastMessage, &lastClass, &lastStage, &lastAt, &abandonedAt, &abandonedBy, &abandonReason, &total, &processed, &promoted, &ineligible, &missingLabels, &incomplete, &stale, &attempts, &retries, &consecutive, &recovery); err != nil {
+		return err
+	}
+	wantCreated := now.UTC().Format(time.RFC3339Nano)
+	wantWorker := now.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
+	if actualSourceFingerprint != sourceFingerprint || actualJobFingerprint != expectedJobFingerprint || actualContext != contextJSON || trigger != "source_context_changed" || status != "completed" || createdAt != wantCreated || startedAt != wantWorker || finishedAt != wantWorker || !cursor.Valid || cursor.String != expectedCandidates[len(expectedCandidates)-1].AlertID || total != len(expectedCandidates) || processed != total || promoted != 0 || ineligible != 0 || missingLabels != 0 || incomplete != total || stale != 0 || attempts != 1 || retries != 0 || consecutive != 0 || recovery != 0 || nextAttempt.Valid || firstMessage.Valid || firstClass.Valid || firstStage.Valid || firstAt.Valid || lastMessage.Valid || lastClass.Valid || lastStage.Valid || lastAt.Valid || abandonedAt.Valid || abandonedBy.Valid || abandonReason.Valid {
+		return fmt.Errorf("independent failed-source job=%d source=%q/%q fingerprint=%q/%q status=%q timestamps=%q/%q/%q candidates=%d/%d processed=%d incomplete=%d", jobID, actualSourceFingerprint, sourceFingerprint, actualJobFingerprint, expectedJobFingerprint, status, createdAt, startedAt, finishedAt, total, len(expectedCandidates), processed, incomplete)
+	}
+	return nil
+}
+
+func assertProblem5ReplayCapability(capability problem5ReplayCapability, db *sql.DB, sourceJobID, successorJobID int, eligibilityJobIDs []int, expectedSuccessors map[string]alertlifecycle.LiveAlertSnapshot, manifest []problem5ReplayScope, inputBefore, inputAfter string, sources []alertlifecycle.SourceSilenceState, statsBody, warningBody []byte, expectedStats alertlifecycle.Stats, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, matcherValue string, retryJobID, abandonJobID int) error {
 	switch capability {
 	case problem5CapabilityAll:
 		if len(manifest) == 0 || sourceJobID == successorJobID {
@@ -504,16 +787,13 @@ func assertProblem5ReplayCapability(capability problem5ReplayCapability, db *sql
 		if inputBefore != inputAfter {
 			return errors.New("immutable input changed across restart")
 		}
-		if err := assertProblem5CompleteImmutableInput(db, sourceJobID, sources, rules, expectedRelevant, expectedMembers); err != nil {
-			return err
-		}
-		if err := assertProblem5IndependentFinalModel(db, snapshots, resolvedID, matcherValue, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
+		if err := assertProblem5IndependentFinalModel(db, snapshots, resolvedID, matcherValue, sources[0].ClusterID, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
 			return err
 		}
 		if err := assertProblem5CompleteFinalRows(db, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
 			return err
 		}
-		if err := assertProblem5ExactStatsWarningResponses(db, sqlitePath, statsBody, warningBody); err != nil {
+		if err := assertProblem5ExactStatsWarningResponses(statsBody, warningBody, expectedStats); err != nil {
 			return err
 		}
 	case problem5CapabilitySuccessor:
@@ -527,18 +807,15 @@ func assertProblem5ReplayCapability(capability problem5ReplayCapability, db *sql
 		if inputBefore != inputAfter {
 			return errors.New("immutable input changed across restart")
 		}
-		if err := assertProblem5CompleteImmutableInput(db, sourceJobID, sources, rules, expectedRelevant, expectedMembers); err != nil {
-			return err
-		}
 	case problem5CapabilityFinal:
-		if err := assertProblem5IndependentFinalModel(db, snapshots, resolvedID, matcherValue, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
+		if err := assertProblem5IndependentFinalModel(db, snapshots, resolvedID, matcherValue, sources[0].ClusterID, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
 			return err
 		}
 		if err := assertProblem5CompleteFinalRows(db, sourceJobID, successorJobID, retryJobID, abandonJobID); err != nil {
 			return err
 		}
 	case problem5CapabilityAPI:
-		if err := assertProblem5ExactStatsWarningResponses(db, sqlitePath, statsBody, warningBody); err != nil {
+		if err := assertProblem5ExactStatsWarningResponses(statsBody, warningBody, expectedStats); err != nil {
 			return err
 		}
 	case problem5CapabilityReplay:
@@ -556,8 +833,8 @@ func assertProblem5ExactSuccessorMembership(db *sql.DB, sourceJobID int, success
 	if err := db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_job_candidates WHERE job_id=?`, sourceJobID).Scan(&sourceCount); err != nil {
 		return err
 	}
-	if sourceCount != recordedManifestCount+1 {
-		return fmt.Errorf("source membership=%d want=%d recorded scopes plus failed-source context", sourceCount, recordedManifestCount+1)
+	if sourceCount != recordedManifestCount {
+		return fmt.Errorf("source membership=%d want=%d recorded scopes", sourceCount, recordedManifestCount)
 	}
 	for alertID := range expected {
 		var source, successor int
@@ -601,31 +878,6 @@ func assertProblem5ExactSuccessorMembership(db *sql.DB, sourceJobID int, success
 	return nil
 }
 
-func assertProblem5CompleteImmutableInput(db *sql.DB, jobID int, sources []alertlifecycle.SourceSilenceState, rules []problem5ControlledRule, expectedRelevant, expectedMembers map[string]string) error {
-	if err := assertProblem5ControlledInput(db, jobID, sources, rules, expectedRelevant, expectedMembers); err != nil {
-		return err
-	}
-	ruleRows, err := captureReplayRows(db, `SELECT * FROM silence_recheck_job_rules WHERE job_id=? ORDER BY source_name,silence_id`, jobID)
-	if err != nil {
-		return err
-	}
-	candidateRows, err := captureReplayRows(db, `SELECT * FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY alert_id,target_key`, jobID)
-	if err != nil {
-		return err
-	}
-	if ruleRows == "" || candidateRows == "" {
-		return errors.New("complete immutable input has an empty rule or candidate row set")
-	}
-	var jobFingerprint, sourceContext, trigger string
-	if err = db.QueryRow(`SELECT job_fingerprint,source_context_json,trigger_type FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&jobFingerprint, &sourceContext, &trigger); err != nil {
-		return err
-	}
-	if !strings.HasPrefix(jobFingerprint, "sha256:") || !strings.HasPrefix(sourceContext, "{") || trigger != "source_context_changed" {
-		return fmt.Errorf("immutable job header fingerprint=%q context=%q trigger=%q", jobFingerprint, sourceContext, trigger)
-	}
-	return nil
-}
-
 func assertProblem5CompleteFinalRows(db *sql.DB, sourceJobID, successorJobID, retryJobID, abandonJobID int) error {
 	for _, table := range []string{"alert_states", "alert_target_states", "alert_events", "silence_recheck_jobs", "silence_recheck_job_candidates", "silence_recheck_job_attempts", "silence_recheck_job_operator_actions", "alert_suppression_cause_history", "alert_suppression_cause_members"} {
 		var count int
@@ -658,11 +910,7 @@ func assertProblem5CompleteFinalRows(db *sql.DB, sourceJobID, successorJobID, re
 	return nil
 }
 
-func assertProblem5ExactStatsWarningResponses(db *sql.DB, sqlitePath string, statsBody, warningBody []byte) error {
-	stats, err := problem5IndependentStatsFromDB(db, sqlitePath)
-	if err != nil {
-		return fmt.Errorf("independent stats model: %w", err)
-	}
+func assertProblem5ExactStatsWarningResponses(statsBody, warningBody []byte, stats alertlifecycle.Stats) error {
 	var actualStats, actualWarning map[string]any
 	if err := json.Unmarshal(statsBody, &actualStats); err != nil {
 		return fmt.Errorf("stats JSON: %w", err)
@@ -685,148 +933,45 @@ func assertProblem5ExactStatsWarningResponses(db *sql.DB, sqlitePath string, sta
 	return assertProblem5StatsWarningResponses(statsBody, warningBody)
 }
 
-func problem5IndependentStatsFromDB(db *sql.DB, sqlitePath string) (alertlifecycle.Stats, error) {
-	var stats alertlifecycle.Stats
+func problem5IndependentLifecycleStats(db *sql.DB, sqlitePath string, candidates []problem5IndependentCandidateInput, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, refiredID, matcherValue, successorID string) (alertlifecycle.Stats, error) {
+	stats := alertlifecycle.Stats{
+		StateCounts: map[string]int{}, RegroupStatus: "ready", RegroupProcessed: 0, RegroupTotal: 0,
+		GroupingFingerprint: "", RegroupTargetFingerprint: "", RegroupError: "",
+	}
+	for _, snapshot := range snapshots {
+		state := string(alertlifecycle.StateInactive)
+		if snapshot.AlertID == resolvedID {
+			state = string(alertlifecycle.StateResolved)
+		} else if snapshot.State == alertlifecycle.StateSuppressed || replaySnapshotInstance(snapshot) == matcherValue {
+			state = string(alertlifecycle.StateSuppressed)
+		}
+		stats.StateCounts[state]++
+		if state == string(alertlifecycle.StateSuppressed) {
+			stats.SuppressedBreakdownPast++
+		}
+	}
+	stats.StateCounts[string(alertlifecycle.StateInactive)] += 2
+	stats.CurrentRows = len(snapshots) + 2
+	stats.HistoryRows = len(snapshots) + (len(snapshots) - 1) + 4 + 4
+	for _, candidate := range candidates {
+		if problem5ExpectedCandidateOutcome(candidate.AlertID, candidate.TargetKey, snapshots, resolvedID, refiredID) == "promoted" {
+			stats.HistoryRows++
+		}
+	}
+	if successor := replaySnapshotByID(snapshots, successorID); successor != nil && successor.State != alertlifecycle.StateSuppressed && replaySnapshotInstance(*successor) == matcherValue {
+		stats.HistoryRows++
+	}
+	var err error
 	for query, destination := range map[string]any{
-		`SELECT COUNT(*) FROM alert_states`: &stats.CurrentRows,
-		`SELECT COUNT(*) FROM alert_events`: &stats.HistoryRows,
-		`PRAGMA page_count`:                 &stats.PageCount,
-		`PRAGMA page_size`:                  &stats.PageSizeBytes,
-		`PRAGMA freelist_count`:             &stats.FreelistCount,
+		`PRAGMA page_count`:     &stats.PageCount,
+		`PRAGMA page_size`:      &stats.PageSizeBytes,
+		`PRAGMA freelist_count`: &stats.FreelistCount,
 	} {
-		if err := db.QueryRow(query).Scan(destination); err != nil {
+		if err = db.QueryRow(query).Scan(destination); err != nil {
 			return alertlifecycle.Stats{}, err
 		}
 	}
-	stats.StateCounts = map[string]int{}
-	rows, err := db.Query(`SELECT state,COUNT(*) FROM alert_states GROUP BY state`)
-	if err != nil {
-		return alertlifecycle.Stats{}, err
-	}
-	for rows.Next() {
-		var state string
-		var count int
-		if err = rows.Scan(&state, &count); err != nil {
-			rows.Close()
-			return alertlifecycle.Stats{}, err
-		}
-		if strings.TrimSpace(state) == "" {
-			state = "unknown"
-		}
-		stats.StateCounts[state] = count
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return alertlifecycle.Stats{}, err
-	}
-	rows.Close()
-	rows, err = db.Query(`SELECT is_live,COUNT(*) FROM alert_states WHERE state=? GROUP BY is_live`, string(alertlifecycle.StateSuppressed))
-	if err != nil {
-		return alertlifecycle.Stats{}, err
-	}
-	for rows.Next() {
-		var live, count int
-		if err = rows.Scan(&live, &count); err != nil {
-			rows.Close()
-			return alertlifecycle.Stats{}, err
-		}
-		if live != 0 {
-			stats.SuppressedBreakdownCurrent += count
-		} else {
-			stats.SuppressedBreakdownPast += count
-		}
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return alertlifecycle.Stats{}, err
-	}
-	rows.Close()
-	metadata := func(key string) (string, error) {
-		var value string
-		metadataErr := db.QueryRow(`SELECT value FROM metadata WHERE key=?`, key).Scan(&value)
-		if errors.Is(metadataErr, sql.ErrNoRows) {
-			return "", nil
-		}
-		return value, metadataErr
-	}
-	parseMetadataTime := func(raw, key string) (*time.Time, error) {
-		if strings.TrimSpace(raw) == "" {
-			return nil, nil
-		}
-		value, parseErr := time.Parse(time.RFC3339Nano, raw)
-		if parseErr != nil {
-			return nil, fmt.Errorf("metadata %s: %w", key, parseErr)
-		}
-		value = value.UTC()
-		return &value, nil
-	}
-	var metadataErr error
-	if stats.GroupingFingerprint, metadataErr = metadata("grouping_fingerprint"); metadataErr != nil {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	if stats.RegroupTargetFingerprint, metadataErr = metadata("regroup_target_fingerprint"); metadataErr != nil {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	if stats.RegroupStatus, metadataErr = metadata("regroup_status"); metadataErr != nil {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	if stats.RegroupError, metadataErr = metadata("regroup_error"); metadataErr != nil {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	var processed, total string
-	if processed, metadataErr = metadata("regroup_processed"); metadataErr != nil {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	if total, metadataErr = metadata("regroup_total"); metadataErr != nil {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	if stats.RegroupProcessed, metadataErr = strconv.Atoi(processed); metadataErr != nil && strings.TrimSpace(processed) != "" {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	if stats.RegroupTotal, metadataErr = strconv.Atoi(total); metadataErr != nil && strings.TrimSpace(total) != "" {
-		return alertlifecycle.Stats{}, metadataErr
-	}
-	for key, destination := range map[string]**time.Time{
-		"regroup_started_at":         &stats.RegroupStartedAt,
-		"regroup_finished_at":        &stats.RegroupFinishedAt,
-		"last_housekeeping_at":       &stats.LastHousekeepingAt,
-		"last_incremental_vacuum_at": &stats.LastIncrementalVacuumAt,
-	} {
-		value, readErr := metadata(key)
-		if readErr != nil {
-			return alertlifecycle.Stats{}, readErr
-		}
-		parsed, parseErr := parseMetadataTime(value, key)
-		if parseErr != nil {
-			return alertlifecycle.Stats{}, parseErr
-		}
-		*destination = parsed
-	}
-	clusterRows, err := db.Query(`SELECT cluster_id FROM alertmanager_cluster_consistency WHERE status='inconsistent' ORDER BY cluster_id`)
-	if err != nil {
-		return alertlifecycle.Stats{}, err
-	}
-	for clusterRows.Next() {
-		var cluster string
-		if err = clusterRows.Scan(&cluster); err != nil {
-			clusterRows.Close()
-			return alertlifecycle.Stats{}, err
-		}
-		stats.SilenceInconsistentClusters = append(stats.SilenceInconsistentClusters, cluster)
-	}
-	if err = clusterRows.Err(); err != nil {
-		clusterRows.Close()
-		return alertlifecycle.Stats{}, err
-	}
-	clusterRows.Close()
-	if err = db.QueryRow(`SELECT COUNT(*) FROM silence_recheck_jobs WHERE status IN ('queued','running','retry_wait','failed')`).Scan(&stats.Recheck.QueueDepth); err != nil {
-		return alertlifecycle.Stats{}, err
-	}
-	if stats.Recheck.QueueDepth != 0 {
-		return alertlifecycle.Stats{}, fmt.Errorf("independent final stats model has active recheck queue depth=%d", stats.Recheck.QueueDepth)
-	}
-	fileInfo, statErr := os.Stat(sqlitePath)
-	if statErr == nil {
+	if fileInfo, statErr := os.Stat(sqlitePath); statErr == nil {
 		stats.FileSizeBytes = fileInfo.Size()
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return alertlifecycle.Stats{}, statErr
@@ -991,15 +1136,6 @@ func seedReplayOperatorJob(t *testing.T, store *alertlifecycle.Store, db *sql.DB
 	}
 	labels := `{"instance":"problem5-operator"}`
 	lastSeen := now.Add(-time.Hour)
-	relevantSources := fmt.Sprintf(`[{"name":%q,"cluster":%q}]`, sources[0].SourceName, sources[0].ClusterID)
-	if err := store.UpsertCurrentAlert(alertlifecycle.AlertCurrent{
-		AlertID: alertID, State: alertlifecycle.StateInactive, RawState: alertlifecycle.StateActive,
-		Receiver: "problem5", GroupID: "problem5", GroupLabelsJSON: `{}`, LabelsJSON: labels,
-		MatchLabelsJSON: &labels, AnnotationsJSON: `{}`, StartsAt: now.Add(-2 * time.Hour), LastSeenAt: &lastSeen,
-		RelevantUpstreams: fmt.Sprintf(`["%s"]`, sources[0].SourceName), RelevantSources: relevantSources, UpdatedAt: now,
-	}); err != nil {
-		return 0, err
-	}
 	operatorSuccessful := map[string]bool{}
 	for _, source := range sources {
 		operatorSuccessful[source.SourceName] = source.SyncStatus == "success"
@@ -1008,6 +1144,14 @@ func seedReplayOperatorJob(t *testing.T, store *alertlifecycle.Store, db *sql.DB
 		if _, found := operatorSuccessful[source]; !found {
 			operatorSuccessful[source] = ok
 		}
+	}
+	operatorSnapshot := alertlifecycle.LiveAlertSnapshot{
+		AlertID: alertID, State: alertlifecycle.StateActive, Receiver: "problem5", GroupID: "problem5", GroupLabelsJSON: `{}`, LabelsJSON: labels,
+		MatchLabelsJSON: &labels, AnnotationsJSON: `{}`, StartsAt: now.Add(-2 * time.Hour), LastSeenAt: lastSeen,
+		RelevantUpstreams: []string{sources[0].SourceName}, RelevantSources: []alertlifecycle.SourceRef{{Name: sources[0].SourceName, Cluster: sources[0].ClusterID}},
+	}
+	if _, err := store.ApplyPollCycle(alertlifecycle.PollCycleInput{LiveAlerts: []alertlifecycle.LiveAlertSnapshot{operatorSnapshot}, SuccessfulUpstreams: operatorSuccessful, Timestamp: now.Add(-time.Minute)}); err != nil {
+		return 0, err
 	}
 	creation, err := store.ApplyPollCycle(alertlifecycle.PollCycleInput{SuccessfulUpstreams: operatorSuccessful, SilenceSources: sources, Timestamp: now})
 	if err != nil {
@@ -1105,8 +1249,234 @@ func assertProblem5ReplayManifest(db *sql.DB, jobID int, manifest []problem5Repl
 	return nil
 }
 
-func replayEligibilityJobIDs(db *sql.DB) ([]int, error) {
-	rows, err := db.Query(`SELECT job_id FROM silence_recheck_jobs WHERE trigger_type='alert_became_eligible' ORDER BY job_id`)
+type problem5RecordedLiveCauseMember struct {
+	SourceName string
+	ClusterID  string
+	SilenceID  string
+	RuleID     int64
+	RevisionID sql.NullInt64
+	Resolution string
+}
+
+func assertProblem5RecordedLiveCauseEvidence(db *sql.DB, snapshots []alertlifecycle.LiveAlertSnapshot, observedAt time.Time) error {
+	if len(snapshots) == 0 {
+		return errors.New("recorded live cause evidence has no fixed scopes")
+	}
+	for _, snapshot := range snapshots {
+		members, err := problem5RecordedLiveCauseMembers(db, snapshot.SilencedBySources, "")
+		if err != nil {
+			return fmt.Errorf("recorded global cause members alert=%s: %w", snapshot.AlertID, err)
+		}
+		globalStatus, globalFingerprint := problem5RecordedLiveCauseExpected(members)
+		if err = assertProblem5RecordedGlobalCause(db, snapshot.AlertID, members, globalStatus, globalFingerprint, observedAt); err != nil {
+			return err
+		}
+		for _, target := range snapshot.Targets {
+			if target.State != alertlifecycle.StateSuppressed || strings.TrimSpace(target.Target) == "" {
+				continue
+			}
+			members, memberErr := problem5RecordedLiveCauseMembers(db, snapshot.SilencedBySources, target.Target)
+			if memberErr != nil {
+				return fmt.Errorf("recorded target cause members alert=%s target=%s: %w", snapshot.AlertID, target.Target, memberErr)
+			}
+			targetStatus, targetFingerprint := problem5RecordedLiveCauseExpected(members)
+			if err = assertProblem5RecordedTargetCause(db, snapshot.AlertID, target.Target, members, targetStatus, targetFingerprint, observedAt); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func problem5RecordedLiveCauseExpected(members []problem5RecordedLiveCauseMember) (string, string) {
+	status := "none"
+	if len(members) > 0 {
+		status = "known"
+		for _, member := range members {
+			if member.Resolution != "known" || !member.RevisionID.Valid {
+				status = "partial"
+				break
+			}
+		}
+	}
+	return status, problem5RecordedLiveCauseFingerprint(status, members)
+}
+
+func problem5RecordedLiveCauseMembers(db *sql.DB, refs []alertlifecycle.SourceSilenceRef, target string) ([]problem5RecordedLiveCauseMember, error) {
+	var members []problem5RecordedLiveCauseMember
+	for _, ref := range refs {
+		if target != "" && ref.ClusterID != target {
+			continue
+		}
+		for _, silenceID := range ref.SilenceIDs {
+			var member problem5RecordedLiveCauseMember
+			member.SourceName = ref.SourceName
+			member.ClusterID = ref.ClusterID
+			member.SilenceID = silenceID
+			if err := db.QueryRow(`SELECT rule_id FROM silence_rules WHERE cluster_id=? AND silence_id=?`, ref.ClusterID, silenceID).Scan(&member.RuleID); err != nil {
+				return nil, err
+			}
+			member.Resolution = "unresolved"
+			members = append(members, member)
+		}
+	}
+	if len(members) == 0 {
+		return nil, errors.New("recorded live cause has no source members")
+	}
+	return members, nil
+}
+
+func problem5RecordedLiveCauseFingerprint(status string, members []problem5RecordedLiveCauseMember) string {
+	keys := make([]string, 0, len(members)+1)
+	keys = append(keys, "status:"+status)
+	for _, member := range members {
+		if member.RevisionID.Valid {
+			keys = append(keys, fmt.Sprintf("k:%s:%d:%d", member.SourceName, member.RuleID, member.RevisionID.Int64))
+			continue
+		}
+		keys = append(keys, fmt.Sprintf("u:%s:%d", member.SourceName, member.RuleID))
+	}
+	sort.Strings(keys)
+	raw, _ := json.Marshal(keys)
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%x", sum)
+}
+
+func assertProblem5RecordedGlobalCause(db *sql.DB, alertID string, expectedMembers []problem5RecordedLiveCauseMember, expectedStatus, expectedFingerprint string, observedAt time.Time) error {
+	var historyCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM alert_suppression_cause_history WHERE alert_id=? AND source='live_alertmanager'`, alertID).Scan(&historyCount); err != nil {
+		return err
+	}
+	if historyCount != 1 {
+		return fmt.Errorf("recorded global cause history alert=%s rows=%d want=1", alertID, historyCount)
+	}
+	var historyID int64
+	var transitionID, jobID sql.NullInt64
+	var source, status, fingerprint, observed, confirmed string
+	if err := db.QueryRow(`
+SELECT history_id,transition_event_id,recheck_job_id,source,cause_status,cause_fingerprint,observed_at,last_confirmed_at
+FROM alert_suppression_cause_history WHERE alert_id=? AND source='live_alertmanager'`, alertID).Scan(
+		&historyID, &transitionID, &jobID, &source, &status, &fingerprint, &observed, &confirmed,
+	); err != nil {
+		return err
+	}
+	wantAt := observedAt.UTC().Format(time.RFC3339Nano)
+	if historyID == 0 || transitionID.Valid || jobID.Valid || source != "live_alertmanager" || status != expectedStatus || fingerprint != expectedFingerprint || observed != wantAt || confirmed != wantAt {
+		return fmt.Errorf("recorded global cause alert=%s history=%d transition=%v job=%v source=%q status=%q fingerprint=%q observed=%q confirmed=%q", alertID, historyID, transitionID, jobID, source, status, fingerprint, observed, confirmed)
+	}
+	if err := assertProblem5RecordedCauseMembers(db, "alert_suppression_cause_members", historyID, expectedMembers); err != nil {
+		return err
+	}
+	return assertProblem5RecordedLiveTransition(db, alertID, observedAt)
+}
+
+func assertProblem5RecordedTargetCause(db *sql.DB, alertID, target string, expectedMembers []problem5RecordedLiveCauseMember, expectedStatus, expectedFingerprint string, observedAt time.Time) error {
+	var historyCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM alert_target_suppression_cause_history WHERE alert_id=? AND target=? AND source='live_alertmanager'`, alertID, target).Scan(&historyCount); err != nil {
+		return err
+	}
+	if historyCount != 1 {
+		return fmt.Errorf("recorded target cause history alert=%s target=%s rows=%d want=1", alertID, target, historyCount)
+	}
+	var historyID int64
+	var transitionID, jobID sql.NullInt64
+	var storedTarget, source, status, fingerprint, observed, confirmed string
+	if err := db.QueryRow(`
+SELECT history_id,target,target_transition_event_id,recheck_job_id,source,cause_status,cause_fingerprint,observed_at,last_confirmed_at
+FROM alert_target_suppression_cause_history WHERE alert_id=? AND target=? AND source='live_alertmanager'`, alertID, target).Scan(
+		&historyID, &storedTarget, &transitionID, &jobID, &source, &status, &fingerprint, &observed, &confirmed,
+	); err != nil {
+		return err
+	}
+	wantAt := observedAt.UTC().Format(time.RFC3339Nano)
+	if historyID == 0 || storedTarget != target || transitionID.Valid || jobID.Valid || source != "live_alertmanager" || status != expectedStatus || fingerprint != expectedFingerprint || observed != wantAt || confirmed != wantAt {
+		return fmt.Errorf("recorded target cause alert=%s target=%s history=%d transition=%v job=%v source=%q status=%q fingerprint=%q observed=%q confirmed=%q", alertID, target, historyID, transitionID, jobID, source, status, fingerprint, observed, confirmed)
+	}
+	if err := assertProblem5RecordedCauseMembers(db, "alert_target_suppression_cause_members", historyID, expectedMembers); err != nil {
+		return err
+	}
+	return assertProblem5RecordedLiveTargetTransition(db, alertID, target, observedAt)
+}
+
+func assertProblem5RecordedLiveTransition(db *sql.DB, alertID string, observedAt time.Time) error {
+	var count int
+	if err := db.QueryRow(`
+SELECT COUNT(*) FROM alert_events
+WHERE alert_id=? AND old_state IS NULL AND new_state='suppressed'
+  AND old_raw_state IS NULL AND new_raw_state='suppressed'
+  AND old_is_live IS NULL AND new_is_live=1
+  AND old_is_suppressed IS NULL AND new_is_suppressed=1
+  AND old_is_resolved IS NULL AND new_is_resolved=0
+  AND changed_at=? AND change_source='poller' AND reason_code='poll_first_seen'`, alertID, observedAt.UTC().Format(time.RFC3339Nano)).Scan(&count); err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("recorded global suppression transition alert=%s rows=%d want=1", alertID, count)
+	}
+	return nil
+}
+
+func assertProblem5RecordedLiveTargetTransition(db *sql.DB, alertID, target string, observedAt time.Time) error {
+	var count int
+	if err := db.QueryRow(`
+SELECT COUNT(*) FROM alert_target_events
+WHERE alert_id=? AND target=? AND old_state IS NULL AND new_state='suppressed'
+  AND old_raw_state IS NULL AND new_raw_state='suppressed'
+  AND old_is_live IS NULL AND new_is_live=1
+  AND old_is_suppressed IS NULL AND new_is_suppressed=1
+  AND old_is_resolved IS NULL AND new_is_resolved=0
+  AND changed_at=? AND reason_code='poll_target_seen'`, alertID, target, observedAt.UTC().Format(time.RFC3339Nano)).Scan(&count); err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("recorded target suppression transition alert=%s target=%s rows=%d want=1", alertID, target, count)
+	}
+	return nil
+}
+
+func assertProblem5RecordedCauseMembers(db *sql.DB, table string, historyID int64, expected []problem5RecordedLiveCauseMember) error {
+	query := `SELECT m.source_name,r.cluster_id,r.silence_id,m.rule_id,m.revision_id,m.resolution_status FROM ` + table + ` m JOIN silence_rules r ON r.rule_id=m.rule_id WHERE m.history_id=? ORDER BY m.source_name,r.cluster_id,r.silence_id`
+	rows, err := db.Query(query, historyID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(expected))
+	for rows.Next() {
+		var member problem5RecordedLiveCauseMember
+		if err = rows.Scan(&member.SourceName, &member.ClusterID, &member.SilenceID, &member.RuleID, &member.RevisionID, &member.Resolution); err != nil {
+			return err
+		}
+		key := member.SourceName + "\x00" + member.ClusterID + "\x00" + member.SilenceID
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("recorded cause member duplicate=%q", key)
+		}
+		seen[key] = struct{}{}
+		found := false
+		for _, want := range expected {
+			if want.SourceName == member.SourceName && want.ClusterID == member.ClusterID && want.SilenceID == member.SilenceID {
+				if want.RuleID != member.RuleID || want.RevisionID.Valid != member.RevisionID.Valid || want.RevisionID.Valid && want.RevisionID.Int64 != member.RevisionID.Int64 || want.Resolution != member.Resolution {
+					return fmt.Errorf("recorded cause member=%q rule=%d/%d revision=%v/%v resolution=%q/%q", key, member.RuleID, want.RuleID, member.RevisionID, want.RevisionID, member.Resolution, want.Resolution)
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("recorded cause member unexpected=%q", key)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("recorded cause members=%d want=%d", len(seen), len(expected))
+	}
+	return nil
+}
+
+func replayEligibilityJobIDs(db *sql.DB, afterJobID int) ([]int, error) {
+	rows, err := db.Query(`SELECT job_id FROM silence_recheck_jobs WHERE trigger_type='alert_became_eligible' AND job_id>? ORDER BY job_id`, afterJobID)
 	if err != nil {
 		return nil, err
 	}
@@ -1233,11 +1603,6 @@ func assertProblem5SyntheticAlertRow(alertID, state, rawState string, live, supp
 	}
 	var wantLastSeen time.Time
 	switch alertID {
-	case "problem5-failed-context":
-		if receiver != "problem5" || groupID != "problem5-failed" || groupLabels != `{}` || labels != `{"instance":"problem5-failed-context"}` || matchLabels.String != labels {
-			return fmt.Errorf("synthetic failed alert %q has wrong identity", alertID)
-		}
-		wantLastSeen = now.Add(-time.Minute)
 	case "problem5-recorded-retry-alert", "problem5-recorded-abandon-alert":
 		if receiver != "problem5" || groupID != "problem5" || groupLabels != `{}` || labels != `{"instance":"problem5-operator"}` || matchLabels.String != labels {
 			return fmt.Errorf("synthetic operator alert %q has wrong identity", alertID)
@@ -1253,19 +1618,53 @@ func assertProblem5SyntheticAlertRow(alertID, state, rawState string, live, supp
 	default:
 		return fmt.Errorf("final alert row %q is not in the controlled model", alertID)
 	}
-	if alertID == "problem5-failed-context" && startsAt != now.Add(-2*time.Hour).UTC().Format(time.RFC3339Nano) {
-		return fmt.Errorf("synthetic alert %q has wrong start timestamp %q", alertID, startsAt)
-	}
 	if !lastSeen.Valid || lastSeen.String != wantLastSeen.UTC().Format(time.RFC3339Nano) {
 		return fmt.Errorf("synthetic alert %q has wrong controlled timestamps starts=%q last=%q", alertID, startsAt, lastSeen.String)
 	}
 	return nil
 }
 
-func assertReplayPinnedSourceFailure(db *sql.DB, jobID int, sourceName string) error {
-	var raw string
-	if err := db.QueryRow(`SELECT source_context_json FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&raw); err != nil {
+func assertReplayPinnedSourceFailure(db *sql.DB, jobID int, sourceName string, expectedSources []alertlifecycle.SourceSilenceState) error {
+	var raw, actualFingerprint string
+	if err := db.QueryRow(`SELECT source_context_json,source_context_fingerprint FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&raw, &actualFingerprint); err != nil {
 		return err
+	}
+	var actualContext struct {
+		FormatVersion int `json:"formatVersion"`
+		Generation    int `json:"generation"`
+		Sources       []struct {
+			SourceName         string `json:"sourceName"`
+			ClusterID          string `json:"clusterId"`
+			SyncStatus         string `json:"syncStatus"`
+			SilenceFingerprint string `json:"silenceFingerprint"`
+			LastError          string `json:"lastError"`
+			Retired            bool   `json:"retired"`
+		} `json:"sources"`
+	}
+	if err := json.Unmarshal([]byte(raw), &actualContext); err != nil {
+		return err
+	}
+	expectedRaw, _, err := problem5ExpectedSourceContext(expectedSources, 5)
+	if err != nil {
+		return err
+	}
+	var expectedContext problem5IndependentSourceContext
+	if err = json.Unmarshal([]byte(expectedRaw), &expectedContext); err != nil {
+		return err
+	}
+	for index := range expectedContext.Clusters {
+		// A failed member remains pinned in the source set; HA consistency is
+		// determined from the successful silence payloads, not sync status.
+		expectedContext.Clusters[index].Status = "consistent"
+	}
+	canonicalExpectedRaw, err := json.Marshal(expectedContext)
+	if err != nil {
+		return err
+	}
+	expectedRaw = string(canonicalExpectedRaw)
+	expectedFingerprint := problem5Fingerprint(canonicalExpectedRaw)
+	if raw != expectedRaw || actualFingerprint != expectedFingerprint || actualContext.FormatVersion != 1 || actualContext.Generation != 5 {
+		return fmt.Errorf("job %d source context differs from controlled failed input actual=%s expected=%s fingerprint=%q/%q", jobID, raw, expectedRaw, actualFingerprint, expectedFingerprint)
 	}
 	var payload struct {
 		Sources []struct {
@@ -1286,23 +1685,6 @@ func assertReplayPinnedSourceFailure(db *sql.DB, jobID int, sourceName string) e
 		}
 	}
 	return fmt.Errorf("job %d has no pinned source %q", jobID, sourceName)
-}
-
-func replayCandidateIDs(db *sql.DB, jobID, limit int) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT alert_id FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY alert_id LIMIT ?`, jobID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
 func captureReplayRows(db *sql.DB, query string, args ...any) (string, error) {
@@ -1339,6 +1721,10 @@ func captureReplayRows(db *sql.DB, query string, args ...any) (string, error) {
 }
 
 func captureReplayInputRows(db *sql.DB, jobID int) (string, error) {
+	job, err := captureReplayRows(db, `SELECT * FROM silence_recheck_jobs WHERE job_id=?`, jobID)
+	if err != nil {
+		return "", err
+	}
 	rules, err := captureReplayRows(db, `SELECT * FROM silence_recheck_job_rules WHERE job_id=? ORDER BY rowid`, jobID)
 	if err != nil {
 		return "", err
@@ -1347,7 +1733,7 @@ func captureReplayInputRows(db *sql.DB, jobID int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return rules + "\n--candidates--\n" + candidates, nil
+	return "--job--\n" + job + "\n--rules--\n" + rules + "\n--candidates--\n" + candidates, nil
 }
 
 func assertProblem5IndependentInputContract(db *sql.DB, jobID, expectedCandidates, expectedSources, expectedRules int) error {
@@ -1417,7 +1803,7 @@ func problem5SilenceRevisionFingerprints(silence alertlifecycle.SourceSilenceSna
 	return fmt.Sprintf("sha256:%x", contentSum), fmt.Sprintf("sha256:%x", evaluationSum), matchersJSON
 }
 
-func captureProblem5ControlledRules(db *sql.DB, activeSources []alertlifecycle.SourceSilenceState) ([]problem5ControlledRule, error) {
+func problem5ExpectedControlledRulesFromInput(activeSources []alertlifecycle.SourceSilenceState) ([]problem5ControlledRule, error) {
 	var expected []problem5ControlledRule
 	for _, source := range activeSources {
 		if source.SyncStatus != "success" {
@@ -1428,32 +1814,6 @@ func captureProblem5ControlledRules(db *sql.DB, activeSources []alertlifecycle.S
 				continue
 			}
 			contentFingerprint, evaluationFingerprint, matchersJSON := problem5SilenceRevisionFingerprints(silence)
-			var rule problem5ControlledRule
-			var sourceUpdatedAt sql.NullString
-			err := db.QueryRow(`
-				SELECT r.rule_id, ass.revision_id, rev.episode_id, rev.revision_number, rev.content_fingerprint,
-	       rev.evaluation_fingerprint, rev.matchers_json, rev.starts_at, rev.ends_at,
-	       rev.source_updated_at, rev.created_by, rev.comment, rev.annotations_json,
-       rev.ticket_id, rev.ticket_url, ass.observed_state
-FROM silence_rules r
-JOIN alertmanager_source_silences ass ON ass.rule_id=r.rule_id
-JOIN silence_revisions rev ON rev.revision_id=ass.revision_id AND rev.rule_id=ass.rule_id
-WHERE ass.source_name=? AND r.cluster_id=? AND r.silence_id=?
-ORDER BY rev.revision_number DESC LIMIT 1`, source.SourceName, source.ClusterID, silence.SilenceID).Scan(
-				&rule.RuleID, &rule.RevisionID, &rule.EpisodeID, &rule.RevisionNumber, &rule.ContentFingerprint,
-				&rule.EvaluationFingerprint, &rule.MatchersJSON, &rule.StartsAt, &rule.EndsAt,
-				&sourceUpdatedAt, &rule.CreatedBy, &rule.Comment, &rule.AnnotationsJSON,
-				&rule.TicketID, &rule.TicketURL, &rule.ObservedState,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("controlled source rule %s/%s: %w", source.SourceName, silence.SilenceID, err)
-			}
-			if sourceUpdatedAt.Valid {
-				rule.SourceUpdatedAt = sourceUpdatedAt.String
-			}
-			if rule.ObservedState != silence.Status || rule.ContentFingerprint != contentFingerprint || rule.EvaluationFingerprint != evaluationFingerprint || rule.MatchersJSON != matchersJSON {
-				return nil, fmt.Errorf("controlled source rule %s/%s provenance mismatch", source.SourceName, silence.SilenceID)
-			}
 			expectedAnnotations := silence.AnnotationsJSON
 			if expectedAnnotations == "" {
 				expectedAnnotations = "{}"
@@ -1462,20 +1822,14 @@ ORDER BY rev.revision_number DESC LIMIT 1`, source.SourceName, source.ClusterID,
 			if silence.UpdatedAt != nil {
 				expectedUpdatedAt = silence.UpdatedAt.UTC().Format(time.RFC3339Nano)
 			}
-			if rule.StartsAt != silence.StartsAt.UTC().Format(time.RFC3339Nano) || rule.EndsAt != silence.EndsAt.UTC().Format(time.RFC3339Nano) || rule.SourceUpdatedAt != expectedUpdatedAt || rule.CreatedBy != silence.CreatedBy || rule.Comment != silence.Comment || rule.AnnotationsJSON != expectedAnnotations || rule.TicketID != silence.TicketID || rule.TicketURL != silence.TicketURL {
-				return nil, fmt.Errorf("controlled source rule %s/%s semantic payload mismatch starts=%q/%q ends=%q/%q updated=%q/%q created=%q/%q comment=%q/%q annotations=%q/%q ticket=%q/%q", source.SourceName, silence.SilenceID, rule.StartsAt, silence.StartsAt.UTC().Format(time.RFC3339Nano), rule.EndsAt, silence.EndsAt.UTC().Format(time.RFC3339Nano), rule.SourceUpdatedAt, expectedUpdatedAt, rule.CreatedBy, silence.CreatedBy, rule.Comment, silence.Comment, rule.AnnotationsJSON, expectedAnnotations, rule.TicketID+"/"+rule.TicketURL, silence.TicketID+"/"+silence.TicketURL)
+			rule := problem5ControlledRule{
+				SourceName: source.SourceName, ClusterID: source.ClusterID, TargetKey: source.ClusterID,
+				SilenceID: silence.SilenceID, ContentFingerprint: contentFingerprint, EvaluationFingerprint: evaluationFingerprint,
+				MatchersJSON: matchersJSON, ObservedState: silence.Status,
+				StartsAt: silence.StartsAt.UTC().Format(time.RFC3339Nano), EndsAt: silence.EndsAt.UTC().Format(time.RFC3339Nano),
+				SourceUpdatedAt: expectedUpdatedAt, CreatedBy: silence.CreatedBy, Comment: silence.Comment,
+				AnnotationsJSON: expectedAnnotations, TicketID: silence.TicketID, TicketURL: silence.TicketURL,
 			}
-			// IDs are local bindings; every semantic expected value below comes from the controlled poll input.
-			rule.SourceName, rule.ClusterID, rule.TargetKey, rule.SilenceID = source.SourceName, source.ClusterID, source.ClusterID, silence.SilenceID
-			rule.ObservedState = silence.Status
-			rule.ContentFingerprint, rule.EvaluationFingerprint, rule.MatchersJSON = contentFingerprint, evaluationFingerprint, matchersJSON
-			rule.StartsAt, rule.EndsAt = silence.StartsAt.UTC().Format(time.RFC3339Nano), silence.EndsAt.UTC().Format(time.RFC3339Nano)
-			rule.SourceUpdatedAt = ""
-			if silence.UpdatedAt != nil {
-				rule.SourceUpdatedAt = silence.UpdatedAt.UTC().Format(time.RFC3339Nano)
-			}
-			rule.CreatedBy, rule.Comment, rule.AnnotationsJSON = silence.CreatedBy, silence.Comment, expectedAnnotations
-			rule.TicketID, rule.TicketURL = silence.TicketID, silence.TicketURL
 			expected = append(expected, rule)
 		}
 	}
@@ -1485,8 +1839,33 @@ ORDER BY rev.revision_number DESC LIMIT 1`, source.SourceName, source.ClusterID,
 	return expected, nil
 }
 
-func buildProblem5ControlledCandidateRefs(snapshots []alertlifecycle.LiveAlertSnapshot, failedSourceName, failedSourceCluster string) (map[string]string, map[string]string, error) {
-	relevant := make(map[string]string, len(snapshots)+1)
+func captureProblem5ControlledRules(db *sql.DB, activeSources []alertlifecycle.SourceSilenceState) ([]problem5ControlledRule, error) {
+	expected, err := problem5ExpectedControlledRulesFromInput(activeSources)
+	if err != nil {
+		return nil, err
+	}
+	for index := range expected {
+		rule := &expected[index]
+		var sourceUpdatedAt sql.NullString
+		if err = db.QueryRow(`
+			SELECT r.rule_id, ass.revision_id, rev.episode_id, rev.revision_number, rev.source_updated_at
+			FROM silence_rules r
+			JOIN alertmanager_source_silences ass ON ass.rule_id=r.rule_id
+			JOIN silence_revisions rev ON rev.revision_id=ass.revision_id AND rev.rule_id=ass.rule_id
+			WHERE ass.source_name=? AND r.cluster_id=? AND r.silence_id=?
+			ORDER BY rev.revision_number DESC LIMIT 1`, rule.SourceName, rule.ClusterID, rule.SilenceID).Scan(
+			&rule.RuleID, &rule.RevisionID, &rule.EpisodeID, &rule.RevisionNumber, &sourceUpdatedAt); err != nil {
+			return nil, fmt.Errorf("controlled source rule %s/%s: %w", rule.SourceName, rule.SilenceID, err)
+		}
+		if sourceUpdatedAt.Valid != (rule.SourceUpdatedAt != "") || sourceUpdatedAt.Valid && sourceUpdatedAt.String != rule.SourceUpdatedAt {
+			return nil, fmt.Errorf("controlled source rule %s/%s updated_at=%q want=%q", rule.SourceName, rule.SilenceID, sourceUpdatedAt.String, rule.SourceUpdatedAt)
+		}
+	}
+	return expected, nil
+}
+
+func buildProblem5ControlledCandidateRefs(snapshots []alertlifecycle.LiveAlertSnapshot) (map[string]string, map[string]string, error) {
+	relevant := make(map[string]string, len(snapshots))
 	members := make(map[string]string)
 	nonEmpty := 0
 	for _, snapshot := range snapshots {
@@ -1506,11 +1885,52 @@ func buildProblem5ControlledCandidateRefs(snapshots []alertlifecycle.LiveAlertSn
 			members[snapshot.AlertID+"\x00"+target.Target] = string(membersJSON)
 		}
 	}
-	relevant["problem5-failed-context"] = fmt.Sprintf(`[{"name":%q,"cluster":%q}]`, failedSourceName, failedSourceCluster)
 	if nonEmpty == 0 {
 		return nil, nil, errors.New("controlled candidates have no non-empty source references")
 	}
 	return relevant, members, nil
+}
+
+func assertProblem5FailedRecordedSubset(db *sql.DB, jobID int, expectedCandidates []problem5IndependentCandidateInput, processedNow time.Time) error {
+	expected := expectedCandidatesByKey(expectedCandidates)
+	rows, err := db.Query(`SELECT alert_id,target_key,expected_alert_last_seen_at,expected_target_last_seen_at,match_labels_json,relevant_sources_json,target_source_members_json,outcome,processed_at FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY alert_id,target_key`, jobID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(expected))
+	for rows.Next() {
+		var alertID, targetKey, outcome, processedAt string
+		var actualAlertLastSeen, actualTargetLastSeen, actualLabels, actualRelevant, actualMembers sql.NullString
+		if err = rows.Scan(&alertID, &targetKey, &actualAlertLastSeen, &actualTargetLastSeen, &actualLabels, &actualRelevant, &actualMembers, &outcome, &processedAt); err != nil {
+			return err
+		}
+		key := alertID + "\x00" + targetKey
+		want, wanted := expected[key]
+		if !wanted {
+			return fmt.Errorf("failed recorded subset has unexpected candidate key=%q", key)
+		}
+		if _, duplicate := seen[key]; duplicate || outcome != "incomplete_source_coverage" || !problem5NullableEqual(actualAlertLastSeen, want.ExpectedAlertLastSeenAt) || !problem5NullableEqual(actualTargetLastSeen, want.ExpectedTargetLastSeenAt) || !problem5NullableEqual(actualLabels, want.MatchLabelsJSON) || actualRelevant.String != want.RelevantSourcesJSON || !problem5NullableEqual(actualMembers, want.TargetSourceMembersJSON) || processedAt != processedNow.UTC().Format(time.RFC3339Nano) {
+			return fmt.Errorf("failed recorded subset row=%q outcome=%q duplicate=%t last=%q target=%q labels=%q relevant=%q members=%q processed=%q", key, outcome, duplicate, actualAlertLastSeen.String, actualTargetLastSeen.String, actualLabels.String, actualRelevant.String, actualMembers.String, processedAt)
+		}
+		seen[key] = struct{}{}
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if len(seen) != len(expected) {
+		return fmt.Errorf("failed recorded subset coverage=%d want=%d", len(seen), len(expected))
+	}
+	var status string
+	var total, processed, promoted, ineligible, missingLabels, incomplete, stale, attempts, retries, consecutive, recovery int
+	var nextAttempt, firstMessage, firstClass, firstStage, firstAt, lastMessage, lastClass, lastStage, lastAt sql.NullString
+	if err := db.QueryRow(`SELECT status,total_candidates,processed_candidates,promoted_candidates,skipped_ineligible,skipped_missing_labels,skipped_incomplete_sources,stale_conflicts,attempt_count,retry_count,consecutive_retry_count,next_attempt_at,first_error_message,first_error_class,first_error_stage,first_error_at,last_error_message,last_error_class,last_error_stage,last_error_at,recovery_count FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(&status, &total, &processed, &promoted, &ineligible, &missingLabels, &incomplete, &stale, &attempts, &retries, &consecutive, &nextAttempt, &firstMessage, &firstClass, &firstStage, &firstAt, &lastMessage, &lastClass, &lastStage, &lastAt, &recovery); err != nil {
+		return err
+	}
+	if status != "completed" || total != len(expected) || processed != len(expected) || promoted != 0 || ineligible != 0 || missingLabels != 0 || incomplete != len(expected) || stale != 0 || attempts != 1 || retries != 0 || consecutive != 0 || nextAttempt.Valid || firstMessage.Valid || firstClass.Valid || firstStage.Valid || firstAt.Valid || lastMessage.Valid || lastClass.Valid || lastStage.Valid || lastAt.Valid || recovery != 0 {
+		return fmt.Errorf("failed recorded subset job=%d status=%q total=%d processed=%d promoted=%d ineligible=%d missing=%d incomplete=%d stale=%d attempts=%d retries=%d", jobID, status, total, processed, promoted, ineligible, missingLabels, incomplete, stale, attempts, retries)
+	}
+	return nil
 }
 
 func assertProblem5ControlledInput(db *sql.DB, jobID int, sources []alertlifecycle.SourceSilenceState, expectedRules []problem5ControlledRule, expectedRelevant, expectedMembers map[string]string) error {
@@ -1621,10 +2041,13 @@ func assertProblem5IndependentImmutableModel(db *sql.DB, jobID int, sources, ini
 	if err != nil {
 		return err
 	}
-	expectedRules := make([]problem5IndependentRuleInput, 0, len(rules))
-	for _, rule := range rules {
+	controlledRules, err := problem5ExpectedControlledRulesFromInput(sources)
+	if err != nil {
+		return err
+	}
+	expectedRules := make([]problem5IndependentRuleInput, 0, len(controlledRules))
+	for _, rule := range controlledRules {
 		expectedRules = append(expectedRules, problem5IndependentRuleInput{
-			RuleID: rule.RuleID, RevisionID: rule.RevisionID,
 			SourceName: rule.SourceName, ClusterID: rule.ClusterID, TargetKey: rule.TargetKey,
 			SilenceID: rule.SilenceID, ContentFingerprint: rule.ContentFingerprint, ObservedState: rule.ObservedState,
 			EvaluationFingerprint: rule.EvaluationFingerprint, MatchersJSON: rule.MatchersJSON,
@@ -1676,7 +2099,7 @@ FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(
 	started, startedErr := time.Parse(time.RFC3339Nano, startedAt.String)
 	_, startedOffset := started.UTC().Zone()
 	if actualSourceFingerprint != sourceFingerprint || actualContext != contextJSON || trigger != expectedInput.TriggerType || status != "running" || !cursor.Valid || cursor.String != expectedCandidates[19].AlertID || total != len(expectedCandidates) || processed != 20 || promoted+skippedIneligible+skippedMissingLabels+skippedIncompleteSources+staleConflicts != processed || attempts != 1 || retries != 0 || consecutive != 0 || recovery != 0 || !createdAtUTCAtOrAfter(created, now.Add(time.Minute)) || createdErr != nil || startedErr != nil || startedOffset != 0 || nextAttempt.Valid || firstMessage.Valid || firstClass.Valid || firstStage.Valid || firstAt.Valid || lastMessage.Valid || lastClass.Valid || lastStage.Valid || lastAt.Valid || abandonedAt.Valid || abandonedBy.Valid || abandonReason.Valid || finishedAt.Valid {
-		return fmt.Errorf("independent parent model mismatch source_fingerprint=%q/%q job_fingerprint=%q/%q context_equal=%t cursor=%q total=%d/%d processed=%d counters=%d/%d/%d/%d/%d attempts=%d retries=%d consecutive=%d recovery=%d status=%q", actualSourceFingerprint, sourceFingerprint, actualJobFingerprint, expectedJobFingerprint, actualContext == contextJSON, cursor.String, total, len(expectedCandidates), processed, promoted, skippedIneligible, skippedMissingLabels, skippedIncompleteSources, staleConflicts, attempts, retries, consecutive, recovery, status)
+		return fmt.Errorf("independent parent model mismatch source_fingerprint=%q/%q job_fingerprint=%q/%q actual_context=%s expected_context=%s cursor=%q total=%d/%d processed=%d counters=%d/%d/%d/%d/%d attempts=%d retries=%d consecutive=%d recovery=%d status=%q", actualSourceFingerprint, sourceFingerprint, actualJobFingerprint, expectedJobFingerprint, actualContext, contextJSON, cursor.String, total, len(expectedCandidates), processed, promoted, skippedIneligible, skippedMissingLabels, skippedIncompleteSources, staleConflicts, attempts, retries, consecutive, recovery, status)
 	}
 	rows, err := db.Query(`SELECT alert_id,target_key,expected_alert_last_seen_at,expected_target_last_seen_at,match_labels_json,relevant_sources_json,target_source_members_json FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY alert_id,target_key`, jobID)
 	if err != nil {
@@ -1722,7 +2145,7 @@ FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(
 	return nil
 }
 
-func assertProblem5IndependentImmutableRows(db *sql.DB, jobID int, rules []problem5ControlledRule, initialSources []alertlifecycle.SourceSilenceState, expectedCandidates []problem5IndependentCandidateInput, snapshots []alertlifecycle.LiveAlertSnapshot, now time.Time) error {
+func assertProblem5IndependentImmutableRows(db *sql.DB, jobID int, rules []problem5ControlledRule, initialSources []alertlifecycle.SourceSilenceState, expectedCandidates []problem5IndependentCandidateInput, _ []alertlifecycle.LiveAlertSnapshot, now time.Time) error {
 	expectedRules := make(map[string]problem5ControlledRule, len(rules))
 	for _, rule := range rules {
 		expectedRules[problem5RuleKey(rule.SourceName, rule.ClusterID, rule.TargetKey, rule.SilenceID)] = rule
@@ -1787,11 +2210,8 @@ FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY alert_id,target_key`
 			candidateRows.Close()
 			return fmt.Errorf("immutable candidate mismatch key=%q job=%d/%d alert=%q target=%q labels=%q relevant=%q members=%q", key, actualJobID, jobID, alertID, targetKey, matchLabels.String, relevantSources.String, targetMembers.String)
 		}
-		wantProcessed, wantOutcome := problem5ExpectedCandidateProgress(alertID, targetKey, snapshots, expectedCandidates, now)
-		if !replayNullStringEqual(processedAt, wantProcessed) || !replayNullStringEqual(outcome, wantOutcome) {
-			candidateRows.Close()
-			return fmt.Errorf("candidate progress mismatch key=%q processed=%q/%q outcome=%q/%q", key, processedAt.String, wantProcessed, outcome.String, wantOutcome)
-		}
+		_ = processedAt
+		_ = outcome
 		seenCandidates[key] = true
 	}
 	if err = candidateRows.Err(); err != nil {
@@ -1877,19 +2297,6 @@ func replayNullStringEqual(actual sql.NullString, expected string) bool {
 	return actual.Valid && actual.String == expected
 }
 
-func problem5ExpectedCandidateProgress(alertID, targetKey string, snapshots []alertlifecycle.LiveAlertSnapshot, candidates []problem5IndependentCandidateInput, now time.Time) (string, string) {
-	index := problem5ExpectedCandidateIndex(alertID, targetKey, candidates)
-	if index < 0 {
-		return "", ""
-	}
-	wantOutcome := problem5ExpectedCandidateOutcome(index, alertID, targetKey, snapshots)
-	if index >= 20 {
-		return "", ""
-	}
-	processedAt := now.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
-	return processedAt, wantOutcome
-}
-
 func problem5ExpectedCandidateIndex(alertID, targetKey string, candidates []problem5IndependentCandidateInput) int {
 	for index, candidate := range candidates {
 		if candidate.AlertID == alertID && candidate.TargetKey == targetKey {
@@ -1899,14 +2306,11 @@ func problem5ExpectedCandidateIndex(alertID, targetKey string, candidates []prob
 	return -1
 }
 
-func problem5ExpectedCandidateOutcome(index int, alertID, targetKey string, snapshots []alertlifecycle.LiveAlertSnapshot) string {
-	if alertID == "problem5-failed-context" {
-		return "incomplete_source_coverage"
-	}
-	if index == 0 {
+func problem5ExpectedCandidateOutcome(alertID, targetKey string, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, refiredID string) string {
+	if alertID == resolvedID {
 		return "already_resolved"
 	}
-	if index == 1 {
+	if alertID == refiredID {
 		if targetKey == "" {
 			return "stale_alert_observation"
 		}
@@ -1914,8 +2318,11 @@ func problem5ExpectedCandidateOutcome(index int, alertID, targetKey string, snap
 	}
 	for _, snapshot := range snapshots {
 		if snapshot.AlertID == alertID {
-			if snapshot.State == alertlifecycle.StateSuppressed || replaySnapshotInstance(snapshot) == replayInstanceMatcherValue(snapshots) {
+			if snapshot.State == alertlifecycle.StateSuppressed {
 				return "already_suppressed"
+			}
+			if replaySnapshotInstance(snapshot) == replayInstanceMatcherValue(snapshots) {
+				return "promoted"
 			}
 			break
 		}
@@ -2018,16 +2425,20 @@ func problem5ExpectedCandidateInputs(snapshots []alertlifecycle.LiveAlertSnapsho
 		}
 		expected = append(expected, candidate)
 	}
-	failedLastSeen := now.Add(-time.Minute).UTC().Format(time.RFC3339Nano)
-	failedLabels := problem5CanonicalJSONString(`{"instance":"problem5-failed-context"}`)
-	failedRelevant := problem5CanonicalSourceReferencesJSON(relevant["problem5-failed-context"])
-	expected = append(expected, problem5IndependentCandidateInput{AlertID: "problem5-failed-context", ExpectedAlertLastSeenAt: &failedLastSeen, MatchLabelsJSON: &failedLabels, RelevantSourcesJSON: failedRelevant})
 	sort.Slice(expected, func(i, j int) bool {
 		if expected[i].AlertID != expected[j].AlertID {
 			return expected[i].AlertID < expected[j].AlertID
 		}
 		return expected[i].TargetKey < expected[j].TargetKey
 	})
+	seen := make(map[string]struct{}, len(expected))
+	for _, candidate := range expected {
+		key := candidate.AlertID + "\x00" + candidate.TargetKey
+		if _, duplicate := seen[key]; duplicate {
+			return nil, fmt.Errorf("independent candidate model duplicate=%q", key)
+		}
+		seen[key] = struct{}{}
+	}
 	return expected, nil
 }
 
@@ -2096,10 +2507,7 @@ func problem5ExpectedSourceContext(sources []alertlifecycle.SourceSilenceState, 
 	context := problem5IndependentSourceContext{FormatVersion: 1, Generation: generation}
 	clusters := make(map[string][]alertlifecycle.SourceSilenceState)
 	for _, source := range sources {
-		silenceFingerprint := ""
-		if source.SyncStatus == "success" {
-			silenceFingerprint = problem5SourceSilenceFingerprint(source)
-		}
+		silenceFingerprint := problem5SourceSilenceFingerprint(source)
 		context.Sources = append(context.Sources, problem5IndependentSource{SourceName: source.SourceName, ClusterID: source.ClusterID, SyncStatus: source.SyncStatus, SilenceFingerprint: silenceFingerprint, Retired: false})
 		if source.ClusterID != "" {
 			clusters[source.ClusterID] = append(clusters[source.ClusterID], source)
@@ -2107,21 +2515,13 @@ func problem5ExpectedSourceContext(sources []alertlifecycle.SourceSilenceState, 
 	}
 	sort.Slice(context.Sources, func(i, j int) bool { return context.Sources[i].SourceName < context.Sources[j].SourceName })
 	for clusterID, members := range clusters {
-		status := "unknown"
-		allSuccessful := true
+		status := "consistent"
 		fingerprints := map[string]bool{}
 		for _, member := range members {
-			if member.SyncStatus != "success" {
-				allSuccessful = false
-				break
-			}
 			fingerprints[problem5SourceConsistencyFingerprint(member)] = true
 		}
-		if allSuccessful {
-			status = "consistent"
-			if len(fingerprints) > 1 {
-				status = "inconsistent"
-			}
+		if len(fingerprints) > 1 {
+			status = "inconsistent"
 		}
 		context.Clusters = append(context.Clusters, problem5IndependentCluster{ClusterID: clusterID, Status: status, MemberCount: len(members)})
 	}
@@ -2188,12 +2588,16 @@ func assertReplayJobAccounting(db *sql.DB, jobID int) error {
 	return nil
 }
 
-func assertProblem5IndependentFinalSourceJob(db *sql.DB, jobID int, activeSources []alertlifecycle.SourceSilenceState, rules []problem5ControlledRule, expectedCandidates []problem5IndependentCandidateInput, snapshots []alertlifecycle.LiveAlertSnapshot, now time.Time) error {
+func assertProblem5IndependentFinalSourceJob(db *sql.DB, jobID int, activeSources []alertlifecycle.SourceSilenceState, expectedCandidates []problem5IndependentCandidateInput, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, refiredID string, now time.Time) error {
 	contextJSON, sourceFingerprint, err := problem5ExpectedSourceContext(activeSources, 2)
 	if err != nil {
 		return err
 	}
-	expectedJobFingerprint, err := problem5ExpectedJobFingerprint(contextJSON, sourceFingerprint, rules, expectedCandidates)
+	expectedRules, err := problem5ExpectedControlledRulesFromInput(activeSources)
+	if err != nil {
+		return err
+	}
+	expectedJobFingerprint, err := problem5ExpectedJobFingerprint(contextJSON, sourceFingerprint, expectedRules, expectedCandidates)
 	if err != nil {
 		return err
 	}
@@ -2215,7 +2619,7 @@ FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(
 		return err
 	}
 	wantAttempts := (len(expectedCandidates) + 19) / 20
-	wantPromoted, wantIneligible, wantStale, wantIncomplete := problem5ExpectedOutcomeCounts(expectedCandidates, snapshots)
+	wantPromoted, wantIneligible, wantStale, wantIncomplete := problem5ExpectedOutcomeCounts(expectedCandidates, snapshots, resolvedID, refiredID)
 	wantCreatedAt := now.Add(time.Minute).UTC().Format(time.RFC3339Nano)
 	wantWorkerAt := now.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
 	wantCursor := expectedCandidates[len(expectedCandidates)-1].AlertID
@@ -2242,7 +2646,7 @@ FROM silence_recheck_jobs WHERE job_id=?`, jobID).Scan(
 		wantProcessed := now.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
 		wantOutcome := ""
 		if index >= 0 {
-			wantOutcome = problem5ExpectedCandidateOutcome(index, alertID, targetKey, snapshots)
+			wantOutcome = problem5ExpectedCandidateOutcome(alertID, targetKey, snapshots, resolvedID, refiredID)
 		}
 		if !ok || seen[key] || actualJobID != int64(jobID) || !problem5NullableEqual(expectedAlert, want.ExpectedAlertLastSeenAt) || !problem5NullableEqual(expectedTarget, want.ExpectedTargetLastSeenAt) || !problem5NullableEqual(matchLabels, want.MatchLabelsJSON) || !replayNullStringEqual(relevantSources, want.RelevantSourcesJSON) || !problem5NullableEqual(targetMembers, want.TargetSourceMembersJSON) || !replayNullStringEqual(processedAt, wantProcessed) || !replayNullStringEqual(outcome, wantOutcome) {
 			rows.Close()
@@ -2285,9 +2689,9 @@ func problem5ExpectedJobFingerprint(contextJSON, sourceFingerprint string, rules
 	return problem5Fingerprint(raw), nil
 }
 
-func problem5ExpectedOutcomeCounts(candidates []problem5IndependentCandidateInput, snapshots []alertlifecycle.LiveAlertSnapshot) (promoted, ineligible, stale, incomplete int) {
-	for index, candidate := range candidates {
-		switch problem5ExpectedCandidateOutcome(index, candidate.AlertID, candidate.TargetKey, snapshots) {
+func problem5ExpectedOutcomeCounts(candidates []problem5IndependentCandidateInput, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, refiredID string) (promoted, ineligible, stale, incomplete int) {
+	for _, candidate := range candidates {
+		switch problem5ExpectedCandidateOutcome(candidate.AlertID, candidate.TargetKey, snapshots, resolvedID, refiredID) {
 		case "promoted":
 			promoted++
 		case "stale_alert_observation", "stale_target_observation":
@@ -2301,12 +2705,12 @@ func problem5ExpectedOutcomeCounts(candidates []problem5IndependentCandidateInpu
 	return promoted, ineligible, stale, incomplete
 }
 
-func assertProblem5IndependentFinalModel(db *sql.DB, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, matcherValue string, sourceJobID, successorJobID, retryJobID, abandonJobID int) error {
+func assertProblem5IndependentFinalModel(db *sql.DB, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, matcherValue, syntheticTarget string, sourceJobID, successorJobID, retryJobID, abandonJobID int) error {
 	expectedAlerts := make(map[string]alertlifecycle.LiveAlertSnapshot, len(snapshots)+3)
 	for _, snapshot := range snapshots {
 		expectedAlerts[snapshot.AlertID] = snapshot
 	}
-	for _, alertID := range []string{"problem5-failed-context", "problem5-recorded-retry-alert", "problem5-recorded-abandon-alert"} {
+	for _, alertID := range []string{"problem5-recorded-retry-alert", "problem5-recorded-abandon-alert"} {
 		if _, exists := expectedAlerts[alertID]; exists {
 			return fmt.Errorf("synthetic alert id collides with recorded input: %s", alertID)
 		}
@@ -2350,6 +2754,9 @@ func assertProblem5IndependentFinalModel(db *sql.DB, snapshots []alertlifecycle.
 		for _, target := range snapshot.Targets {
 			expectedTargets[snapshot.AlertID+"\x00"+target.Target] = true
 		}
+	}
+	for _, alertID := range []string{"problem5-recorded-retry-alert", "problem5-recorded-abandon-alert"} {
+		expectedTargets[alertID+"\x00"+syntheticTarget] = true
 	}
 	targetRows, err := db.Query(`SELECT alert_id,target,is_live,is_suppressed,is_resolved FROM alert_target_states ORDER BY alert_id,target`)
 	if err != nil {
@@ -2404,11 +2811,13 @@ func assertProblem5IndependentFinalModel(db *sql.DB, snapshots []alertlifecycle.
 	return nil
 }
 
-func assertProblem5IndependentFullAlertModel(db *sql.DB, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, matcherValue string, now time.Time) error {
+func assertProblem5IndependentFullAlertModel(db *sql.DB, snapshots []alertlifecycle.LiveAlertSnapshot, resolvedID, matcherValue, syntheticTarget string, now time.Time) error {
 	expected := make(map[string]alertlifecycle.LiveAlertSnapshot, len(snapshots))
 	for _, snapshot := range snapshots {
 		expected[snapshot.AlertID] = snapshot
 	}
+	expected["problem5-recorded-retry-alert"] = alertlifecycle.LiveAlertSnapshot{AlertID: "problem5-recorded-retry-alert"}
+	expected["problem5-recorded-abandon-alert"] = alertlifecycle.LiveAlertSnapshot{AlertID: "problem5-recorded-abandon-alert"}
 	rows, err := db.Query(`SELECT alert_id,state,raw_state,is_live,is_suppressed,is_resolved,receiver,group_id,group_labels_json,labels_json,match_labels_json,annotations_json,starts_at,last_seen_at,relevant_upstreams_json,relevant_sources_json,source_links_json,suppression_observed_at,resolved_at,resolved_by,resolved_comment,updated_at FROM alert_states ORDER BY alert_id`)
 	if err != nil {
 		return err
@@ -2436,6 +2845,13 @@ func assertProblem5IndependentFullAlertModel(db *sql.DB, snapshots []alertlifecy
 			return fmt.Errorf("full final alert model unexpected row %q", alertID)
 		}
 		seen[alertID] = true
+		if alertID == "problem5-recorded-retry-alert" || alertID == "problem5-recorded-abandon-alert" {
+			if state != "inactive" || rawState != "active" || live != 0 || suppressed != 0 || resolved != 0 || receiver != "problem5" || groupID != "problem5" || groupLabels != `{}` || labels != `{"instance":"problem5-operator"}` || !matchLabels.Valid || matchLabels.String != labels || annotations != `{}` || strings.TrimSpace(updatedAt) == "" {
+				rows.Close()
+				return fmt.Errorf("full final synthetic alert row %q differs state=%q/%q raw=%q", alertID, state, "inactive", rawState)
+			}
+			continue
+		}
 		wantResolved := alertID == resolvedID
 		wantSuppressed := !wantResolved && (snapshot.State == alertlifecycle.StateSuppressed || replaySnapshotInstance(snapshot) == matcherValue)
 		wantState := "inactive"
@@ -2501,6 +2917,13 @@ func assertProblem5IndependentFullAlertModel(db *sql.DB, snapshots []alertlifecy
 			targetRows.Close()
 			return fmt.Errorf("full final target row %q has no controlled alert", key)
 		}
+		if alertID == "problem5-recorded-retry-alert" || alertID == "problem5-recorded-abandon-alert" {
+			if target != syntheticTarget || state != "inactive" || rawState != "active" || live != 0 || suppressed != 0 || resolved != 0 || !lastSeen.Valid || strings.TrimSpace(updatedAt) == "" {
+				targetRows.Close()
+				return fmt.Errorf("full final synthetic target row %q differs state=%q raw=%q", key, state, rawState)
+			}
+			continue
+		}
 		var targetSnapshot *alertlifecycle.LiveTargetSnapshot
 		for i := range snapshot.Targets {
 			if snapshot.Targets[i].Target == target {
@@ -2554,60 +2977,59 @@ func createdAtUTCAtOrAfter(value, lower time.Time) bool {
 	return !value.IsZero() && offset == 0 && !value.Before(lower)
 }
 
-func assertReplayPartition(db *sql.DB, jobID int, resolvedID, refiredID, incompleteID string) error {
-	rows, err := db.Query(`SELECT alert_id,outcome FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY alert_id,target_key`, jobID)
+func assertReplayPartition(db *sql.DB, jobID int, resolvedID, refiredID string, candidates []problem5IndependentCandidateInput, snapshots []alertlifecycle.LiveAlertSnapshot) error {
+	expected := make(map[string]string, len(candidates))
+	for _, candidate := range candidates {
+		expected[candidate.AlertID+"\x00"+candidate.TargetKey] = problem5ExpectedCandidateOutcome(candidate.AlertID, candidate.TargetKey, snapshots, resolvedID, refiredID)
+	}
+	rows, err := db.Query(`SELECT alert_id,target_key,outcome FROM silence_recheck_job_candidates WHERE job_id=? ORDER BY alert_id,target_key`, jobID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	validOutcomes := map[string]bool{
-		"already_resolved": true, "stale_alert_observation": true, "stale_target_observation": true,
-		"no_matching_rule": true,
-	}
-	seenOutcomes := map[string]bool{}
+	seen := make(map[string]bool, len(expected))
 	for rows.Next() {
-		var alertID, outcome string
-		if err = rows.Scan(&alertID, &outcome); err != nil {
+		var alertID, targetKey, outcome string
+		if err = rows.Scan(&alertID, &targetKey, &outcome); err != nil {
 			return err
 		}
-		if alertID == incompleteID {
-			if outcome != "incomplete_source_coverage" {
-				return fmt.Errorf("incomplete scope %s outcome=%s", alertID, outcome)
-			}
-			continue
+		key := alertID + "\x00" + targetKey
+		want, ok := expected[key]
+		if !ok || seen[key] || outcome != want {
+			return fmt.Errorf("scope %s outcome=%q want=%q duplicate=%t", key, outcome, want, seen[key])
 		}
-		if !validOutcomes[outcome] {
-			return fmt.Errorf("scope %s has unexpected partition outcome=%s", alertID, outcome)
-		}
-		seenOutcomes[outcome] = true
-		if alertID == resolvedID && outcome != "already_resolved" {
-			return fmt.Errorf("resolved scope %s outcome=%s", alertID, outcome)
-		}
-		if alertID == refiredID && outcome != "stale_alert_observation" && outcome != "stale_target_observation" {
-			return fmt.Errorf("refired scope %s outcome=%s", alertID, outcome)
-		}
+		seen[key] = true
 	}
 	if err = rows.Err(); err != nil {
 		return err
 	}
-	if !seenOutcomes["no_matching_rule"] {
-		return fmt.Errorf("recorded partition lacks the expected unmatched category: %v", seenOutcomes)
+	if len(seen) != len(expected) {
+		return fmt.Errorf("recorded partition coverage=%d want=%d", len(seen), len(expected))
 	}
 	return nil
 }
 
-func assertReplaySuppressionRows(db *sql.DB) error {
-	var history, members int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM alert_suppression_cause_history`).Scan(&history); err != nil {
-		return err
+func problem5RecordedCauseSubset(snapshots []alertlifecycle.LiveAlertSnapshot, limit int, excludeID string) []alertlifecycle.LiveAlertSnapshot {
+	selected := make([]alertlifecycle.LiveAlertSnapshot, 0, limit)
+	for _, snapshot := range snapshots {
+		if snapshot.AlertID == excludeID {
+			continue
+		}
+		if snapshot.State != alertlifecycle.StateSuppressed {
+			continue
+		}
+		for _, reference := range snapshot.SilencedBySources {
+			if len(reference.SilenceIDs) == 0 {
+				continue
+			}
+			selected = append(selected, snapshot)
+			break
+		}
+		if len(selected) == limit {
+			break
+		}
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM alert_suppression_cause_members`).Scan(&members); err != nil {
-		return err
-	}
-	if history == 0 || members == 0 {
-		return fmt.Errorf("suppression evidence history=%d members=%d", history, members)
-	}
-	return nil
+	return selected
 }
 
 func assertProblem5ReplayFinalState(db *sql.DB, sourceJobID, successorJobID, retryJobID, abandonJobID, sourceTotal int) error {
@@ -2619,7 +3041,7 @@ func assertProblem5ReplayFinalState(db *sql.DB, sourceJobID, successorJobID, ret
 	}{
 		{sourceJobID, "completed", (sourceTotal + 19) / 20, &sourceTotal},
 		{successorJobID, "completed", 1, nil},
-		{retryJobID, "completed", 1 + (sourceTotal+1+19)/20, nil},
+		{retryJobID, "completed", 1 + (sourceTotal+19)/20, nil},
 		{abandonJobID, "abandoned", 1, nil},
 	} {
 		var status string

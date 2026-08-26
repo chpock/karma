@@ -27,11 +27,11 @@ Implemented in fork scope:
 - housekeeping (alert TTL -> limit -> reference-safe completed-job cleanup and
   silence-history TTL cleanup -> incremental vacuum),
 - D21 completed-job retention documentation is reconciled under Problem 7, with no
-  remaining independent-review findings and the final completion gate pending; runtime
-  cleanup remains reference-based and next-housekeeping while silence-history TTL
-  remains independent,
-- Problem 10 housekeeping documentation has no remaining independent-review findings
-  and its final documentation gate is pending: housekeeping does not execute or wake
+  remaining problem-specific findings and its final integrated documentation gate passed;
+  runtime cleanup remains reference-based and next-housekeeping while
+  silence-history TTL remains independent,
+- Problem 10 housekeeping documentation has no remaining problem-specific findings and
+  its final integrated documentation gate passed: housekeeping does not execute or wake
   recheck work; ADR-007 and the cmd/karma scheduler own recheck execution,
 - storage and warning observability endpoints.
 - per-target lifecycle state and topology retirement,
@@ -46,11 +46,13 @@ Implemented in fork scope:
   silence-rule presentation and actions,
 - compact create/edit/recreate silence editor with automatic preview,
 - structured runtime logging with redaction and edge-sensitive levels; Problem 4 recheck
-  result projection, event ownership, strict APIs, and operator presentation are
-  implemented and independently accepted, including generic writer registration/redaction and exact
-  one-event evidence from Problem 9;
-- Problem 5 end-to-end evidence and the combined Problems 5/8/9 completion gate are implemented and
-  independently accepted.
+  result projection, event ownership, strict APIs, and operator presentation include
+  authoritative authentication-loss invalidation; its final focused/UI gate passed and the
+  implementation is independently accepted. Problem 9 writer-operation registry/evidence
+  also passed its final focused/logging gate and is independently accepted;
+- Problem 5 end-to-end evidence passed its final integrated gate for its independent exact
+  deterministic and recorded-replay models and is independently accepted.
+  Problem 8 remains independently accepted.
 - PID lease recovery and managed-harness finalization with deterministic retry,
   ownership-loss, close-error, cleanup-order, and marker-failure evidence are
   implemented and independently accepted under Problem 6.

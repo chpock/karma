@@ -166,7 +166,11 @@ const ForkLifecycleWarning: FC<{ alertStore: AlertStore }> = observer(
             body: JSON.stringify(body),
           },
         );
-        if (result.status === 409) {
+        if (result.status === 401) {
+          alertStore.info.invalidateAuthentication();
+          setActionError("Authentication required");
+          await get();
+        } else if (result.status === 409) {
           setActionError(
             "The queue changed on the server. The warning was refreshed.",
           );

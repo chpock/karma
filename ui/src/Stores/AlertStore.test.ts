@@ -527,6 +527,18 @@ describe("UpdateLocationSearch", () => {
 });
 
 describe("AlertStore.fetch", () => {
+  const authenticatedStore = (filters: string[] = []) => {
+    const store = new AlertStore(filters);
+    const response = EmptyAPIResponse();
+    response.filters = filters.map((text) => ({
+      ...response.filters[0],
+      text,
+    }));
+    response.authentication = { enabled: true, username: "operator" };
+    store.parseAPIResponse(response);
+    return store;
+  };
+
   it("keeps authentication readiness unresolved until an authoritative alerts response", () => {
     const store = new AlertStore([]);
 
@@ -600,15 +612,54 @@ describe("AlertStore.fetch", () => {
       body: JSON.stringify({ error: "Fetch error" }),
     });
 
-    const store = new AlertStore([]);
+    const store = authenticatedStore();
     await expect(
       store.fetch("", false, "", "", false, {}, 5, {}),
     ).resolves.toBeUndefined();
 
     expect(fetchMock.callHistory.calls()).toHaveLength(1);
     expect(store.status.value).toEqual(AlertStoreStatuses.Failure);
-    expect(store.info.version).toBe("unknown");
+    expect(store.info.version).toBe("fakeVersion");
+    expect(store.info.authenticationReady).toBe(true);
+    expect(store.info.authentication.username).toBe("operator");
+  });
+
+  it.each([
+    ["server error", { status: 500, body: JSON.stringify({ error: "server error" }) }],
+    ["network error", { throws: new Error("network error") }],
+    ["parse error", { status: 200, body: "{malformed" }],
+  ])("preserves confirmed authentication after an alerts %s", async (_name, route) => {
+    const store = authenticatedStore();
+    jest.spyOn(console, "trace").mockImplementation(() => {});
+    fetchMock.mockReset();
+    fetchMock.route("*", route);
+
+    await store.fetch("", false, "", "", false, {}, 5, {});
+
+    expect(store.info.authenticationReady).toBe(true);
+    expect(store.info.authentication.username).toBe("operator");
+  });
+
+  it("invalidates authentication after an authoritative 401 response", async () => {
+    const store = authenticatedStore();
+    const authenticatedResponse = EmptyAPIResponse();
+    authenticatedResponse.filters = [];
+    authenticatedResponse.authentication = {
+      enabled: true,
+      username: "operator",
+    };
+    store.parseAPIResponse(authenticatedResponse);
+
+    fetchMock.mockReset();
+    fetchMock.route("*", {
+      status: 401,
+      body: JSON.stringify({ error: "authentication required" }),
+    });
+
+    await store.fetch("", false, "", "", false, {}, 5, {});
+
     expect(store.info.authenticationReady).toBe(false);
+    expect(store.info.authentication.username).toBe("");
   });
 
   it("fetch() handles response that throws an error correctly", async () => {
@@ -620,21 +671,21 @@ describe("AlertStore.fetch", () => {
       throws: new Error("fetch error"),
     });
 
-    const store = new AlertStore([]);
+    const store = authenticatedStore();
     await expect(
       store.fetch("", false, "", "", false, {}, 5, {}),
     ).resolves.toHaveProperty("error");
 
     expect(fetchMock.callHistory.calls()).toHaveLength(10);
     expect(store.status.value).toEqual(AlertStoreStatuses.Failure);
-    expect(store.info.version).toBe("unknown");
+    expect(store.info.version).toBe("fakeVersion");
     // there should be a trace of the error
     expect(consoleSpy).toHaveBeenCalledTimes(1);
   });
 
   it("fetch() retries on failure", async () => {
     jest.spyOn(console, "trace").mockImplementation(() => {});
-    const store = new AlertStore([]);
+    const store = authenticatedStore();
 
     fetchMock.mockReset();
     fetchMock.route("*", {
@@ -705,7 +756,7 @@ describe("AlertStore.fetch", () => {
   });
 
   it("unapplied filters are marked as applied on fetch error", async () => {
-    const store = new AlertStore([]);
+    const store = authenticatedStore();
     store.filters.setFilterValues([NewUnappliedFilter("foo")]);
 
     jest.spyOn(console, "trace").mockImplementation(() => {});
