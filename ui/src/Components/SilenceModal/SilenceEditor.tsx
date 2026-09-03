@@ -422,6 +422,13 @@ const PreviewLabel: FC<{ name: string; value: string }> = ({ name, value }) => (
   </>
 );
 
+const previewLabelTitle = (
+  name: string,
+  value: string,
+  description: string,
+) =>
+  description ? `${name}=${value}\n${description}` : `${name}=${value}`;
+
 function toDateInputValue(d: Date): string {
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, "0");
@@ -2777,11 +2784,13 @@ const SilenceEditor: FC<{
                                   ? "fork-silence-editor__preview-label--matched"
                                   : ""
                             }`}
-                            title={
+                            title={previewLabelTitle(
+                              label.name,
+                              label.value,
                               draftLabelName === label.name
                                 ? draftDescription
-                                : matcherTitle(label.name)
-                            }
+                                : matcherTitle(label.name),
+                            )}
                             aria-label={
                               draftLabelName === label.name
                                 ? draftDescription
@@ -2794,7 +2803,11 @@ const SilenceEditor: FC<{
                       {draftEvidence?.isMissing && draftLabelName ? (
                         <span
                           className={`badge fork-silence-editor__preview-label fork-silence-editor__preview-label--missing fork-silence-editor__missing-label ${draftClass}`}
-                          title={draftDescription}
+                          title={previewLabelTitle(
+                            draftLabelName,
+                            "<missing>",
+                            draftDescription,
+                          )}
                           aria-label={draftDescription}
                         >
                           {draftLabelName}={"<missing>"}
@@ -2806,7 +2819,11 @@ const SilenceEditor: FC<{
                         <span
                           key={`${alert.id}:missing:${name}`}
                           className="badge fork-silence-editor__preview-label fork-silence-editor__preview-label--missing fork-silence-editor__missing-label"
-                          title={matcherTitle(name)}
+                          title={previewLabelTitle(
+                            name,
+                            "<missing>",
+                            matcherTitle(name),
+                          )}
                         >
                           {name}={"<missing>"}
                         </span>
@@ -2827,11 +2844,13 @@ const SilenceEditor: FC<{
                                 ? draftClass
                                 : "fork-silence-editor__preview-label--matched-only"
                             }`}
-                            title={
+                            title={previewLabelTitle(
+                              matched.name,
+                              matched.value,
                               draftLabelName === matched.name
                                 ? draftDescription
-                                : matcherTitle(matched.name)
-                            }
+                                : matcherTitle(matched.name),
+                            )}
                             aria-label={
                               draftLabelName === matched.name
                                 ? draftDescription
@@ -2855,7 +2874,11 @@ const SilenceEditor: FC<{
                       ) ? (
                         <span
                           className={`badge fork-silence-editor__preview-label ${draftClass}`}
-                          title={draftDescription}
+                          title={previewLabelTitle(
+                            draftEvidence.label.name,
+                            draftEvidence.label.value,
+                            draftDescription,
+                          )}
                           aria-label={draftDescription}
                         >
                           <PreviewLabel

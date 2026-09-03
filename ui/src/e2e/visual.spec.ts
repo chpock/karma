@@ -259,6 +259,40 @@ test("SilenceModalEditorPreview", async ({ page }) => {
     expect(scrollOwnership.listOverflows).toBe(true);
     expect(scrollOwnership.listScrollTop).toBeGreaterThan(0);
   }
+  const longLabel = firstPreview
+    .locator(".fork-silence-editor__preview-label")
+    .first();
+  const longLabelLayout = await longLabel.evaluate((label) => {
+    const syntaxLabel = label.querySelector<HTMLElement>(".syntax-label");
+    const syntaxValue = label.querySelector<HTMLElement>(".syntax-value");
+    const labels = label.parentElement;
+    if (!syntaxLabel || !syntaxValue || !labels) {
+      throw new Error("expected preview label contents");
+    }
+    syntaxLabel.textContent = "label".repeat(80);
+    syntaxValue.textContent = "value".repeat(160);
+    const labelRect = label.getBoundingClientRect();
+    const labelsRect = labels.getBoundingClientRect();
+    const styles = getComputedStyle(label);
+    return {
+      overflows: label.scrollWidth > label.clientWidth,
+      fitsInContainer: labelRect.right <= labelsRect.right + 1,
+      maxWidth: styles.maxWidth,
+      minWidth: styles.minWidth,
+      overflow: styles.overflow,
+      textOverflow: styles.textOverflow,
+      whiteSpace: styles.whiteSpace,
+    };
+  });
+  expect(longLabelLayout).toEqual({
+    overflows: true,
+    fitsInContainer: true,
+    maxWidth: "100%",
+    minWidth: "0px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  });
 });
 
 const measureProblem4WarningState = async (

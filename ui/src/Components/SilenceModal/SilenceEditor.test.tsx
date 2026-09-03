@@ -2466,6 +2466,7 @@ describe("<SilenceEditor />", () => {
 
   it("uses dedicated visual roles for preview labels and Cancel", async () => {
     const stores = createStores(false);
+    const longLabelValue = "payments".repeat(100);
     global.fetch = jest.fn(async (input: RequestInfo | URL) => {
       if (!input.toString().includes("/silence-editor/preview")) {
         return new Response(JSON.stringify({ silenceID: "unused" }), {
@@ -2477,7 +2478,7 @@ describe("<SilenceEditor />", () => {
           ...previewAlert("preview-label-colors"),
           labels: [
             { name: "alertname", value: "preview-label-colors" },
-            { name: "service", value: "payments" },
+            { name: "service", value: longLabelValue },
           ],
           matchedLabels: [
             { name: "alertname", value: "preview-label-colors" },
@@ -2491,11 +2492,13 @@ describe("<SilenceEditor />", () => {
     renderEditor(stores);
 
     await waitFor(() =>
-      expect(screen.getByText("payments", { selector: ".syntax-value" })).toBeInTheDocument(),
+      expect(
+        screen.getByText(longLabelValue, { selector: ".syntax-value" }),
+      ).toBeInTheDocument(),
     );
 
     const ordinaryLabel = screen
-      .getByText("payments", { selector: ".syntax-value" })
+      .getByText(longLabelValue, { selector: ".syntax-value" })
       .closest(".fork-silence-editor__preview-label");
     if (ordinaryLabel === null) {
       throw new Error("expected preview label");
@@ -2510,7 +2513,11 @@ describe("<SilenceEditor />", () => {
       "=",
     );
     expect(ordinaryLabel.querySelector(".syntax-value")).toHaveTextContent(
-      "payments",
+      longLabelValue,
+    );
+    expect(ordinaryLabel).toHaveAttribute(
+      "title",
+      `service=${longLabelValue}`,
     );
     expect(screen.getByText("preview-label-colors")).toHaveClass(
       "fork-silence-editor__preview-alertname--matched",

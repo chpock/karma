@@ -450,7 +450,11 @@
   color: var(--bs-body-color) !important;
   background: var(--bs-tertiary-bg);
   font: 0.7rem/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fork-silence-editor__preview-label--matched {
