@@ -2,8 +2,9 @@ name: Maintenance
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 12 * * 2"
+  # TODO: Adapt this workflow for this fork before re-enabling automatic runs.
+  # schedule:
+  #   - cron: "0 12 * * 2"
 
 jobs:
   npm-upgrades:
